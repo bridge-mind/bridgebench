@@ -1,14 +1,14 @@
 /**
  * Builds the snapshot (v3) from journal results: dedupe to the latest result
- * per (model, task), aggregate per-model summaries across the five scoring
- * dimensions, and rank the leaderboard by harness score. Every snapshot is
- * stamped with its season and engine pins — results from different seasons
- * are never mixed.
+ * per (model, task) and aggregate per-model ARENA ELIGIBILITY. There is no
+ * machine ranking — grading happens through community voting (Elo) on
+ * bridgebench.ai, and engine snapshots carry `elo: null` placeholders the
+ * site fills from the voting API. Every snapshot is season-stamped; results
+ * from different seasons are never mixed.
  */
 
 import { SEASON, THREE_VERSION } from '../../config.js';
 import {
-  SCORING_WEIGHTS,
   UI_TASK_CATEGORIES,
   type UiBenchLeaderboardEntry,
   type UiBenchModelSummary,
@@ -50,8 +50,14 @@ function dedupeResults(results: UiBenchTaskResult[]): UiBenchTaskResult[] {
 }
 
 export function aggregateUiBenchModel(results: UiBenchTaskResult[]): UiBenchModelSummary {
-  const successfulTasks = results.filter((r) => r.success).length;
   const totalTasks = results.length;
+  const qualified = results.filter((r) => r.qualification.qualified);
+  const fullyInteractive = results.filter(
+    (r) =>
+      r.qualification.diagnostics.probesTotal !== null &&
+      r.qualification.diagnostics.probesTotal > 0 &&
+      r.qualification.diagnostics.probesPassed === r.qualification.diagnostics.probesTotal,
+  );
 
   const byCategory = Object.fromEntries(
     UI_TASK_CATEGORIES.map((category) => {
@@ -59,8 +65,7 @@ export function aggregateUiBenchModel(results: UiBenchTaskResult[]): UiBenchMode
       return [
         category,
         {
-          averageScore:
-            catResults.length === 0 ? 0 : round1(avg(catResults.map((r) => r.scores.total))),
+          qualified: catResults.filter((r) => r.qualification.qualified).length,
           tasks: catResults.length,
         },
       ];
@@ -71,16 +76,11 @@ export function aggregateUiBenchModel(results: UiBenchTaskResult[]): UiBenchMode
     modelId: results[0]?.modelId ?? '',
     displayName: results[0]?.displayName ?? '',
     totalTasks,
-    successfulTasks,
-    failedTasks: totalTasks - successfulTasks,
-    successRate: totalTasks === 0 ? 0 : round1((successfulTasks / totalTasks) * 100),
-    harnessScore: totalTasks === 0 ? 0 : round1(avg(results.map((r) => r.scores.total))),
-    avgRenderIntegrity: round1(avg(results.map((r) => r.scores.renderIntegrity))),
-    avgMotion: round1(avg(results.map((r) => r.scores.motion))),
-    avgInteraction: round1(avg(results.map((r) => r.scores.interaction))),
-    avgDeterminism: round1(avg(results.map((r) => r.scores.determinism))),
-    avgSpecAdherence: round1(avg(results.map((r) => r.scores.specAdherence))),
-    interactionPartial: results.some((r) => r.scores.interactionPartial),
+    qualifiedTasks: qualified.length,
+    disqualifiedTasks: totalTasks - qualified.length,
+    qualifiedRate: totalTasks === 0 ? 0 : round1((qualified.length / totalTasks) * 100),
+    fullyInteractiveTasks: fullyInteractive.length,
+    probesPartial: results.some((r) => r.qualification.diagnostics.probesPartial),
     totalCostUsd: Number(results.reduce((sum, r) => sum + r.costUsd, 0).toFixed(6)),
     averageProviderResponseMs:
       totalTasks === 0 ? 0 : round1(avg(results.map((r) => r.providerResponseMs))),
@@ -109,20 +109,16 @@ export function buildUiBenchSnapshot(
     results: modelResults,
   }));
 
-  const leaderboard: UiBenchLeaderboardEntry[] = summaries
-    .sort((left, right) => right.summary.harnessScore - left.summary.harnessScore)
-    .map((entry, index) => ({
-      rank: index + 1,
+  // Alphabetical roster — deliberately NOT ranked. Rank = community Elo.
+  const roster: UiBenchLeaderboardEntry[] = summaries
+    .sort((left, right) => left.summary.displayName.localeCompare(right.summary.displayName))
+    .map((entry) => ({
       modelId: entry.modelId,
       displayName: entry.summary.displayName,
-      harnessScore: entry.summary.harnessScore,
-      renderIntegrityScore: entry.summary.avgRenderIntegrity,
-      motionScore: entry.summary.avgMotion,
-      interactionScore: entry.summary.avgInteraction,
-      determinismScore: entry.summary.avgDeterminism,
-      specAdherenceScore: entry.summary.avgSpecAdherence,
+      qualifiedTasks: entry.summary.qualifiedTasks,
       totalTasks: entry.summary.totalTasks,
-      successRate: entry.summary.successRate,
+      qualifiedRate: entry.summary.qualifiedRate,
+      fullyInteractiveTasks: entry.summary.fullyInteractiveTasks,
       elo: null,
     }));
 
@@ -139,14 +135,14 @@ export function buildUiBenchSnapshot(
     engine: {
       engineVersion: ENGINE_VERSION,
       threeVersion: THREE_VERSION,
-      weights: SCORING_WEIGHTS,
+      grading: 'community-elo',
     },
     config: {
       totalTasks: taskIds.length,
       taskIds,
       modelIds,
     },
-    leaderboard,
+    roster,
     models: Object.fromEntries(
       summaries.map((entry) => [
         entry.modelId,

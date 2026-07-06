@@ -54,7 +54,7 @@ npm run providers
 
 ```
 results/ui/journal.jsonl                    append-only source of truth
-results/ui/snapshot.json                    derived leaderboard snapshot (v3)
+results/ui/snapshot.json                    derived roster snapshot (v3)
 results/ui/artifacts/<task>/<slug>/<run>/   artifact.html, normalized.html,
                                             raw.txt, metadata.json, *.png
 snapshots/season-1/ui-bench-snapshot.json   committed season snapshot

@@ -28,8 +28,11 @@ runner → extractor → normalizer → validator → artifact store
   permitted external reference; only `three` / `three/addons/…` module
   specifiers; harness globals present.
 - **evaluator** (`evaluator/`) — see below.
-- **score** (`score.ts`) — five dimensions, weights 25/15/30/15/15, hard-fail
-  gates to zero. Community Elo (Phase 2) is a separate axis, never folded in.
+- **qualification** (`qualification.ts`) — objective pass/fail arena
+  eligibility (runs, self-contained, contract followed, non-blank, offline).
+  The harness never grades quality: models are RANKED by blind A/B community
+  voting (Elo) on bridgebench.ai. Everything else measured (WebGL, FPS,
+  animation, probes, determinism) is an informational badge.
 - **stores** — append-only JSONL journal (crash-safe, `--resume`), derived
   snapshot rebuilt atomically, season-stamped.
 

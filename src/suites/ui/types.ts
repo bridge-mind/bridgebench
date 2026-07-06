@@ -264,29 +264,35 @@ export interface UiArtifactEvaluationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Scoring (v3: five dimensions, harness-only — community Elo is a separate
-// axis and never folds into these numbers)
+// Qualification (v3): the harness NEVER grades quality — builders do, via
+// blind A/B community voting (Elo) on bridgebench.ai. The harness only
+// decides arena eligibility (objective pass/fail) and records informational
+// diagnostics shown as badges next to artifacts.
 // ---------------------------------------------------------------------------
 
-export const SCORING_WEIGHTS = {
-  renderIntegrity: 25,
-  motion: 15,
-  interaction: 30,
-  determinism: 15,
-  specAdherence: 15,
-} as const;
+export interface UiDiagnostics {
+  webglActive: 'webgl2' | 'webgl' | '2d' | null;
+  /** Task declared requiresWebGL and a GL context was actually created. */
+  webglRequirementMet: boolean;
+  fps: number | null;
+  animationDetected: boolean;
+  controlsDeclared: number;
+  controlsFound: number;
+  viewportFill: boolean;
+  /** reset(seed) replay matched under virtual time (null = not run). */
+  determinismOk: boolean | null;
+  /** Hidden interaction probes (null = overlay unavailable on this run). */
+  probesPassed: number | null;
+  probesTotal: number | null;
+  probesPartial: boolean;
+}
 
-export type ScoreDimension = keyof typeof SCORING_WEIGHTS;
-
-export interface UiScoreBreakdown {
-  renderIntegrity: number;
-  motion: number;
-  interaction: number;
-  determinism: number;
-  specAdherence: number;
-  total: number;
-  /** True when no private probes were available (public-only run). */
-  interactionPartial: boolean;
+export interface UiQualification {
+  /** Eligible for the community voting arena. */
+  qualified: boolean;
+  /** Objective disqualification reasons (empty when qualified). */
+  reasons: string[];
+  diagnostics: UiDiagnostics;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +305,7 @@ export interface UiBenchTaskResult {
   taskId: string;
   season: number;
   category: UiTaskCategory;
-  scores: UiScoreBreakdown;
+  qualification: UiQualification;
   validation: UiArtifactValidationResult;
   evaluation: Omit<UiArtifactEvaluationResult, 'consoleSample' | 'screenshots' | 'browser'> | null;
   providerResponseMs: number;
@@ -324,34 +330,29 @@ export interface UiBenchModelSummary {
   modelId: string;
   displayName: string;
   totalTasks: number;
-  successfulTasks: number;
-  failedTasks: number;
-  successRate: number;
-  harnessScore: number;
-  avgRenderIntegrity: number;
-  avgMotion: number;
-  avgInteraction: number;
-  avgDeterminism: number;
-  avgSpecAdherence: number;
-  interactionPartial: boolean;
+  qualifiedTasks: number;
+  disqualifiedTasks: number;
+  qualifiedRate: number;
+  /** Tasks where every hidden probe passed (badge, not a grade). */
+  fullyInteractiveTasks: number;
+  probesPartial: boolean;
   totalCostUsd: number;
   averageProviderResponseMs: number;
-  byCategory: Record<string, { averageScore: number; tasks: number }>;
+  byCategory: Record<string, { qualified: number; tasks: number }>;
 }
 
+/**
+ * The arena roster. Rank/grades come from community Elo (bridgebench-api);
+ * the engine only reports eligibility. `elo` stays null in engine snapshots
+ * and is filled by the site from the voting API.
+ */
 export interface UiBenchLeaderboardEntry {
-  rank: number;
   modelId: string;
   displayName: string;
-  harnessScore: number;
-  renderIntegrityScore: number;
-  motionScore: number;
-  interactionScore: number;
-  determinismScore: number;
-  specAdherenceScore: number;
+  qualifiedTasks: number;
   totalTasks: number;
-  successRate: number;
-  /** Populated by the Phase-2 community voting pipeline; null until then. */
+  qualifiedRate: number;
+  fullyInteractiveTasks: number;
   elo: number | null;
 }
 
@@ -368,14 +369,15 @@ export interface UiBenchSnapshot {
   engine: {
     engineVersion: string;
     threeVersion: string;
-    weights: typeof SCORING_WEIGHTS;
+    /** Grading is community voting — the engine ships no quality weights. */
+    grading: 'community-elo';
   };
   config: {
     totalTasks: number;
     taskIds: string[];
     modelIds: string[];
   };
-  leaderboard: UiBenchLeaderboardEntry[];
+  roster: UiBenchLeaderboardEntry[];
   models: Record<
     string,
     {

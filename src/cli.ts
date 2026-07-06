@@ -28,7 +28,7 @@ import { UiArtifactExtractor } from './suites/ui/extractor.js';
 import { UiArtifactNormalizer } from './suites/ui/normalizer.js';
 import { UiBenchResultStore } from './suites/ui/result-store.js';
 import { UiModelRunner } from './suites/ui/runner.js';
-import { calculateUiScore } from './suites/ui/score.js';
+import { assessQualification } from './suites/ui/qualification.js';
 import { UiArtifactStore } from './suites/ui/store.js';
 import { UiTaskLoader } from './suites/ui/task-loader.js';
 import { UiArtifactValidator } from './suites/ui/validator.js';
@@ -88,7 +88,7 @@ async function runUiBench(options: {
   if (!loader.hasPrivateOverlay()) {
     console.log(
       chalk.yellow(
-        '⚠ BRIDGEBENCH_PRIVATE_DIR not set — hidden interaction probes unavailable; interaction scores will be marked PARTIAL.',
+        '⚠ BRIDGEBENCH_PRIVATE_DIR not set — hidden interaction probes unavailable; probe diagnostics will be marked PARTIAL.',
       ),
     );
   }
@@ -154,11 +154,13 @@ async function runUiBench(options: {
             browser,
             executablePath,
           });
-          const scoreText = result.success
-            ? chalk.green(`${result.scores.total}`)
-            : chalk.red(`FAIL (${result.errorType ?? 'low score'})`);
-          const partial = result.scores.interactionPartial ? chalk.yellow(' [partial]') : '';
-          console.log(`${scoreText}${partial}`);
+          const statusText = result.qualification.qualified
+            ? chalk.green('QUALIFIED')
+            : chalk.red(`DISQUALIFIED (${result.qualification.reasons[0] ?? result.errorType ?? 'unknown'})`);
+          const partial = result.qualification.diagnostics.probesPartial
+            ? chalk.yellow(' [probes partial]')
+            : '';
+          console.log(`${statusText}${partial}`);
         } catch (error) {
           console.log(chalk.red(`runner error: ${error instanceof Error ? error.message : error}`));
           result = {
@@ -167,14 +169,24 @@ async function runUiBench(options: {
             taskId: task.id,
             season: task.season,
             category: task.category,
-            scores: {
-              renderIntegrity: 0,
-              motion: 0,
-              interaction: 0,
-              determinism: 0,
-              specAdherence: 0,
-              total: 0,
-              interactionPartial: true,
+            qualification: {
+              qualified: false,
+              reasons: [
+                `runner error: ${error instanceof Error ? error.message : String(error)}`,
+              ],
+              diagnostics: {
+                webglActive: null,
+                webglRequirementMet: false,
+                fps: null,
+                animationDetected: false,
+                controlsDeclared: task.controls.length,
+                controlsFound: 0,
+                viewportFill: false,
+                determinismOk: null,
+                probesPassed: null,
+                probesTotal: null,
+                probesPartial: true,
+              },
             },
             validation: {
               valid: false,
@@ -223,10 +235,10 @@ async function runUiBench(options: {
   );
   store.writeSnapshotCopy(snapshot, SEASON_SNAPSHOT_PATH);
 
-  console.log(chalk.bold('\n━━ UI Bench Leaderboard (harness score) ━━'));
-  for (const entry of snapshot.leaderboard.slice(0, 15)) {
+  console.log(chalk.bold('\n━━ UI Bench Arena Roster (grading = community voting) ━━'));
+  for (const entry of snapshot.roster.slice(0, 20)) {
     console.log(
-      `  ${String(entry.rank).padStart(2)}  ${entry.displayName.padEnd(32)} ${entry.harnessScore}`,
+      `  ${entry.displayName.padEnd(32)} ${entry.qualifiedTasks}/${entry.totalTasks} qualified`,
     );
   }
   console.log(chalk.dim(`\nSnapshot: ${UI_SNAPSHOT_PATH}\nSeason copy: ${SEASON_SNAPSHOT_PATH}`));
@@ -279,7 +291,7 @@ async function runSingleTask(input: {
     });
   }
 
-  const scores = calculateUiScore({ task, validation, evaluation });
+  const qualification = assessQualification({ task, validation, evaluation });
 
   return {
     modelId: input.modelId,
@@ -287,14 +299,14 @@ async function runSingleTask(input: {
     taskId: task.id,
     season: task.season,
     category: task.category,
-    scores,
+    qualification,
     validation,
     evaluation: trimEvaluation(evaluation),
     providerResponseMs: response.providerResponseMs,
     inputTokens: response.inputTokens,
     outputTokens: response.outputTokens,
     costUsd: response.costUsd,
-    success: validation.valid && (evaluation?.ok ?? false) && scores.total > 0,
+    success: qualification.qualified,
     errorType: !validation.valid
       ? 'validation_error'
       : evaluation && !evaluation.ok
@@ -351,7 +363,7 @@ async function evaluateArtifactFile(
     }
   }
 
-  const scores = calculateUiScore({ task, validation, evaluation });
+  const qualification = assessQualification({ task, validation, evaluation });
 
   if (evaluation) {
     console.log(chalk.bold('\nEvaluation:'));
@@ -371,11 +383,22 @@ async function evaluateArtifactFile(
     console.log(chalk.dim(`  screenshots: ${outputDir}`));
   }
 
-  console.log(chalk.bold('\nScores:'));
+  const d = qualification.diagnostics;
+  console.log(chalk.bold('\nArena qualification:'));
+  if (qualification.qualified) {
+    console.log(chalk.green('  QUALIFIED — eligible for community voting'));
+  } else {
+    console.log(chalk.red('  DISQUALIFIED'));
+    for (const reason of qualification.reasons) console.log(chalk.red(`   ✗ ${reason}`));
+  }
+  console.log(chalk.bold('\nDiagnostics (badges, not grades):'));
   console.log(
-    `  render ${scores.renderIntegrity} | motion ${scores.motion} | interaction ${scores.interaction}${scores.interactionPartial ? ' (partial)' : ''} | determinism ${scores.determinism} | spec ${scores.specAdherence}`,
+    `  webgl: ${d.webglActive ?? 'none'}${d.webglRequirementMet ? '' : chalk.yellow(' (task expected WebGL)')} | fps: ${d.fps ?? 'n/a'} | animated: ${d.animationDetected}`,
   );
-  console.log(chalk.bold(`  TOTAL: ${scores.total}`));
+  console.log(
+    `  controls: ${d.controlsFound}/${d.controlsDeclared} | viewport fill: ${d.viewportFill} | determinism: ${d.determinismOk ?? 'n/a'} | probes: ${d.probesTotal === null ? 'unavailable (partial)' : `${d.probesPassed}/${d.probesTotal}`}`,
+  );
+  console.log(chalk.dim('\n  Grading happens via blind A/B community voting on bridgebench.ai.'));
 }
 
 // ---------------------------------------------------------------------------

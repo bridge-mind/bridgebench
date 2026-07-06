@@ -46,7 +46,7 @@ Rules of thumb:
 id: s1-lava-lamp-redux
 probes:
   - id: heat-slider-drives-motion
-    weight: 2                   # share of the interaction dimension
+    weight: 2                   # relative importance in the probes-passed badge
     steps:                      # real input, executed in order
       - { action: reset, seed: 7 }
       - { action: setSlider, selector: "[data-bb-control='heat-slider']", fraction: 0 }
@@ -70,8 +70,9 @@ Probe design principles:
 - **Always include a `state-contract` probe**: `getState()` must be
   JSON-serializable and time-stable (`stateUnchangedVs` after a 500ms wait).
   The artifact contract promises both.
-- **Weight what matters.** The interaction dimension is the weighted pass
-  rate; give the task's signature interaction the highest weight.
+- **Weight what matters.** Probe results surface as a "verified interactive"
+  badge beside the artifact (they inform voters, never the ranking); give the
+  task's signature interaction the highest weight.
 - Probes run sequentially on the SAME page — start with `reset` when a probe
   needs a known state.
 
@@ -80,7 +81,8 @@ Probe design principles:
 1. Public YAML parses: `npm run ui -- tasks`.
 2. Hand-write a quick reference artifact and grade it:
    `npm run ui -- evaluate my-reference.html -t <id>` — the reference should
-   score ≥ 85 with probes on; a deliberately broken variant should hard-fail.
+   QUALIFY with all probes passing; a deliberately broken variant should be
+   disqualified.
 3. Probe thresholds hold under SwiftShader (slow frames): generous waits,
    conservative pixel thresholds.
 4. No probe details leak into the public prompt.

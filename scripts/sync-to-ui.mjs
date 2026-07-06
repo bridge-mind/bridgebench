@@ -101,13 +101,13 @@ writeFileSync(
       suite: snapshot.suite,
       season: snapshot.season,
       generatedAt: snapshot.generatedAt,
-      leaderboard: snapshot.leaderboard,
+      roster: snapshot.roster,
     },
     null,
     2,
   ),
 );
 
-console.log(`snapshot: ${snapshot.leaderboard?.length ?? 0} models → src/data/ui-bench-snapshot.json (+ lite)`);
+console.log(`snapshot: ${snapshot.roster?.length ?? 0} models → src/data/ui-bench-snapshot.json (+ lite)`);
 console.log(`artifacts: ${copiedArtifacts} copied${missingArtifacts ? `, ${missingArtifacts} missing on disk` : ''}`);
 console.log('Done. Remember: keep this on a bridgebench-ui feature branch until the v3 data layer lands.');

@@ -58,15 +58,21 @@ Season 1 opens with the suite that made BridgeBench famous — the lava lamp tes
 
 Lava Lamp Redux · Aurora Over a Frozen Lake · Galaxy Forge · Synthwave Horizon · Deep-Sea Jellyfish Ballet · Clockwork Orrery · Voxel Weather Diorama · Kinetic Typography · Rubik's Playground · Bioluminescent Terrarium
 
-Every artifact is one self-contained HTML file whose only external reference is the pinned, same-origin three.js import map. Playwright loads it on a network-blocked synthetic origin (SwiftShader software WebGL — pixel-reproducible), then scores five dimensions:
+Every artifact is one self-contained HTML file whose only external reference is the pinned, same-origin three.js import map.
 
-| Dimension | Weight | How it's measured |
-|---|---|---|
-| Render integrity | 25 | Loads clean: no crashes, real WebGL context, no blank frames |
-| Motion & liveness | 15 | Composited-screenshot pixel diffs + rAF frame sampling |
-| Interaction | 30 | Hidden probes drive real clicks, drags, and sliders, then assert observable effects |
-| Determinism & contract | 15 | `reset(seed)` replayed under virtual time must match pixel-for-pixel |
-| Spec adherence | 15 | Declared controls exist, viewport fills, harness API behaves |
+**Graded by builders, not bots.** No AI and no scoring formula judges the output. Models are ranked by **blind A/B community voting** on [bridgebench.ai](https://bridgebench.ai): two artifacts for the same task, models hidden, builders pick the better one, Elo does the math. The vote log is public and the ratings replay from it.
+
+The harness's only judgment is objective **arena qualification** — an artifact enters the vote pool if it:
+
+| Gate | Check |
+|---|---|
+| Self-contained | Static validation: pinned vendor import map is the only external reference |
+| Runs | Loads without an uncaught startup error |
+| Follows the contract | Both BridgeBench harness globals appear |
+| Shows something | First frame isn't blank |
+| Stays offline | Zero non-vendor network attempts (every request is intercepted) |
+
+Everything else the harness measures — WebGL context, FPS, animation, control coverage, `reset(seed)` determinism replay, hidden interaction probes — is recorded as **informational badges** beside the artifact, so voters can see whether the controls actually work. Badges never touch the ranking.
 
 Docs: [architecture](docs/architecture.md) · [running](docs/running.md) · [task authoring](docs/task-authoring.md) · [season policy](docs/season-policy.md)
 

@@ -14,7 +14,7 @@ import type { Browser } from 'playwright-core';
 import { REPO_ROOT } from '../../config.js';
 import { UiArtifactEvaluator, launchEvalBrowser, resolveChromiumExecutablePath } from './evaluator/index.js';
 import { UiArtifactNormalizer } from './normalizer.js';
-import { calculateUiScore } from './score.js';
+import { assessQualification } from './qualification.js';
 import { UiArtifactValidator } from './validator.js';
 import type { UiBenchFullTask, UiProbe } from './types.js';
 
@@ -153,9 +153,12 @@ describe.skipIf(!chromiumAvailable)('UiArtifactEvaluator (integration)', () => {
     expect(evaluation.determinism.replayChangedPct!).toBeLessThan(1.5);
     expect(evaluation.determinism.statesMatch).toBe(true);
 
-    const scores = calculateUiScore({ task, validation, evaluation });
-    expect(scores.total).toBeGreaterThan(85);
-    expect(scores.interactionPartial).toBe(false);
+    const qualification = assessQualification({ task, validation, evaluation });
+    expect(qualification.qualified).toBe(true);
+    expect(qualification.reasons).toEqual([]);
+    expect(qualification.diagnostics.determinismOk).toBe(true);
+    expect(qualification.diagnostics.probesPartial).toBe(false);
+    expect(qualification.diagnostics.probesPassed).toBe(qualification.diagnostics.probesTotal);
   }, 180_000);
 
   it('golden-broken: hard-fails (startup page error + blank frame)', async () => {
@@ -174,8 +177,9 @@ describe.skipIf(!chromiumAvailable)('UiArtifactEvaluator (integration)', () => {
     expect(evaluation.pageErrors.length).toBeGreaterThan(0);
     expect(evaluation.blankFrame).toBe(true);
 
-    const scores = calculateUiScore({ task, validation, evaluation });
-    expect(scores.total).toBe(0);
+    const qualification = assessQualification({ task, validation, evaluation });
+    expect(qualification.qualified).toBe(false);
+    expect(qualification.reasons.length).toBeGreaterThan(0);
   }, 120_000);
 
   it('golden-cheating: never reaches the browser (validator rejects)', () => {
@@ -187,7 +191,7 @@ describe.skipIf(!chromiumAvailable)('UiArtifactEvaluator (integration)', () => {
     const validation = validator.validateHtml(html, task);
     expect(validation.valid).toBe(false);
 
-    const scores = calculateUiScore({ task, validation, evaluation: null });
-    expect(scores.total).toBe(0);
+    const qualification = assessQualification({ task, validation, evaluation: null });
+    expect(qualification.qualified).toBe(false);
   });
 });
