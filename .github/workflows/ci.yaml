@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contamination-guard:
+    name: No hidden tests in the public repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Active-season task files must not contain probes
+        run: |
+          set -euo pipefail
+          if grep -rln '^probes:' tasks/current/ 2>/dev/null; then
+            echo '::error::probes found in tasks/current/ — hidden tests belong in bridgebench-private'
+            exit 1
+          fi
+          if find . -path ./node_modules -prune -o -name '*.probes.yaml' -print | grep -v '^./tasks/retired/' | grep .; then
+            echo '::error::*.probes.yaml outside tasks/retired/ — hidden tests belong in bridgebench-private'
+            exit 1
+          fi
+          echo 'clean'
+
+  test:
+    name: Typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # ubuntu-latest ships Google Chrome; the browser integration tests run
+      # against it (SwiftShader software WebGL) and auto-skip if absent.
+      - run: npm test

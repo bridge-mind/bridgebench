@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Golden Cheating — loads three from a CDN</title>
+<!-- Intentional contract violation: this fixture exists so tests can assert
+     the validator hard-rejects external scripts. It is never executed; the
+     evaluator additionally aborts all non-vendor network requests. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.min.js"></script>
+<style>html, body { width: 100%; height: 100%; background: #000; }</style>
+</head>
+<body>
+<script>
+  window.BridgeBenchTaskManifest = {
+    benchmarkVersion: "3.0",
+    taskId: "s1-lava-lamp-redux",
+    title: "Lava Lamp Redux",
+    category: "simulation",
+    controls: ["heat-slider", "color-cycle"],
+    deterministic: true,
+    preferredViewport: { width: 1280, height: 800 }
+  };
+  window.BridgeBenchTaskApi = {
+    init() {}, reset() {}, getState() { return {}; }, getScore() { return null; }, destroy() {}
+  };
+</script>
+</body>
+</html>

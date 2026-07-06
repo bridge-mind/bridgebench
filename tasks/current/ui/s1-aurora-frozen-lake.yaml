@@ -1,0 +1,34 @@
+id: s1-aurora-frozen-lake
+season: 1
+title: Aurora Over a Frozen Lake
+category: simulation
+requiresWebGL: true
+viewport: { width: 1280, height: 800 }
+libraries:
+  three: "0.182.0"
+controls:
+  - id: aurora-intensity
+    kind: slider
+    label: Aurora Intensity
+    behavior: "Scales the aurora's brightness and activity: near 0 the sky is almost dark with faint stars, at maximum the curtains blaze and ripple energetically. The change must be visible within two seconds."
+screenshots:
+  - { at: 0, name: hero }
+  - { at: 2500, name: motion }
+prompt: |
+  A midnight arctic scene: shimmering aurora borealis curtains dance above a
+  frozen lake that mirrors them.
+
+  Build the aurora with custom shaders — layered, slowly undulating curtains
+  of green and violet light with soft vertical rays, driven by noise so the
+  motion never visibly loops. Fill the sky behind it with a crisp starfield
+  (procedural — no textures). Below, an ice plane reflects the aurora and
+  stars; a slightly imperfect, wind-polished reflection reads better than a
+  perfect mirror. Add a suggestion of snow-covered terrain or treeline in
+  silhouette at the horizon for depth.
+
+  The scene should feel vast, cold, and quiet. Subtle camera drift is
+  welcome; keep the horizon stable. All light in the scene should plausibly
+  come from the sky.
+
+  Build the required intensity slider as a minimal overlay control. Make it
+  breathtaking.

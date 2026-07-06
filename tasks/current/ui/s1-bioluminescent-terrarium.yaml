@@ -1,0 +1,39 @@
+id: s1-bioluminescent-terrarium
+season: 1
+title: Bioluminescent Terrarium
+category: simulation
+requiresWebGL: true
+viewport: { width: 1280, height: 800 }
+libraries:
+  three: "0.182.0"
+controls:
+  - id: replant
+    kind: button
+    label: Replant
+    behavior: "Clears the jar and regrows a new procedural garden from a fresh seed — plant shapes, placements, and glow colors must visibly differ between plantings."
+screenshots:
+  - { at: 0, name: hero }
+  - { at: 4000, name: growth-early }
+  - { at: 9000, name: growth-late }
+prompt: |
+  A sealed glass jar containing an alien garden that grows before your eyes.
+
+  Inside a softly reflective glass vessel (a belly jar or corked bottle) on a
+  bed of dark soil, procedural flora sprout and grow over roughly the first
+  20–30 seconds: curling stems that extend segment by segment, unfurling
+  leaves, and blooming caps or orbs at the tips. Grow at least three distinct
+  plant species with different silhouettes and growth rhythms. Growth should
+  be organic — eased, slightly staggered, never linear or simultaneous.
+
+  Everything glows: stems pulse faintly, blooms shine in cyan / violet /
+  amber, and a handful of firefly motes drift between the plants, leaving
+  the faintest trails. The plants and motes are the scene's only light
+  sources; let them illuminate the soil and catch on the glass with fresnel
+  highlights. Outside the jar: a dark tabletop and a barely-lit room.
+
+  A slow orbital camera drift (a few degrees each way) keeps the scene
+  alive. After the garden matures it keeps living — leaves sway, glow
+  pulses, motes wander.
+
+  Build the required Replant button as a minimal overlay control. Make it
+  feel like a tiny captured ecosystem.

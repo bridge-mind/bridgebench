@@ -1,0 +1,45 @@
+{
+  "name": "bridgebench",
+  "version": "3.0.0-alpha.0",
+  "description": "The world's #1 vibe coding benchmark — real workflows, direct from every provider's API, rebuilt every 90 days.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bridge-mind/bridgebench.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "ui": "tsx src/cli.ts ui",
+    "providers": "tsx src/cli.ts providers",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vendor:three": "node scripts/vendor-three.mjs",
+    "sync:ui": "node scripts/sync-to-ui.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "openai": "^4.76.0",
+    "pixelmatch": "^6.0.0",
+    "playwright-core": "^1.58.2",
+    "pngjs": "^7.0.0",
+    "yaml": "^2.6.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
+    "three": "^0.182.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

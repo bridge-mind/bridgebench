@@ -1,0 +1,37 @@
+id: s1-jellyfish-ballet
+season: 1
+title: Deep-Sea Jellyfish Ballet
+category: interactive
+requiresWebGL: true
+viewport: { width: 1280, height: 800 }
+libraries:
+  three: "0.182.0"
+controls:
+  - id: scene-canvas
+    kind: canvas
+    label: Ocean
+    behavior: "Clicking anywhere in the water spawns a new jellyfish at that position (up to a sane cap), which drifts into the ballet. Set data-bb-control=\"scene-canvas\" on the rendering canvas element."
+screenshots:
+  - { at: 0, name: hero }
+  - { at: 2500, name: motion }
+prompt: |
+  A bioluminescent jellyfish ballet in the deep ocean.
+
+  Start with 4–6 translucent jellyfish drifting at different depths. Each has
+  a soft dome-shaped bell that pulses rhythmically — deform the bell geometry
+  (vertex displacement in a shader, or animated vertex positions) so it
+  contracts and relaxes like a heartbeat, propelling the jellyfish gently
+  upward before it sinks again. Long tentacles trail beneath, swaying with
+  the motion — a chain of segments with simple follow-through physics reads
+  beautifully.
+
+  The jellyfish glow from within (soft cyan, magenta, or amber — vary per
+  individual), and their light scatters into the dark water. Add drifting
+  marine-snow particles and faint volumetric god rays from far above for
+  depth. The water is nearly black at the bottom, deep blue toward the top.
+
+  Every jellyfish pulses on its own rhythm; the group should never sync into
+  lockstep. Clicking the water spawns a new jellyfish at the click point.
+
+  No overlay chrome beyond what the task requires — let the ocean fill the
+  frame. Make it serene and mesmerizing.

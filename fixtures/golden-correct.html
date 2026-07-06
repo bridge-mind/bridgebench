@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Golden Correct — Lava Lamp Fixture</title>
+<script type="importmap">
+{"imports":{"three":"/vendor/three@0.182.0/three.module.min.js","three/addons/":"/vendor/three@0.182.0/addons/"}}
+</script>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+  #ui { position: fixed; top: 12px; left: 12px; z-index: 10; color: #eee;
+        font: 12px system-ui, sans-serif; display: flex; gap: 10px; align-items: center; }
+  #ui button { padding: 4px 10px; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <label>Heat <input type="range" min="0" max="100" value="35" data-bb-control="heat-slider"></label>
+  <button data-bb-control="color-cycle">Shift Palette</button>
+</div>
+<script>
+  // Harness globals exist immediately; the module below fills in the impl.
+  window.__impl = null;
+  window.BridgeBenchTaskManifest = {
+    benchmarkVersion: "3.0",
+    taskId: "s1-lava-lamp-redux",
+    title: "Lava Lamp Redux",
+    category: "simulation",
+    controls: ["heat-slider", "color-cycle"],
+    deterministic: true,
+    preferredViewport: { width: 1280, height: 800 }
+  };
+  window.BridgeBenchTaskApi = {
+    init() {},
+    reset(seed) { if (window.__impl) window.__impl.reset(seed); },
+    getState() { return window.__impl ? window.__impl.getState() : null; },
+    getScore() { return null; },
+    destroy() { if (window.__impl) window.__impl.destroy(); }
+  };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+renderer.domElement.setAttribute('data-bb-control', 'scene-canvas');
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0, 8);
+new OrbitControls(camera, renderer.domElement);
+
+const PALETTES = [[0xff4400, 0xffaa00], [0x00ff88, 0x00ffee], [0xaa00ff, 0xff00aa]];
+const state = { seed: 1, heat: 35, palette: 0, elapsed: 0 };
+let blobs = [];
+let running = true;
+
+function build(seed) {
+  for (const blob of blobs) scene.remove(blob.mesh);
+  blobs = [];
+  const rand = mulberry32(seed);
+  for (let i = 0; i < 8; i++) {
+    const geo = new THREE.SphereGeometry(0.5 + rand() * 0.4, 16, 16);
+    const mat = new THREE.MeshBasicMaterial({ color: PALETTES[state.palette][i % 2] });
+    const mesh = new THREE.Mesh(geo, mat);
+    const phase = rand() * Math.PI * 2;
+    const x = (rand() - 0.5) * 3;
+    mesh.position.set(x, Math.sin(phase) * 2.4, 0);
+    scene.add(mesh);
+    blobs.push({ mesh, phase, x });
+  }
+}
+
+function applyPalette() {
+  blobs.forEach((blob, i) => blob.mesh.material.color.setHex(PALETTES[state.palette][i % 2]));
+}
+
+window.__impl = {
+  reset(seed) { state.seed = (seed >>> 0) || 1; state.elapsed = 0; build(state.seed); },
+  getState() { return { seed: state.seed, heat: state.heat, palette: state.palette, blobs: blobs.length }; },
+  destroy() { running = false; }
+};
+
+document.querySelector('[data-bb-control="heat-slider"]').addEventListener('input', (event) => {
+  state.heat = Number(event.target.value);
+});
+document.querySelector('[data-bb-control="color-cycle"]').addEventListener('click', () => {
+  state.palette = (state.palette + 1) % PALETTES.length;
+  applyPalette();
+});
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+build(state.seed);
+
+let last = null;
+function frame(t) {
+  if (!running) return;
+  if (last !== null) {
+    const dt = (t - last) / 1000;
+    state.elapsed += dt * (0.2 + (state.heat / 100) * 2.2);
+  }
+  last = t;
+  for (const blob of blobs) {
+    blob.mesh.position.y = Math.sin(state.elapsed + blob.phase) * 2.4;
+    blob.mesh.position.x = blob.x + Math.sin(state.elapsed * 0.7 + blob.phase) * 0.3;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

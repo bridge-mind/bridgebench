@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Golden Broken — crashes at load</title>
+<style>html, body { width: 100%; height: 100%; background: #000; }</style>
+</head>
+<body>
+<script>
+  window.BridgeBenchTaskManifest = {
+    benchmarkVersion: "3.0",
+    taskId: "s1-lava-lamp-redux",
+    title: "Lava Lamp Redux",
+    category: "simulation",
+    controls: ["heat-slider", "color-cycle"],
+    deterministic: true,
+    preferredViewport: { width: 1280, height: 800 }
+  };
+  window.BridgeBenchTaskApi = {
+    init() {}, reset() {}, getState() { return {}; }, getScore() { return null; }, destroy() {}
+  };
+</script>
+<script>
+  // Statically valid, dead at runtime: uncaught TypeError during load.
+  const lamp = undefined;
+  lamp.ignite();
+</script>
+</body>
+</html>

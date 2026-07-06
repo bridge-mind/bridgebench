@@ -27,7 +27,7 @@
 
 ---
 
-> **Status: ground-up rewrite, built in the open.** This repo is the new home of BridgeBench. The engine, task format, and Season 1 are under construction — nothing here is stable yet. Leaderboards live at [bridgebench.ai](https://bridgebench.ai).
+> **Status: Season 1 engine is here.** The first suite — **UI Bench**, 10 creative Three.js tasks scored in a real browser — is runnable today. The first official model roster run and the bridgebench.ai v3 leaderboard are next. Leaderboards live at [bridgebench.ai](https://bridgebench.ai).
 
 ## What is BridgeBench?
 
@@ -52,22 +52,27 @@ Static benchmarks decay. Tasks leak into training data, scores inflate, and the 
 
 ## Benchmark suites
 
-The Season 1 lineup, carried forward from the suites the previous engine proved out. Each suite maps to a moment in a real vibe coding session:
+### UI Bench — live in this repo
 
-| Suite | The moment it measures |
-|---|---|
-| **Speed** | You're in flow. Time-to-first-token and throughput decide whether the model keeps up or breaks it. |
-| **Cost** | What a day of shipping actually costs, per model, from published rates. |
-| **Debugging** | "Here's the bug. Fix it." Diagnosis and patch, graded separately. |
-| **Refactoring** | Improve the structure without changing the behavior — and prove the refactor actually happened. |
-| **Algorithms** | Core correctness under hidden adversarial tests and complexity budgets. |
-| **UI** | Ship an interface from a one-paragraph prompt, scored in a real browser. |
-| **Security** | Does generated code hold up against hostile input? |
-| **Hallucination** | Does the model invent APIs and behaviors that don't exist? |
-| **Reasoning** | Multi-artifact problems: specs, logs, and tables that have to be reconciled, not pattern-matched. |
-| **Pushback** | The premise is nonsense. Does the model say so, or play along? |
+Season 1 opens with the suite that made BridgeBench famous — the lava lamp test — rebuilt for real 3D. **10 creative tasks**, all Three.js (pinned `0.182.0`, vendored in this repo), all scored in a real browser:
 
-Suites are added and refined per season as vibe coding itself evolves — agentic and repo-scale tasks are on the roadmap.
+Lava Lamp Redux · Aurora Over a Frozen Lake · Galaxy Forge · Synthwave Horizon · Deep-Sea Jellyfish Ballet · Clockwork Orrery · Voxel Weather Diorama · Kinetic Typography · Rubik's Playground · Bioluminescent Terrarium
+
+Every artifact is one self-contained HTML file whose only external reference is the pinned, same-origin three.js import map. Playwright loads it on a network-blocked synthetic origin (SwiftShader software WebGL — pixel-reproducible), then scores five dimensions:
+
+| Dimension | Weight | How it's measured |
+|---|---|---|
+| Render integrity | 25 | Loads clean: no crashes, real WebGL context, no blank frames |
+| Motion & liveness | 15 | Composited-screenshot pixel diffs + rAF frame sampling |
+| Interaction | 30 | Hidden probes drive real clicks, drags, and sliders, then assert observable effects |
+| Determinism & contract | 15 | `reset(seed)` replayed under virtual time must match pixel-for-pixel |
+| Spec adherence | 15 | Declared controls exist, viewport fills, harness API behaves |
+
+Docs: [architecture](docs/architecture.md) · [running](docs/running.md) · [task authoring](docs/task-authoring.md) · [season policy](docs/season-policy.md)
+
+### On the roadmap
+
+The suites the previous engine proved out, returning season by season: **Speed** (TTFT/throughput direct from each API), **Cost**, **Debugging**, **Refactoring**, **Algorithms**, **Security**, **Hallucination**, **Reasoning**, and **Pushback** (the premise is nonsense — does the model say so?). Agentic and repo-scale tasks are on the roadmap too.
 
 ## Methodology
 
@@ -83,25 +88,44 @@ Full methodology docs land in [`docs/`](docs/) as the engine takes shape.
 
 ## Repository layout
 
-The planned shape of the repo (scaffolding in progress):
-
 ```
 bridgebench/
-├── suites/            # One module per suite: runner, executor, evaluator, README
+├── src/
+│   ├── cli.ts             # bridgebench ui run / evaluate / tasks · providers
+│   ├── config.ts          # season pins: dates, three.js version, viewport
+│   ├── providers/         # direct provider adapters (one stream() each) + pricing
+│   └── suites/ui/         # runner → extractor → normalizer → validator →
+│                          #   evaluator (Playwright, 2 phases) → score → snapshot
 ├── tasks/
-│   ├── current/       # Active season — public prompts only
-│   └── archive/       # Retired seasons, published in full (hidden tests included)
-├── providers/         # Direct provider adapters + pricing
-├── results/           # Journals and snapshots for the active season
-├── docs/              # Methodology, scoring, season rules
-└── assets/            # BridgeMind brand assets
+│   ├── current/ui/        # active season — public prompts + declared controls
+│   └── retired/           # past seasons, published in full (hidden tests included)
+├── vendor/three@0.182.0/  # season-pinned three.js + addons (committed, hermetic)
+├── fixtures/              # golden artifacts (correct / broken / cheating)
+├── snapshots/             # committed season snapshots
+├── docker/Dockerfile.eval # pinned Chromium for official, reproducible runs
+├── scripts/               # vendor-three, sync-to-ui
+└── docs/                  # architecture, running, task authoring, season policy
 ```
-
-Each suite ships with its own README covering task format, scoring dimensions, and weights.
 
 ## Quick start
 
-Not yet — the engine is being rebuilt from scratch. Watch this repo; Season 1 ships with a runnable CLI, task packs, and the docs to reproduce every number on [bridgebench.ai](https://bridgebench.ai).
+```bash
+git clone https://github.com/bridge-mind/bridgebench.git
+cd bridgebench && npm install
+cp .env.example .env       # add your provider keys
+
+# Grade the included golden artifact — no API keys needed
+npm run ui -- evaluate fixtures/golden-correct.html -t s1-lava-lamp-redux
+
+# Run a model across all 10 Season 1 tasks
+npm run ui -- run -m openai/gpt-5.4
+
+# List tasks and configured providers
+npm run ui -- tasks
+npm run providers
+```
+
+Interaction scoring uses hidden probes (private during the season, published at rotation — see [season policy](docs/season-policy.md)). Without them, runs are still fully functional and marked `partial`.
 
 ## Contributing
 
