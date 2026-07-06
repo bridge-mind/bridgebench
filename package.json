@@ -1,7 +1,7 @@
 {
   "name": "bridgebench",
   "version": "3.0.0-alpha.0",
-  "description": "The world's #1 vibe coding benchmark \u2014 real workflows, direct from every provider's API, rebuilt every 90 days.",
+  "description": "The world's #1 vibe coding benchmark — real workflows, direct from every provider's API, rebuilt every 90 days.",
   "license": "MIT",
   "type": "module",
   "repository": {
