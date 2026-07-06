@@ -1,7 +1,7 @@
 {
   "name": "bridgebench",
   "version": "3.0.0-alpha.0",
-  "description": "The world's #1 vibe coding benchmark — real workflows, direct from every provider's API, rebuilt every 90 days.",
+  "description": "The world's #1 vibe coding benchmark \u2014 real workflows, direct from every provider's API, rebuilt every 90 days.",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -19,7 +19,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "vendor:three": "node scripts/vendor-three.mjs",
-    "sync:ui": "node scripts/sync-to-ui.mjs"
+    "sync:ui": "node scripts/sync-to-ui.mjs",
+    "publish:artifacts": "node scripts/publish-artifacts.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

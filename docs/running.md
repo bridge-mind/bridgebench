@@ -63,11 +63,15 @@ snapshots/season-1/ui-bench-snapshot.json   committed season snapshot
 ## Publishing to bridgebench.ai
 
 ```bash
-npm run sync:ui   # snapshot + lite leaderboard + artifacts + vendor → ../bridgebench-ui
+npm run sync:ui       # snapshot + lite leaderboard + artifacts + vendor → ../bridgebench-ui
+# …deploy bridgebench-ui, then register artifacts with the voting API:
+UI_BENCH_ADMIN_KEY=… npm run publish:artifacts
 ```
 
 Keep the sync on a bridgebench-ui feature branch until the site's v3 data
-layer lands — main still renders the legacy snapshot shape.
+layer lands — main still renders the legacy snapshot shape. Voting flow:
+qualified artifacts enter blind A/B matchups at bridgebench.ai/ui-bench/vote;
+builders' votes drive per-artifact Elo; the model grade is its average Elo.
 
 ## Official (reproducible) runs
 
