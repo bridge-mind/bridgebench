@@ -14,6 +14,7 @@
   "scripts": {
     "ui": "tsx src/cli.ts ui",
     "providers": "tsx src/cli.ts providers",
+    "models": "tsx src/cli.ts models",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

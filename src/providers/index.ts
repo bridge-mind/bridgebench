@@ -20,18 +20,40 @@ export {
 } from './registry.js';
 
 // Pricing
-export { calculateCost, hasPricing } from './pricing.js';
+export { calculateCost, getPricing, hasPricing } from './pricing.js';
 
-// Model registry — canonical display names, slugs, and metadata
+// Model registry — canonical identity, metadata, pricing, tuning, exports
 export {
   MODEL_REGISTRY,
+  ModelEntrySchema,
+  ModelPricingSchema,
+  ModelRequestTuningSchema,
+  RegistryExportSchema,
+  artifactSlug,
+  buildRegistryExport,
+  getCanonicalEntry,
   getDisplayName,
-  getModelSlug,
   getModelBySlug,
   getModelEntry,
+  getModelSlug,
+  listModels,
+  resolveModelId,
   slugify,
+  validateModelRegistry,
 } from './models.js';
-export type { ModelEntry } from './models.js';
+export type {
+  ExportedModel,
+  ListModelsFilter,
+  ModelEntry,
+  ModelPricing,
+  ModelRequestTuning,
+  ModelStatus,
+  ReasoningSupport,
+  RegistryExport,
+  RegistryExportMeta,
+  RegistryExportProvider,
+  RegistryValidationReport,
+} from './models.js';
 
 // Reasoning tuning
 export { resolveReasoningTuning } from './reasoning-tuning.js';

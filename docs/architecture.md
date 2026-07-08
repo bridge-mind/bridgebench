@@ -39,8 +39,10 @@ runner → extractor → normalizer → validator → artifact store
 ## Provider layer
 
 Every provider implements one `stream()` method yielding uniform
-`StreamChunk` objects (`src/providers/`). Adding a provider = a registry
-entry + a pricing row; the measurement pipeline never changes.
+`StreamChunk` objects (`src/providers/`). Adding a provider = a `PROVIDERS`
+entry; adding a model = one model-registry entry carrying its identity,
+pricing, and tuning (see `model-registry.md`). The measurement pipeline
+never changes.
 
 ## Evaluator
 

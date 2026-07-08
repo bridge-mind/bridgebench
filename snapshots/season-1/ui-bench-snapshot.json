@@ -1,0 +1,732 @@
+{
+  "version": "3.0.0",
+  "suite": "ui",
+  "generatedAt": "2026-07-08T18:01:28.721Z",
+  "season": {
+    "id": 1,
+    "name": "Season 1",
+    "startsAt": "2026-07-06",
+    "endsAt": "2026-10-04"
+  },
+  "engine": {
+    "engineVersion": "3.0.0-alpha.0",
+    "threeVersion": "0.182.0",
+    "grading": "community-elo"
+  },
+  "config": {
+    "totalTasks": 10,
+    "taskIds": [
+      "s1-aurora-frozen-lake",
+      "s1-bioluminescent-terrarium",
+      "s1-clockwork-orrery",
+      "s1-galaxy-forge",
+      "s1-jellyfish-ballet",
+      "s1-kinetic-typography",
+      "s1-lava-lamp-redux",
+      "s1-rubiks-playground",
+      "s1-synthwave-horizon",
+      "s1-voxel-weather-diorama"
+    ],
+    "modelIds": [
+      "openrouter/minimax/minimax-m3"
+    ]
+  },
+  "roster": [
+    {
+      "modelId": "openrouter/z-ai/glm-5.2",
+      "displayName": "GLM 5.2",
+      "qualifiedTasks": 2,
+      "totalTasks": 5,
+      "qualifiedRate": 40,
+      "fullyInteractiveTasks": 0,
+      "elo": null
+    },
+    {
+      "modelId": "openrouter/minimax/minimax-m3",
+      "displayName": "MiniMax M3",
+      "qualifiedTasks": 0,
+      "totalTasks": 1,
+      "qualifiedRate": 0,
+      "fullyInteractiveTasks": 0,
+      "elo": null
+    }
+  ],
+  "models": {
+    "openrouter/z-ai/glm-5.2": {
+      "summary": {
+        "modelId": "openrouter/z-ai/glm-5.2",
+        "displayName": "GLM 5.2",
+        "totalTasks": 5,
+        "qualifiedTasks": 2,
+        "disqualifiedTasks": 3,
+        "qualifiedRate": 40,
+        "fullyInteractiveTasks": 0,
+        "probesPartial": true,
+        "totalCostUsd": 0.211073,
+        "averageProviderResponseMs": 352355,
+        "byCategory": {
+          "simulation": {
+            "qualified": 0,
+            "tasks": 3
+          },
+          "interactive": {
+            "qualified": 2,
+            "tasks": 2
+          },
+          "game": {
+            "qualified": 0,
+            "tasks": 0
+          },
+          "typography": {
+            "qualified": 0,
+            "tasks": 0
+          }
+        }
+      },
+      "results": [
+        {
+          "modelId": "openrouter/z-ai/glm-5.2",
+          "displayName": "GLM 5.2",
+          "taskId": "s1-aurora-frozen-lake",
+          "season": 1,
+          "category": "simulation",
+          "qualification": {
+            "qualified": false,
+            "reasons": [
+              "runtime: uncaught error during startup ([1737ms] Cannot set properties of undefined (setting 'reflectRT'))"
+            ],
+            "diagnostics": {
+              "webglActive": "webgl2",
+              "webglRequirementMet": true,
+              "fps": 0,
+              "animationDetected": false,
+              "controlsDeclared": 1,
+              "controlsFound": 1,
+              "viewportFill": true,
+              "determinismOk": true,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": true,
+            "errors": [],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 29413,
+              "hasDoctype": true,
+              "hasHtmlTag": true,
+              "hasManifest": true,
+              "hasTaskApi": true,
+              "hasImportMap": true,
+              "importMapCanonical": true,
+              "usesThree": true,
+              "moduleSpecifiers": [
+                "three",
+                "three/addons/controls/OrbitControls.js",
+                "three/addons/postprocessing/EffectComposer.js",
+                "three/addons/postprocessing/RenderPass.js",
+                "three/addons/postprocessing/UnrealBloomPass.js"
+              ],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": [
+                "aurora-intensity"
+              ]
+            }
+          },
+          "evaluation": {
+            "ok": true,
+            "evaluationTimeMs": 7931,
+            "consoleErrorCount": 0,
+            "consoleWarningCount": 4,
+            "pageErrors": [
+              "[1737ms] Cannot set properties of undefined (setting 'reflectRT')"
+            ],
+            "networkRequestsBlocked": 0,
+            "vendorRequestsServed": 22,
+            "startupTimeMs": 516,
+            "harnessGlobalsMs": 531,
+            "webgl": {
+              "requestedContexts": [
+                "webgl2"
+              ],
+              "active": "webgl2",
+              "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
+            },
+            "fps": 0,
+            "animation": {
+              "detected": false,
+              "changedPct": [
+                0,
+                0
+              ]
+            },
+            "blankFrame": false,
+            "probes": null,
+            "determinism": {
+              "ran": true,
+              "replayChangedPct": 0,
+              "statesMatch": true
+            },
+            "controlsFound": [
+              "aurora-intensity"
+            ],
+            "viewportFill": true,
+            "getScoreOk": true,
+            "destroyOk": true
+          },
+          "providerResponseMs": 1316043,
+          "inputTokens": 1064,
+          "outputTokens": 9805,
+          "costUsd": 0.03123148,
+          "success": false,
+          "timestamp": "2026-07-07T16:53:40.552Z",
+          "artifactSha256": "4aaef9d016070a461493b9fd28b80e5f9df2ac520fc6960d8fe04f4567821aea",
+          "artifactPaths": {
+            "html": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-aurora-frozen-lake/openrouter--z-ai--glm-5.2/2026-07-07T16-53-32-591Z/normalized.html",
+            "screenshots": {
+              "hero": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-aurora-frozen-lake/openrouter--z-ai--glm-5.2/2026-07-07T16-53-32-591Z/hero.png",
+              "motion": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-aurora-frozen-lake/openrouter--z-ai--glm-5.2/2026-07-07T16-53-32-591Z/motion.png"
+            }
+          }
+        },
+        {
+          "modelId": "openrouter/z-ai/glm-5.2",
+          "displayName": "GLM 5.2",
+          "taskId": "s1-bioluminescent-terrarium",
+          "season": 1,
+          "category": "simulation",
+          "qualification": {
+            "qualified": false,
+            "reasons": [
+              "contract: BridgeBench harness globals never appeared"
+            ],
+            "diagnostics": {
+              "webglActive": "webgl2",
+              "webglRequirementMet": true,
+              "fps": 5.6,
+              "animationDetected": true,
+              "controlsDeclared": 1,
+              "controlsFound": 1,
+              "viewportFill": true,
+              "determinismOk": null,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": true,
+            "errors": [],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 42239,
+              "hasDoctype": true,
+              "hasHtmlTag": true,
+              "hasManifest": true,
+              "hasTaskApi": true,
+              "hasImportMap": true,
+              "importMapCanonical": true,
+              "usesThree": true,
+              "moduleSpecifiers": [
+                "three",
+                "three/addons/controls/OrbitControls.js",
+                "three/addons/postprocessing/EffectComposer.js",
+                "three/addons/postprocessing/RenderPass.js",
+                "three/addons/postprocessing/UnrealBloomPass.js"
+              ],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": [
+                "replant",
+                "replant"
+              ]
+            }
+          },
+          "evaluation": {
+            "ok": true,
+            "evaluationTimeMs": 18248,
+            "consoleErrorCount": 0,
+            "consoleWarningCount": 0,
+            "pageErrors": [],
+            "networkRequestsBlocked": 0,
+            "vendorRequestsServed": 11,
+            "startupTimeMs": 110,
+            "harnessGlobalsMs": null,
+            "webgl": {
+              "requestedContexts": [
+                "webgl2",
+                "2d"
+              ],
+              "active": "webgl2",
+              "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
+            },
+            "fps": 5.6,
+            "animation": {
+              "detected": true,
+              "changedPct": [
+                1.278,
+                0.838
+              ]
+            },
+            "blankFrame": false,
+            "probes": null,
+            "determinism": {
+              "ran": false,
+              "replayChangedPct": null,
+              "statesMatch": null
+            },
+            "controlsFound": [
+              "replant"
+            ],
+            "viewportFill": true,
+            "getScoreOk": false,
+            "destroyOk": false
+          },
+          "providerResponseMs": 135341,
+          "inputTokens": 1119,
+          "outputTokens": 12718,
+          "costUsd": 0.05752328,
+          "success": false,
+          "timestamp": "2026-07-07T16:56:14.332Z",
+          "artifactSha256": "f3f1e8b0039766bcbd5be3806912c666eedd01bf5ff73d776a998fd3df26089d",
+          "artifactPaths": {
+            "html": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-bioluminescent-terrarium/openrouter--z-ai--glm-5.2/2026-07-07T16-55-55-900Z/normalized.html",
+            "screenshots": {
+              "hero": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-bioluminescent-terrarium/openrouter--z-ai--glm-5.2/2026-07-07T16-55-55-900Z/hero.png",
+              "growth-early": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-bioluminescent-terrarium/openrouter--z-ai--glm-5.2/2026-07-07T16-55-55-900Z/growth-early.png",
+              "growth-late": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-bioluminescent-terrarium/openrouter--z-ai--glm-5.2/2026-07-07T16-55-55-900Z/growth-late.png"
+            }
+          }
+        },
+        {
+          "modelId": "openrouter/z-ai/glm-5.2",
+          "displayName": "GLM 5.2",
+          "taskId": "s1-clockwork-orrery",
+          "season": 1,
+          "category": "interactive",
+          "qualification": {
+            "qualified": true,
+            "reasons": [],
+            "diagnostics": {
+              "webglActive": "webgl2",
+              "webglRequirementMet": true,
+              "fps": 12.9,
+              "animationDetected": false,
+              "controlsDeclared": 2,
+              "controlsFound": 2,
+              "viewportFill": true,
+              "determinismOk": true,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": true,
+            "errors": [],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 33833,
+              "hasDoctype": true,
+              "hasHtmlTag": true,
+              "hasManifest": true,
+              "hasTaskApi": true,
+              "hasImportMap": true,
+              "importMapCanonical": true,
+              "usesThree": true,
+              "moduleSpecifiers": [
+                "three",
+                "three/addons/controls/OrbitControls.js",
+                "three/addons/postprocessing/EffectComposer.js",
+                "three/addons/postprocessing/RenderPass.js",
+                "three/addons/postprocessing/UnrealBloomPass.js",
+                "three/addons/postprocessing/OutputPass.js"
+              ],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": [
+                "scene-canvas",
+                "time-scale"
+              ]
+            }
+          },
+          "evaluation": {
+            "ok": true,
+            "evaluationTimeMs": 30680,
+            "consoleErrorCount": 0,
+            "consoleWarningCount": 0,
+            "pageErrors": [],
+            "networkRequestsBlocked": 0,
+            "vendorRequestsServed": 26,
+            "startupTimeMs": 968,
+            "harnessGlobalsMs": 2960,
+            "webgl": {
+              "requestedContexts": [
+                "webgl2",
+                "2d"
+              ],
+              "active": "webgl2",
+              "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
+            },
+            "fps": 12.9,
+            "animation": {
+              "detected": false,
+              "changedPct": [
+                0.477,
+                0.364
+              ]
+            },
+            "blankFrame": false,
+            "probes": null,
+            "determinism": {
+              "ran": true,
+              "replayChangedPct": 0.346,
+              "statesMatch": true
+            },
+            "controlsFound": [
+              "scene-canvas",
+              "time-scale"
+            ],
+            "viewportFill": true,
+            "getScoreOk": true,
+            "destroyOk": true
+          },
+          "providerResponseMs": 132826,
+          "inputTokens": 1147,
+          "outputTokens": 10591,
+          "costUsd": 0.04764298,
+          "success": true,
+          "timestamp": "2026-07-07T16:58:58.025Z",
+          "artifactSha256": "ebc357595e772cb8e3e770282c9b377c158fc9fd125487818f152f4d4ffa74da",
+          "artifactPaths": {
+            "html": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-clockwork-orrery/openrouter--z-ai--glm-5.2/2026-07-07T16-58-27-162Z/normalized.html",
+            "screenshots": {
+              "hero": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-clockwork-orrery/openrouter--z-ai--glm-5.2/2026-07-07T16-58-27-162Z/hero.png",
+              "motion": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-clockwork-orrery/openrouter--z-ai--glm-5.2/2026-07-07T16-58-27-162Z/motion.png"
+            }
+          }
+        },
+        {
+          "modelId": "openrouter/z-ai/glm-5.2",
+          "displayName": "GLM 5.2",
+          "taskId": "s1-galaxy-forge",
+          "season": 1,
+          "category": "interactive",
+          "qualification": {
+            "qualified": true,
+            "reasons": [],
+            "diagnostics": {
+              "webglActive": "webgl2",
+              "webglRequirementMet": true,
+              "fps": 2.9,
+              "animationDetected": false,
+              "controlsDeclared": 2,
+              "controlsFound": 2,
+              "viewportFill": true,
+              "determinismOk": null,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": true,
+            "errors": [],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 28192,
+              "hasDoctype": true,
+              "hasHtmlTag": true,
+              "hasManifest": true,
+              "hasTaskApi": true,
+              "hasImportMap": true,
+              "importMapCanonical": true,
+              "usesThree": true,
+              "moduleSpecifiers": [
+                "three",
+                "three/addons/controls/OrbitControls.js",
+                "three/addons/postprocessing/EffectComposer.js",
+                "three/addons/postprocessing/RenderPass.js",
+                "three/addons/postprocessing/UnrealBloomPass.js",
+                "three/addons/postprocessing/ShaderPass.js",
+                "three/addons/postprocessing/OutputPass.js"
+              ],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": [
+                "scene-canvas",
+                "regenerate"
+              ]
+            }
+          },
+          "evaluation": {
+            "ok": true,
+            "evaluationTimeMs": 56972,
+            "consoleErrorCount": 2,
+            "consoleWarningCount": 70,
+            "pageErrors": [],
+            "networkRequestsBlocked": 0,
+            "vendorRequestsServed": 26,
+            "startupTimeMs": 1555,
+            "harnessGlobalsMs": 1565,
+            "webgl": {
+              "requestedContexts": [
+                "webgl2",
+                "2d"
+              ],
+              "active": "webgl2",
+              "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
+            },
+            "fps": 2.9,
+            "animation": {
+              "detected": false,
+              "changedPct": [
+                0,
+                0
+              ]
+            },
+            "blankFrame": false,
+            "probes": null,
+            "determinism": {
+              "ran": false,
+              "replayChangedPct": null,
+              "statesMatch": null,
+              "error": "page.screenshot: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - taking page screenshot\u001b[22m\n\u001b[2m  - waiting for fonts to load...\u001b[22m\n\u001b[2m  - fonts loaded\u001b[22m\n"
+            },
+            "controlsFound": [
+              "scene-canvas",
+              "regenerate"
+            ],
+            "viewportFill": true,
+            "getScoreOk": true,
+            "destroyOk": true
+          },
+          "providerResponseMs": 81567,
+          "inputTokens": 1109,
+          "outputTokens": 8805,
+          "costUsd": 0.03973138,
+          "success": true,
+          "timestamp": "2026-07-07T17:01:19.683Z",
+          "artifactSha256": "a170453325a09828bb1ccead42c10afc1dfc1e74925d65db43729025c45e1ef3",
+          "artifactPaths": {
+            "html": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-galaxy-forge/openrouter--z-ai--glm-5.2/2026-07-07T17-00-19-596Z/normalized.html",
+            "screenshots": {
+              "hero": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-galaxy-forge/openrouter--z-ai--glm-5.2/2026-07-07T17-00-19-596Z/hero.png",
+              "motion": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-galaxy-forge/openrouter--z-ai--glm-5.2/2026-07-07T17-00-19-596Z/motion.png"
+            }
+          }
+        },
+        {
+          "modelId": "openrouter/z-ai/glm-5.2",
+          "displayName": "GLM 5.2",
+          "taskId": "s1-lava-lamp-redux",
+          "season": 1,
+          "category": "simulation",
+          "qualification": {
+            "qualified": false,
+            "reasons": [
+              "runtime: uncaught error during startup ([1499ms] reset is not defined)"
+            ],
+            "diagnostics": {
+              "webglActive": "webgl2",
+              "webglRequirementMet": true,
+              "fps": 0,
+              "animationDetected": false,
+              "controlsDeclared": 2,
+              "controlsFound": 2,
+              "viewportFill": true,
+              "determinismOk": true,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": true,
+            "errors": [],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 25822,
+              "hasDoctype": true,
+              "hasHtmlTag": true,
+              "hasManifest": true,
+              "hasTaskApi": true,
+              "hasImportMap": true,
+              "importMapCanonical": true,
+              "usesThree": true,
+              "moduleSpecifiers": [
+                "three",
+                "three/addons/controls/OrbitControls.js",
+                "three/addons/postprocessing/EffectComposer.js",
+                "three/addons/postprocessing/RenderPass.js",
+                "three/addons/postprocessing/UnrealBloomPass.js",
+                "three/addons/postprocessing/ShaderPass.js",
+                "three/addons/shaders/FXAAShader.js",
+                "three/addons/objects/MarchingCubes.js"
+              ],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": [
+                "heat-slider",
+                "color-cycle"
+              ]
+            }
+          },
+          "evaluation": {
+            "ok": true,
+            "evaluationTimeMs": 7811,
+            "consoleErrorCount": 0,
+            "consoleWarningCount": 4,
+            "pageErrors": [
+              "[1499ms] reset is not defined"
+            ],
+            "networkRequestsBlocked": 0,
+            "vendorRequestsServed": 26,
+            "startupTimeMs": 319,
+            "harnessGlobalsMs": 332,
+            "webgl": {
+              "requestedContexts": [
+                "webgl2"
+              ],
+              "active": "webgl2",
+              "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)"
+            },
+            "fps": 0,
+            "animation": {
+              "detected": false,
+              "changedPct": [
+                0,
+                0
+              ]
+            },
+            "blankFrame": false,
+            "probes": null,
+            "determinism": {
+              "ran": true,
+              "replayChangedPct": 0,
+              "statesMatch": true
+            },
+            "controlsFound": [
+              "heat-slider",
+              "color-cycle"
+            ],
+            "viewportFill": true,
+            "getScoreOk": true,
+            "destroyOk": true
+          },
+          "providerResponseMs": 95998,
+          "inputTokens": 1125,
+          "outputTokens": 8506,
+          "costUsd": 0.03494376,
+          "success": false,
+          "timestamp": "2026-07-07T16:30:08.543Z",
+          "artifactSha256": "9de664cf50b8757e5b9c878f3672a1f467082a850958f580664cb5c3a549840d",
+          "artifactPaths": {
+            "html": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-lava-lamp-redux/openrouter--z-ai--glm-5.2/2026-07-07T16-30-00-705Z/normalized.html",
+            "screenshots": {
+              "hero": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-lava-lamp-redux/openrouter--z-ai--glm-5.2/2026-07-07T16-30-00-705Z/hero.png",
+              "motion": "/Users/matthewmiller/Desktop/bridgemind/bridge-bench/bridgebench/results/ui/artifacts/s1-lava-lamp-redux/openrouter--z-ai--glm-5.2/2026-07-07T16-30-00-705Z/motion.png"
+            }
+          }
+        }
+      ]
+    },
+    "openrouter/minimax/minimax-m3": {
+      "summary": {
+        "modelId": "openrouter/minimax/minimax-m3",
+        "displayName": "MiniMax M3",
+        "totalTasks": 1,
+        "qualifiedTasks": 0,
+        "disqualifiedTasks": 1,
+        "qualifiedRate": 0,
+        "fullyInteractiveTasks": 0,
+        "probesPartial": true,
+        "totalCostUsd": 0,
+        "averageProviderResponseMs": 0,
+        "byCategory": {
+          "simulation": {
+            "qualified": 0,
+            "tasks": 1
+          },
+          "interactive": {
+            "qualified": 0,
+            "tasks": 0
+          },
+          "game": {
+            "qualified": 0,
+            "tasks": 0
+          },
+          "typography": {
+            "qualified": 0,
+            "tasks": 0
+          }
+        }
+      },
+      "results": [
+        {
+          "modelId": "openrouter/minimax/minimax-m3",
+          "displayName": "MiniMax M3",
+          "taskId": "s1-lava-lamp-redux",
+          "season": 1,
+          "category": "simulation",
+          "qualification": {
+            "qualified": false,
+            "reasons": [
+              "runner error: Internal Server Error"
+            ],
+            "diagnostics": {
+              "webglActive": null,
+              "webglRequirementMet": false,
+              "fps": null,
+              "animationDetected": false,
+              "controlsDeclared": 2,
+              "controlsFound": 0,
+              "viewportFill": false,
+              "determinismOk": null,
+              "probesPassed": null,
+              "probesTotal": null,
+              "probesPartial": true
+            }
+          },
+          "validation": {
+            "valid": false,
+            "errors": [
+              "runner error: Internal Server Error"
+            ],
+            "warnings": [],
+            "metadata": {
+              "sizeBytes": 0,
+              "hasDoctype": false,
+              "hasHtmlTag": false,
+              "hasManifest": false,
+              "hasTaskApi": false,
+              "hasImportMap": false,
+              "importMapCanonical": false,
+              "usesThree": false,
+              "moduleSpecifiers": [],
+              "externalAssetRefs": [],
+              "forbiddenApiRefs": [],
+              "declaredControlIds": []
+            }
+          },
+          "evaluation": null,
+          "providerResponseMs": 0,
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "costUsd": 0,
+          "success": false,
+          "errorType": "runner_error",
+          "timestamp": "2026-07-08T18:01:28.647Z",
+          "artifactSha256": null,
+          "artifactPaths": {
+            "html": "",
+            "screenshots": {}
+          }
+        }
+      ]
+    }
+  }
+}

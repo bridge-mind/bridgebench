@@ -5,8 +5,14 @@
  * reasoning traces out of (or from truncating) the HTML artifact.
  */
 
-import { calculateCost, createProvider, getDisplayName } from '../../providers/index.js';
-import type { BaseProvider } from '../../providers/index.js';
+import {
+  calculateCost,
+  createProvider,
+  getDisplayName,
+  getModelEntry,
+} from '../../providers/index.js';
+import type { BaseProvider, ModelRequestTuning } from '../../providers/index.js';
+import { getRunLogger } from '../../logger.js';
 import { buildUiTaskPrompt } from './prompt-builder.js';
 import type { UiBenchTask } from './types.js';
 
@@ -27,15 +33,16 @@ export interface UiRunnerConfig {
   retryBaseDelayMs?: number;
 }
 
-interface UiRequestTuning {
-  requestBodyOverrides?: Record<string, unknown>;
-  forceNonStreaming?: boolean;
-  /** Per-model completion ceiling; overrides the runner default when set. */
-  maxTokens?: number;
-}
-
 function isDirectZaiModel(modelId: string): boolean {
   return modelId.startsWith('z-ai/glm-');
+}
+
+// GLM 5.x thinks by default; routed through OpenRouter, the reasoning trace
+// bills against max_tokens and can consume the entire budget before any HTML
+// is emitted. OpenRouter's normalized `reasoning.enabled: false` maps to
+// Z.ai's `thinking: { type: 'disabled' }`.
+function isOpenRouterZaiModel(modelId: string): boolean {
+  return modelId.startsWith('openrouter/z-ai/glm-');
 }
 
 function isReasoningHeavyModel(modelId: string): boolean {
@@ -70,11 +77,24 @@ function isOpenRouterGeminiModel(modelId: string): boolean {
   return /^openrouter\/google\/gemini-/.test(modelId);
 }
 
-function tuneUiRequest(modelId: string): UiRequestTuning {
+function tuneUiRequest(modelId: string): ModelRequestTuning {
+  // A per-model tuning block on the registry entry wins over the
+  // family-wide pattern fallbacks below.
+  const registryTuning = getModelEntry(modelId)?.tuning;
+  if (registryTuning) return registryTuning;
+
   if (isDirectZaiModel(modelId)) {
     return {
       requestBodyOverrides: {
         thinking: { type: 'disabled' },
+      },
+    };
+  }
+
+  if (isOpenRouterZaiModel(modelId)) {
+    return {
+      requestBodyOverrides: {
+        reasoning: { enabled: false },
       },
     };
   }
@@ -138,6 +158,14 @@ const RETRYABLE_ERROR_PATTERNS = [
   /socket hang up/i,
   /overloaded/i,
   /operation was aborted/i,
+  // Transient upstream/gateway failures (OpenRouter surfaces these as bare
+  // status text) — retrying is the correct response.
+  /internal server error/i,
+  /bad gateway/i,
+  /service unavailable/i,
+  /gateway timeout/i,
+  /\b(?:500|502|503|504)\b/,
+  /premature close/i,
 ];
 
 function isRetryableError(error: unknown): boolean {
@@ -171,9 +199,23 @@ export class UiModelRunner {
   }
 
   async runTask(task: UiBenchTask): Promise<UiModelResponse> {
+    const logger = getRunLogger().child({ model: this.modelId, task: task.id });
     const tuned = tuneUiRequest(this.modelId);
     const maxTokens = tuned.maxTokens ?? this.maxTokens;
+    const temperature = tuned.temperature ?? this.temperature;
     const prompt = buildUiTaskPrompt(task);
+
+    logger.debug('provider.request', {
+      apiModel: this.apiModel,
+      provider: this.provider.name,
+      maxTokens,
+      temperature,
+      requestBodyOverrides: tuned.requestBodyOverrides ?? null,
+      forceNonStreaming: tuned.forceNonStreaming ?? false,
+      tuningSource: getModelEntry(this.modelId)?.tuning ? 'registry' : 'pattern-fallback',
+      promptChars: prompt.length,
+      prompt,
+    });
 
     const maxAttempts = 6;
 
@@ -183,23 +225,43 @@ export class UiModelRunner {
       let outputTokens = 0;
       let rawResponse = '';
       let providerCostUsd: number | undefined;
+      let chunkCount = 0;
+      let firstContentMs: number | null = null;
+      let lastProgressLog = startedAt;
 
       try {
         for await (const chunk of this.provider.stream({
           model: this.apiModel,
           prompt,
           maxTokens,
-          temperature: this.temperature,
+          temperature,
           requestBodyOverrides: tuned.requestBodyOverrides,
           forceNonStreaming: tuned.forceNonStreaming,
         })) {
-          if (chunk.content) rawResponse += chunk.content;
+          chunkCount++;
+          if (chunk.content) {
+            if (firstContentMs === null) {
+              firstContentMs = Date.now() - startedAt;
+              logger.debug('provider.stream.first-content', { attempt, ttfcMs: firstContentMs });
+            }
+            rawResponse += chunk.content;
+          }
           if (chunk.inputTokens !== undefined) inputTokens = chunk.inputTokens;
           if (chunk.outputTokens !== undefined) outputTokens = chunk.outputTokens;
           if (chunk.costUsd !== undefined) providerCostUsd = chunk.costUsd;
+
+          if (Date.now() - lastProgressLog >= 5_000) {
+            lastProgressLog = Date.now();
+            logger.debug('provider.stream.progress', {
+              attempt,
+              elapsedMs: Date.now() - startedAt,
+              chunks: chunkCount,
+              chars: rawResponse.length,
+            });
+          }
         }
 
-        return {
+        const response = {
           rawResponse,
           providerResponseMs: Date.now() - startedAt,
           inputTokens,
@@ -207,12 +269,47 @@ export class UiModelRunner {
           costUsd:
             providerCostUsd ?? calculateCost(this.apiModel, inputTokens, outputTokens),
         };
+        logger.info('provider.response', {
+          attempt,
+          providerResponseMs: response.providerResponseMs,
+          ttfcMs: firstContentMs,
+          chunks: chunkCount,
+          responseChars: rawResponse.length,
+          inputTokens,
+          outputTokens,
+          costUsd: response.costUsd,
+          costSource: providerCostUsd !== undefined ? 'provider-reported' : 'static-pricing',
+        });
+        if (rawResponse.length === 0) {
+          logger.warn('provider.response.empty', {
+            attempt,
+            outputTokens,
+            hint: 'output tokens spent with no content usually means the budget went to reasoning — check tuning',
+          });
+        }
+        return response;
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         if (attempt === maxAttempts || !isRetryableError(error)) {
+          logger.error('provider.request.failed', {
+            attempt,
+            maxAttempts,
+            retryable: isRetryableError(error),
+            error: message,
+            stack: error instanceof Error ? error.stack : undefined,
+            partialChars: rawResponse.length,
+          });
           throw error;
         }
 
         const backoffMs = this.retryBaseDelayMs * attempt;
+        logger.warn('provider.retry', {
+          attempt,
+          maxAttempts,
+          backoffMs,
+          error: message,
+          partialChars: rawResponse.length,
+        });
         await sleep(backoffMs);
       }
     }

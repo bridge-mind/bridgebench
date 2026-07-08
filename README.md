@@ -74,7 +74,7 @@ The harness's only judgment is objective **arena qualification** — an artifact
 
 Everything else the harness measures — WebGL context, FPS, animation, control coverage, `reset(seed)` determinism replay, hidden interaction probes — is recorded as **informational badges** beside the artifact, so voters can see whether the controls actually work. Badges never touch the ranking.
 
-Docs: [architecture](docs/architecture.md) · [running](docs/running.md) · [task authoring](docs/task-authoring.md) · [season policy](docs/season-policy.md)
+Docs: [architecture](docs/architecture.md) · [running](docs/running.md) · [task authoring](docs/task-authoring.md) · [season policy](docs/season-policy.md) · [model registry](docs/model-registry.md)
 
 ### On the roadmap
 
@@ -97,9 +97,10 @@ Full methodology docs land in [`docs/`](docs/) as the engine takes shape.
 ```
 bridgebench/
 ├── src/
-│   ├── cli.ts             # bridgebench ui run / evaluate / tasks · providers
+│   ├── cli.ts             # bridgebench ui run / evaluate / tasks · models · providers
 │   ├── config.ts          # season pins: dates, three.js version, viewport
-│   ├── providers/         # direct provider adapters (one stream() each) + pricing
+│   ├── providers/         # provider adapters (one stream() each) + model registry
+│   │                      #   (models.ts: identity, pricing, tuning, lifecycle)
 │   └── suites/ui/         # runner → extractor → normalizer → validator →
 │                          #   evaluator (Playwright, 2 phases) → score → snapshot
 ├── tasks/
@@ -129,6 +130,10 @@ npm run ui -- run -m openai/gpt-5.4
 # List tasks and configured providers
 npm run ui -- tasks
 npm run providers
+
+# Explore the model registry (see docs/model-registry.md)
+npm run models -- list
+npm run models -- validate
 ```
 
 Interaction scoring uses hidden probes (private during the season, published at rotation — see [season policy](docs/season-policy.md)). Without them, runs are still fully functional and marked `partial`.
@@ -138,7 +143,7 @@ Interaction scoring uses hidden probes (private during the season, published at 
 BridgeBench is open source and open to builders:
 
 - **Propose tasks** for a future season. Task submissions go through a private channel so hidden tests stay uncontaminated — see `CONTRIBUTING.md` (coming with Season 1).
-- **Add a provider.** If it speaks an OpenAI-compatible API, it's a registry entry and a pricing row.
+- **Add a provider or model.** If it speaks an OpenAI-compatible API, it's a provider entry plus one model-registry entry with pricing — see [docs/model-registry.md](docs/model-registry.md).
 - **Audit the archive.** Retired seasons are published in full. If a score doesn't reproduce, open an issue.
 
 ## License

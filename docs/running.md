@@ -42,6 +42,9 @@ npm run ui -- run -m openai/gpt-5.4 --resume
 # Generate + validate only (no browser)
 npm run ui -- run -m openai/gpt-5.4 --dry
 
+# Echo debug-level log events to the console while running
+npm run ui -- run -m openai/gpt-5.4 --debug
+
 # Grade an existing artifact file (no API keys needed)
 npm run ui -- evaluate fixtures/golden-correct.html -t s1-lava-lamp-redux
 
@@ -57,8 +60,31 @@ results/ui/journal.jsonl                    append-only source of truth
 results/ui/snapshot.json                    derived roster snapshot (v3)
 results/ui/artifacts/<task>/<slug>/<run>/   artifact.html, normalized.html,
                                             raw.txt, metadata.json, *.png
+results/ui/logs/<run-id>/run.jsonl          full-fidelity debug log (every stage)
+results/ui/logs/<run-id>/run.log            human-readable mirror
 snapshots/season-1/ui-bench-snapshot.json   committed season snapshot
 ```
+
+## Debug logging
+
+Every `ui run` / `ui evaluate` writes a flight-recorder log under
+`results/ui/logs/<run-id>/`. `run.jsonl` records one structured event per
+stage — provider request (tuning, overrides, full prompt), stream progress
+and retries, HTTP finish reason and usage, the full raw model response,
+extraction strategy, normalization, validation errors, the complete browser
+evaluation (console sample, page errors, blocked network, probes,
+determinism), and the final qualification with reasons. `run.log` is the
+same stream with long strings truncated for scanning.
+
+Knobs: `--debug` echoes debug events to the console;
+`BRIDGEBENCH_LOG_LEVEL` / `BRIDGEBENCH_LOG_ECHO` (debug|info|warn|error)
+tune the file and console thresholds.
+
+Debugging a disqualified task: `grep task.result run.jsonl | jq .reasons`,
+then walk backwards through that task's `validation.done`,
+`evaluation.done`, and `provider.http.complete` events — a `finishReason`
+of `length` means the completion budget truncated the artifact (fix the
+model's `tuning` in `src/providers/models.ts`).
 
 ## Publishing to bridgebench.ai
 

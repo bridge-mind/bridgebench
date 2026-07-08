@@ -57,6 +57,11 @@ export interface StreamOptions {
 export interface ProviderDefinition {
   /** Human-readable name, e.g. "OpenAI" */
   name: string;
+  /**
+   * Whether this is the model's own lab ("vendor") or a routing layer
+   * ("aggregator", e.g. OpenRouter). Default: "vendor".
+   */
+  kind?: 'vendor' | 'aggregator';
   /** Environment variable that holds the API key */
   envKey: string;
   /** Accepted environment variable aliases */

@@ -15,13 +15,28 @@ import chalk from 'chalk';
 import { Command } from 'commander';
 
 import {
+  ENGINE_VERSION,
   RESULTS_DIR,
   SEASON,
   SNAPSHOTS_DIR,
   loadBridgeBenchEnv,
   privateDir,
 } from './config.js';
-import { getDisplayName, listProviders, PROVIDERS } from './providers/index.js';
+import { closeRunLogger, getRunLogger, initRunLogger } from './logger.js';
+import {
+  MODEL_REGISTRY,
+  PROVIDERS,
+  RegistryExportSchema,
+  buildRegistryExport,
+  getDisplayName,
+  getModelBySlug,
+  getModelEntry,
+  getPricing,
+  listModels,
+  listProviders,
+  validateModelRegistry,
+} from './providers/index.js';
+import type { ModelEntry, RegistryExportProvider } from './providers/index.js';
 import { UiArtifactEvaluator, launchEvalBrowser } from './suites/ui/evaluator/index.js';
 import { sha256 } from './suites/ui/evaluator/page-setup.js';
 import { UiArtifactExtractor } from './suites/ui/extractor.js';
@@ -74,11 +89,19 @@ async function runUiBench(options: {
   task?: string;
   resume: boolean;
   dry: boolean;
+  debug: boolean;
   apiKey?: string;
   maxTokens?: string;
   temperature?: string;
 }): Promise<void> {
   loadBridgeBenchEnv();
+
+  const runStamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logger = initRunLogger({
+    dir: path.join(UI_RESULTS_DIR, 'logs', `run-${runStamp}`),
+    ...(options.debug ? { echoLevel: 'debug' as const } : {}),
+  });
+  console.log(chalk.dim(`Debug log: ${logger.dir}`));
 
   const loader = new UiTaskLoader();
   const tasks = options.task
@@ -96,6 +119,20 @@ async function runUiBench(options: {
   const modelIds = options.model.split(',').map((m) => m.trim()).filter(Boolean);
   const displayNames = options.name?.split(',').map((n) => n.trim()) ?? [];
   const apiKeys = parseApiKeys(options.apiKey);
+
+  logger.info('run.start', {
+    engineVersion: ENGINE_VERSION,
+    season: SEASON.id,
+    modelIds,
+    taskIds: tasks.map((t) => t.id),
+    resume: options.resume,
+    dry: options.dry,
+    maxTokens: options.maxTokens ?? null,
+    temperature: options.temperature ?? null,
+    privateOverlay: loader.hasPrivateOverlay(),
+    node: process.version,
+    platform: process.platform,
+  });
 
   const store = new UiBenchResultStore({
     journalPath: UI_JOURNAL_PATH,
@@ -115,6 +152,7 @@ async function runUiBench(options: {
     browser = launched.browser;
     executablePath = launched.executablePath;
     console.log(chalk.dim(`Chromium: ${executablePath}`));
+    logger.info('run.browser', { executablePath });
   }
 
   store.open();
@@ -135,10 +173,12 @@ async function runUiBench(options: {
       for (const task of tasks) {
         if (skipSet.has(buildUiBenchSkipKey(modelId, task.id))) {
           console.log(chalk.dim(`  ↷ ${task.id} (already in journal, --resume)`));
+          logger.info('task.skipped', { model: modelId, task: task.id, reason: 'resume' });
           continue;
         }
 
         process.stdout.write(`  ▸ ${task.id} … `);
+        logger.info('task.start', { model: modelId, task: task.id, dry: options.dry });
 
         let result: UiBenchTaskResult;
         try {
@@ -163,6 +203,12 @@ async function runUiBench(options: {
           console.log(`${statusText}${partial}`);
         } catch (error) {
           console.log(chalk.red(`runner error: ${error instanceof Error ? error.message : error}`));
+          logger.error('task.runner-error', {
+            model: modelId,
+            task: task.id,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          });
           result = {
             modelId,
             displayName,
@@ -220,6 +266,19 @@ async function runUiBench(options: {
           };
         }
 
+        logger.info('task.result', {
+          model: modelId,
+          task: task.id,
+          qualified: result.qualification.qualified,
+          reasons: result.qualification.reasons,
+          diagnostics: result.qualification.diagnostics,
+          errorType: result.errorType ?? null,
+          costUsd: result.costUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          providerResponseMs: result.providerResponseMs,
+          artifactHtml: result.artifactPaths.html || null,
+        });
         store.append(result);
       }
     }
@@ -242,6 +301,16 @@ async function runUiBench(options: {
     );
   }
   console.log(chalk.dim(`\nSnapshot: ${UI_SNAPSHOT_PATH}\nSeason copy: ${SEASON_SNAPSHOT_PATH}`));
+  console.log(chalk.dim(`Debug log: ${logger.dir}`));
+
+  logger.info('run.end', {
+    roster: snapshot.roster.map((entry) => ({
+      modelId: entry.modelId,
+      qualifiedTasks: entry.qualifiedTasks,
+      totalTasks: entry.totalTasks,
+    })),
+  });
+  await closeRunLogger();
 }
 
 async function runSingleTask(input: {
@@ -257,14 +326,38 @@ async function runSingleTask(input: {
   executablePath: string;
 }): Promise<UiBenchTaskResult> {
   const { task } = input;
+  const logger = getRunLogger().child({ model: input.modelId, task: task.id });
 
   const response = await input.runner.runTask(task);
-  const html = input.extractor.extractHtml(response.rawResponse);
+  logger.debug('provider.raw-response', {
+    rawChars: response.rawResponse.length,
+    raw: response.rawResponse,
+  });
+
+  const extraction = input.extractor.extract(response.rawResponse);
+  const html = extraction.html;
+  logger.info('extract.done', {
+    strategy: extraction.strategy,
+    htmlChars: html.length,
+    droppedChars: response.rawResponse.length - html.length,
+  });
+
   const normalizedHtml = input.normalizer.normalize(html, {
     taskTitle: task.title,
     modelName: input.displayName,
   });
+  logger.debug('normalize.done', {
+    beforeChars: html.length,
+    afterChars: normalizedHtml.length,
+  });
+
   const validation = input.validator.validateHtml(normalizedHtml, task);
+  logger.info('validation.done', {
+    valid: validation.valid,
+    errors: validation.errors,
+    warnings: validation.warnings,
+    metadata: validation.metadata,
+  });
 
   const record = await input.artifactStore.writeArtifact({
     modelId: input.modelId,
@@ -280,6 +373,8 @@ async function runSingleTask(input: {
     validation,
   });
 
+  logger.debug('artifact.saved', { dir: record.paths.dir });
+
   let evaluation: UiArtifactEvaluationResult | null = null;
   if (input.browser && validation.valid) {
     const evaluator = new UiArtifactEvaluator(input.browser);
@@ -288,6 +383,11 @@ async function runSingleTask(input: {
       task,
       outputDir: record.paths.dir,
       executablePath: input.executablePath,
+    });
+    logger.info('evaluation.done', { evaluation });
+  } else {
+    logger.info('evaluation.skipped', {
+      reason: !input.browser ? 'dry run (no browser)' : 'validation failed',
     });
   }
 
@@ -331,6 +431,12 @@ async function evaluateArtifactFile(
   const task = await loader.loadById(options.task);
   const html = await fs.readFile(path.resolve(file), 'utf8');
 
+  const evalStamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logger = initRunLogger({
+    dir: path.join(UI_RESULTS_DIR, 'logs', `evaluate-${evalStamp}`),
+  });
+  logger.info('evaluate.start', { file: path.resolve(file), task: task.id, model: options.model ?? 'manual' });
+
   const normalizer = new UiArtifactNormalizer();
   const validator = new UiArtifactValidator();
   const modelName = options.model ?? 'manual';
@@ -364,6 +470,16 @@ async function evaluateArtifactFile(
   }
 
   const qualification = assessQualification({ task, validation, evaluation });
+  logger.info('evaluate.result', {
+    valid: validation.valid,
+    errors: validation.errors,
+    warnings: validation.warnings,
+    evaluation,
+    qualified: qualification.qualified,
+    reasons: qualification.reasons,
+    diagnostics: qualification.diagnostics,
+  });
+  await closeRunLogger();
 
   if (evaluation) {
     console.log(chalk.bold('\nEvaluation:'));
@@ -415,6 +531,7 @@ ui.command('run')
   .option('-t, --task <taskId>', 'run a single task')
   .option('--resume', 'skip (model, task) pairs already successful in the journal', false)
   .option('--dry', 'generate + validate only — no browser evaluation', false)
+  .option('--debug', 'echo debug-level log events to the console', false)
   .option('--api-key <pairs>', 'inline API keys: provider=key,provider=key')
   .option('--max-tokens <n>', 'completion token ceiling')
   .option('--temperature <t>', 'sampling temperature')
@@ -440,6 +557,146 @@ ui.command('tasks')
     }
   });
 
+// ── Model registry ─────────────────────────────────────────────────────────
+
+function exportProviders(): RegistryExportProvider[] {
+  return Object.entries(PROVIDERS).map(([slug, def]) => ({
+    slug,
+    name: def.name,
+    type: def.type,
+    kind: def.kind ?? 'vendor',
+    ...(def.baseURL ? { baseURL: def.baseURL } : {}),
+  }));
+}
+
+function formatPrice(entry: ModelEntry): string {
+  if (entry.pricing === null) return 'route-reported';
+  const prices = getPricing(entry.id);
+  if (!prices) return chalk.yellow('unpriced');
+  return `$${prices.input}/$${prices.output}`;
+}
+
+function entryFlags(entry: ModelEntry): string {
+  const flags: string[] = [];
+  if (entry.status && entry.status !== 'active') flags.push(entry.status);
+  if (entry.hidden) flags.push('hidden');
+  if (entry.runnable === false) flags.push('not-runnable');
+  if (entry.variantOf) flags.push(`variant of ${entry.variantOf}`);
+  if (entry.openWeights) flags.push('open-weights');
+  return flags.join(', ');
+}
+
+const models = program
+  .command('models')
+  .description('Model registry — the source of truth for model metadata');
+
+models
+  .command('list')
+  .description('List registry entries')
+  .option('-p, --provider <slug>', 'filter by routing provider')
+  .option('-v, --vendor <slug>', 'filter by model creator')
+  .option('--all', 'include hidden entries', false)
+  .action((options: { provider?: string; vendor?: string; all: boolean }) => {
+    const entries = listModels({
+      provider: options.provider,
+      vendor: options.vendor,
+      includeHidden: options.all,
+    });
+    let vendor = '';
+    for (const entry of entries) {
+      if (entry.vendor !== vendor) {
+        vendor = entry.vendor;
+        console.log(chalk.bold(`\n${vendor}`));
+      }
+      const flags = entryFlags(entry);
+      console.log(
+        `  ${entry.id.padEnd(58)} ${entry.displayName.padEnd(36)} ` +
+          `${formatPrice(entry).padEnd(16)}${flags ? chalk.dim(` [${flags}]`) : ''}`,
+      );
+    }
+    console.log(
+      chalk.dim(
+        `\n${entries.length} models — prices are USD per 1M input/output tokens`,
+      ),
+    );
+  });
+
+models
+  .command('show')
+  .description('Show one model (by id, alias, or slug)')
+  .argument('<ref>', 'model id, alias, or slug')
+  .action((ref: string) => {
+    const entry = getModelEntry(ref) ?? getModelBySlug(ref);
+    if (!entry) {
+      console.error(chalk.red(`No registry entry matches "${ref}".`));
+      process.exit(1);
+    }
+    const variants = Object.values(MODEL_REGISTRY).filter(
+      (e) => e.variantOf === entry.id,
+    );
+    console.log(JSON.stringify(entry, null, 2));
+    if (variants.length > 0) {
+      console.log(
+        chalk.dim(`\nVariants: ${variants.map((v) => v.id).join(', ')}`),
+      );
+    }
+  });
+
+models
+  .command('validate')
+  .description('Check every registry invariant (exit 1 on errors)')
+  .action(() => {
+    const report = validateModelRegistry(Object.keys(PROVIDERS));
+    for (const warning of report.warnings) {
+      console.log(chalk.yellow(`⚠ ${warning}`));
+    }
+    for (const error of report.errors) {
+      console.log(chalk.red(`✗ ${error}`));
+    }
+    const total = Object.keys(MODEL_REGISTRY).length;
+    if (report.errors.length > 0) {
+      console.error(
+        chalk.red(`\n${report.errors.length} error(s) across ${total} models.`),
+      );
+      process.exit(1);
+    }
+    console.log(
+      chalk.green(
+        `✓ ${total} models valid` +
+          (report.warnings.length ? ` (${report.warnings.length} warnings)` : ''),
+      ),
+    );
+  });
+
+models
+  .command('export')
+  .description('Emit the registry as JSON for downstream consumers (UI, API)')
+  .option('-o, --out <path>', 'write to a file instead of stdout')
+  .action(async (options: { out?: string }) => {
+    const report = validateModelRegistry(Object.keys(PROVIDERS));
+    if (report.errors.length > 0) {
+      for (const error of report.errors) console.error(chalk.red(`✗ ${error}`));
+      console.error(chalk.red('Registry invalid — export aborted.'));
+      process.exit(1);
+    }
+    const exported = RegistryExportSchema.parse(
+      buildRegistryExport({
+        engineVersion: ENGINE_VERSION,
+        season: SEASON.id,
+        providers: exportProviders(),
+      }),
+    );
+    const json = `${JSON.stringify(exported, null, 2)}\n`;
+    if (options.out) {
+      const outPath = path.resolve(options.out);
+      await fs.mkdir(path.dirname(outPath), { recursive: true });
+      await fs.writeFile(outPath, json, 'utf8');
+      console.log(chalk.green(`✓ ${exported.models.length} models → ${outPath}`));
+    } else {
+      process.stdout.write(json);
+    }
+  });
+
 program
   .command('providers')
   .description('Show configured providers')
@@ -455,7 +712,12 @@ program
     console.log(chalk.dim(`Providers: ${Object.keys(PROVIDERS).length} — Season: ${SEASON.name}`));
   });
 
-program.parseAsync(process.argv).catch((error) => {
+program.parseAsync(process.argv).catch(async (error) => {
+  getRunLogger().error('run.fatal', {
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  });
+  await closeRunLogger();
   console.error(chalk.red(error instanceof Error ? error.message : String(error)));
   process.exit(1);
 });

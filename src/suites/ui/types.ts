@@ -396,9 +396,4 @@ export function buildUiBenchSkipKey(modelId: string, taskId: string): string {
 }
 
 /** modelId → artifact slug ("openai/gpt-5.4" → "openai--gpt-5.4"). */
-export function artifactSlug(modelId: string): string {
-  return modelId
-    .replace(/\//g, '--')
-    .replace(/[^a-zA-Z0-9._-]/g, '-')
-    .toLowerCase();
-}
+export { artifactSlug } from '../../providers/models.js';

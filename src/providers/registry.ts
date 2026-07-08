@@ -14,7 +14,7 @@ import type { ProviderDefinition } from './types.js';
 import type { BaseProvider } from './base.js';
 import { OpenAICompatProvider } from './openai-compat.js';
 import { AnthropicProvider } from './anthropic.js';
-import { MODEL_REGISTRY } from './models.js';
+import { MODEL_REGISTRY, resolveModelId } from './models.js';
 
 // ---------------------------------------------------------------------------
 // Provider definitions — the single source of truth
@@ -91,6 +91,7 @@ export const PROVIDERS: Record<string, ProviderDefinition> = {
   // ── Fallback / aggregator ────────────────────────────────────────────
   openrouter: {
     name: 'OpenRouter',
+    kind: 'aggregator',
     envKey: 'OPENROUTER_API_KEY',
     type: 'openai-compat',
     baseURL: 'https://openrouter.ai/api/v1',
@@ -152,8 +153,11 @@ export function createProvider(
   fullModelId: string,
   apiKeys?: Record<string, string>,
 ): { provider: BaseProvider; apiModel: string; providerSlug: string } {
-  const { providerSlug, apiModel: parsedApiModel } = parseModelId(fullModelId);
-  const registryEntry = MODEL_REGISTRY[fullModelId];
+  // Registered aliases (legacy prefixes like "xai/…") resolve to their
+  // canonical id before parsing, so they stay runnable.
+  const canonicalId = resolveModelId(fullModelId);
+  const { providerSlug, apiModel: parsedApiModel } = parseModelId(canonicalId);
+  const registryEntry = MODEL_REGISTRY[canonicalId];
   const apiModel = registryEntry?.apiModel ?? parsedApiModel;
   const def = PROVIDERS[providerSlug];
   const acceptedKeyNames = [providerSlug, def.envKey, ...(def.envAliases ?? [])];

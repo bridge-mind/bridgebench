@@ -20,6 +20,7 @@ import * as path from 'node:path';
 
 import type { Browser } from 'playwright-core';
 
+import { getRunLogger } from '../../../logger.js';
 import type {
   UiArtifactEvaluationResult,
   UiBenchFullTask,
@@ -56,6 +57,13 @@ export class UiArtifactEvaluator {
     const startedAt = Date.now();
     const { task } = options;
     const viewport = task.viewport;
+    const logger = getRunLogger().child({ task: task.id, stage: 'evaluate' });
+    logger.debug('eval.start', {
+      viewport,
+      htmlBytes: options.html.length,
+      outputDir: options.outputDir,
+      probesAvailable: task.probes?.length ?? 0,
+    });
 
     await fs.mkdir(options.outputDir, { recursive: true });
 
@@ -105,11 +113,15 @@ export class UiArtifactEvaluator {
           timeout: 20_000,
         });
       } catch (error) {
+        logger.error('eval.page-load.failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
         return this.finish(base, consoleCapture, network, startedAt, {
           error: `Page load failed: ${error instanceof Error ? error.message : error}`,
         });
       }
       base.startupTimeMs = Date.now() - loadStart;
+      logger.debug('eval.page-load', { startupTimeMs: base.startupTimeMs });
 
       const globalsStart = Date.now();
       const hasGlobals = await page
@@ -123,6 +135,14 @@ export class UiArtifactEvaluator {
         .then(() => true)
         .catch(() => false);
       base.harnessGlobalsMs = hasGlobals ? Date.now() - globalsStart + base.startupTimeMs : null;
+      if (hasGlobals) {
+        logger.debug('eval.globals', { harnessGlobalsMs: base.harnessGlobalsMs });
+      } else {
+        logger.warn('eval.globals.timeout', {
+          timeoutMs: GLOBALS_TIMEOUT_MS,
+          hint: 'BridgeBenchTaskManifest/BridgeBenchTaskApi never appeared — startup crash or missing contract',
+        });
+      }
 
       // ── Settle (SwiftShader shader compilation is slow) ─────────────
       await page.waitForTimeout(SETTLE_MS);
@@ -234,7 +254,14 @@ export class UiArtifactEvaluator {
       if (task.probes && hasGlobals) {
         const results: UiProbeResult[] = [];
         for (const probe of task.probes) {
-          results.push(await interpreter.runProbe(probe));
+          const result = await interpreter.runProbe(probe);
+          logger.debug('eval.probe', {
+            probeId: result.id,
+            passed: result.passed,
+            details: result.details,
+            error: result.error,
+          });
+          results.push(result);
         }
         base.probes = results;
       }
@@ -266,6 +293,7 @@ export class UiArtifactEvaluator {
           statesMatch: determinism.statesMatch,
           ...(determinism.error ? { error: determinism.error } : {}),
         };
+        logger.debug('eval.determinism', { ...base.determinism });
         if (determinism.shots) {
           await fs.writeFile(
             path.join(options.outputDir, 'determinism-a.png'),

@@ -15,6 +15,7 @@
  * against a feature branch of the site until the v3 data layer lands there.
  */
 
+import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,6 +108,21 @@ writeFileSync(
     2,
   ),
 );
+
+// ── Model registry (canonical model metadata for the site) ───────────────
+try {
+  const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+  const registryJson = execFileSync(
+    tsxBin,
+    [path.join(repoRoot, 'src', 'cli.ts'), 'models', 'export'],
+    { cwd: repoRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+  );
+  const registry = JSON.parse(registryJson);
+  writeFileSync(path.join(dataDir, 'model-registry.json'), registryJson);
+  console.log(`registry: ${registry.models.length} models → src/data/model-registry.json`);
+} catch (error) {
+  console.warn(`registry: export failed — ${error.message ?? error}`);
+}
 
 console.log(`snapshot: ${snapshot.roster?.length ?? 0} models → src/data/ui-bench-snapshot.json (+ lite)`);
 console.log(`artifacts: ${copiedArtifacts} copied${missingArtifacts ? `, ${missingArtifacts} missing on disk` : ''}`);

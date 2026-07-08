@@ -8,6 +8,7 @@
 
 import OpenAI from 'openai';
 import { BaseProvider } from './base.js';
+import { getRunLogger } from '../logger.js';
 import type { ProviderConfig, StreamChunk, StreamOptions } from './types.js';
 
 export interface OpenAICompatConfig extends ProviderConfig {
@@ -122,10 +123,19 @@ export class OpenAICompatProvider extends BaseProvider {
   }
 
   async *stream(options: StreamOptions): AsyncIterable<StreamChunk> {
+    const logger = getRunLogger();
     const requestBody = buildOpenAICompatRequest(options, {
       maxTokensParam: this.maxTokensParam,
       streamUsage: this.streamUsage,
       supportsStreaming: this.supportsStreaming,
+    });
+
+    // The prompt itself is logged once by the runner; summarize it here so
+    // the wire-level body is still fully reconstructable from the log.
+    const { messages: _messages, ...bodyWithoutMessages } = requestBody;
+    logger.debug('provider.http.request', {
+      provider: this.name,
+      body: { ...bodyWithoutMessages, messages: `[1 user message, ${options.prompt.length} chars]` },
     });
 
     if (!this.supportsStreaming || options.forceNonStreaming || isGpt55Model(options.model)) {
@@ -143,6 +153,15 @@ export class OpenAICompatProvider extends BaseProvider {
       const content = message?.content ?? message?.reasoning_content;
       const usage = response.usage;
 
+      logger.debug('provider.http.complete', {
+        provider: this.name,
+        mode: 'non-streaming',
+        responseId: response.id,
+        finishReason: response.choices[0]?.finish_reason ?? null,
+        usedReasoningContentFallback: !message?.content && !!message?.reasoning_content,
+        usage: usage ?? null,
+      });
+
       yield {
         content: typeof content === 'string' ? content : undefined,
         inputTokens: usage?.prompt_tokens,
@@ -155,15 +174,24 @@ export class OpenAICompatProvider extends BaseProvider {
       requestBody as OpenAI.ChatCompletionCreateParamsStreaming,
     );
 
+    let finishReason: string | null = null;
+    let lastUsage: Record<string, unknown> | null = null;
+    let reasoningContentChars = 0;
     for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta as
+      const choice = chunk.choices[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice?.delta as
         | (OpenAI.ChatCompletionChunk.Choice.Delta & { reasoning_content?: string })
         | undefined;
+      if (!delta?.content && delta?.reasoning_content) {
+        reasoningContentChars += delta.reasoning_content.length;
+      }
       const content = delta?.content ?? delta?.reasoning_content;
       const raw = chunk as unknown as Record<string, unknown>;
       const usage = raw.usage as
         | { prompt_tokens?: number; completion_tokens?: number; cost?: number }
         | undefined;
+      if (usage) lastUsage = usage as Record<string, unknown>;
 
       // OpenRouter returns actual cost in usage.cost (USD) on the final chunk
       const costUsd = usage?.cost ?? (raw.x_openrouter as { cost?: number })?.cost;
@@ -175,5 +203,13 @@ export class OpenAICompatProvider extends BaseProvider {
         ...(costUsd !== undefined && { costUsd: Number(costUsd) }),
       };
     }
+
+    logger.debug('provider.http.complete', {
+      provider: this.name,
+      mode: 'streaming',
+      finishReason,
+      reasoningContentChars,
+      usage: lastUsage,
+    });
   }
 }

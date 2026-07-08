@@ -7,6 +7,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { BaseProvider } from './base.js';
+import { getRunLogger } from './../logger.js';
 import type { ProviderConfig, StreamChunk, StreamOptions } from './types.js';
 
 export class AnthropicProvider extends BaseProvider {
@@ -23,6 +24,18 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   async *stream(options: StreamOptions): AsyncIterable<StreamChunk> {
+    const logger = getRunLogger();
+    logger.debug('provider.http.request', {
+      provider: this.name,
+      body: {
+        model: options.model,
+        max_tokens: options.maxTokens,
+        temperature: options.temperature,
+        stream: true,
+        messages: `[1 user message, ${options.prompt.length} chars]`,
+      },
+    });
+
     const response = await this.client.messages.create({
       model: options.model,
       max_tokens: options.maxTokens,
@@ -31,6 +44,8 @@ export class AnthropicProvider extends BaseProvider {
       stream: true,
     });
 
+    let stopReason: string | null = null;
+    let finalOutputTokens: number | null = null;
     for await (const event of response) {
       switch (event.type) {
         case 'message_start':
@@ -44,9 +59,18 @@ export class AnthropicProvider extends BaseProvider {
           break;
 
         case 'message_delta':
+          if (event.delta.stop_reason) stopReason = event.delta.stop_reason;
+          finalOutputTokens = event.usage.output_tokens;
           yield { outputTokens: event.usage.output_tokens };
           break;
       }
     }
+
+    logger.debug('provider.http.complete', {
+      provider: this.name,
+      mode: 'streaming',
+      stopReason,
+      outputTokens: finalOutputTokens,
+    });
   }
 }

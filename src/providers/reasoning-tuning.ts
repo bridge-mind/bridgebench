@@ -1,16 +1,18 @@
 /**
  * Shared reasoning/thinking tuning.
  *
- * Maps synthetic model-ID variants (e.g. `foo:thinking`) to the
- * provider-specific request overrides needed to enable extended thinking.
- * Used by every bench runner's `tune*Request()` function so we don't
- * duplicate this logic per bench.
+ * Resolution order:
+ *   1. The model's registry entry `tuning` (models.ts) when it fully
+ *      specifies a reasoning configuration — the explicit source of truth.
+ *   2. Synthetic model-ID variants (e.g. `foo:thinking`) mapped to the
+ *      provider-specific request overrides needed to enable extended
+ *      thinking.
  *
- * Current supported variant: `<anthropic-model>:thinking` (via OpenRouter)
- * → OpenRouter `reasoning.max_tokens: 128000` (the documented ceiling)
- *   + temperature: 1 (required by Anthropic when thinking is enabled)
- *   + max_tokens: 140000 (must strictly exceed the reasoning budget)
+ * Used by bench runners' `tune*Request()` functions so this logic isn't
+ * duplicated per bench.
  */
+
+import { getModelEntry } from './models.js';
 
 export interface ReasoningTuning {
   requestBodyOverrides: Record<string, unknown>;
@@ -19,6 +21,20 @@ export interface ReasoningTuning {
 }
 
 export function resolveReasoningTuning(modelId: string): ReasoningTuning | null {
+  // Registry entry with a complete reasoning config wins.
+  const tuning = getModelEntry(modelId)?.tuning;
+  if (
+    tuning?.requestBodyOverrides &&
+    tuning.temperature !== undefined &&
+    tuning.maxTokens !== undefined
+  ) {
+    return {
+      requestBodyOverrides: tuning.requestBodyOverrides,
+      temperature: tuning.temperature,
+      maxTokens: tuning.maxTokens,
+    };
+  }
+
   // OpenRouter-routed Anthropic with max thinking
   if (
     modelId.startsWith('openrouter/anthropic/') &&

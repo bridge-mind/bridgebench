@@ -7,7 +7,7 @@
  * from different seasons are never mixed.
  */
 
-import { SEASON, THREE_VERSION } from '../../config.js';
+import { ENGINE_VERSION, SEASON, THREE_VERSION } from '../../config.js';
 import {
   UI_TASK_CATEGORIES,
   type UiBenchLeaderboardEntry,
@@ -15,8 +15,6 @@ import {
   type UiBenchSnapshot,
   type UiBenchTaskResult,
 } from './types.js';
-
-const ENGINE_VERSION = '3.0.0-alpha.0';
 
 function round1(value: number): number {
   return Math.round(value * 10) / 10;
