@@ -9,6 +9,7 @@ import { FileArenaLogger } from './logger.js';
 import { listModels } from './models.js';
 import { OpenRouterClient, sanitizeError } from './openrouter.js';
 import { findProjectRoot } from './paths.js';
+import { publishJournal, publishTasks } from './publish.js';
 import { writeReports } from './report.js';
 import { ArenaStore, categoryStoreConfig } from './store.js';
 import { TaskLoader } from './tasks.js';
@@ -83,6 +84,18 @@ tasks
     }
   });
 
+tasks
+  .command('publish')
+  .description('Push the task pack (public + private halves) to the bridgebench.ai API')
+  .option('-c, --category <category>', `limit to one category (${CATEGORIES.join(', ')})`, parseCategory)
+  .action(async (options: { category?: BenchmarkCategory }) => {
+    const categories = options.category ? [options.category] : CATEGORIES;
+    for (const category of categories) {
+      const result = await publishTasks(category);
+      console.log(`✓ ${category}: published ${result.imported} tasks`);
+    }
+  });
+
 const arena = program.command('arena').description('Run autonomous arena matches');
 arena
   .command('run')
@@ -129,6 +142,21 @@ arena
       }
     },
   );
+
+arena
+  .command('publish')
+  .description('Push the match journal to the bridgebench.ai API (idempotent on match id)')
+  .option('-c, --category <category>', `arena journal to publish (${CATEGORIES.join(', ')})`, parseCategory, 'reasoning')
+  .action(async (options: { category: BenchmarkCategory }) => {
+    const result = await publishJournal(options.category);
+    if (result.matches === 0) {
+      console.log(`The ${options.category} journal is empty; run \`arena run\` first.`);
+      return;
+    }
+    console.log(
+      `✓ ${options.category}: ${result.imported} new, ${result.skipped} already present (of ${result.matches} journal lines)`,
+    );
+  });
 
 arena
   .command('triage')

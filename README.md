@@ -105,6 +105,10 @@ npm run arena -- run --matches 24 --seed july-calibration --max-cost-usd 40 --re
 
 # Rebuild reports for both arenas without API calls (or one: --category reasoning)
 npm run report
+
+# Maintainers: sync outputs to the bridgebench.ai API (admin key required; idempotent)
+npm run tasks -- publish
+npm run arena -- publish --category reasoning
 ```
 
 **Judged runs need the hidden references.** Task prompts are public in this repo; the expected resolutions and comparative rubrics that judges use are not, so they can't be trained against. Runs require `BRIDGEBENCH_PRIVATE_DIR` to point at a private-pack checkout — see [docs/private-packs.md](docs/private-packs.md) for the layout, the contamination guard, and the publish-at-retirement policy. Everything else — validation, report rebuilds, triage, the dashboard's read views — works from the public halves alone.
@@ -155,7 +159,7 @@ The loop: run → read the auto-printed health report → chase flags with the r
 ```
 bridgebench/
 ├── src/
-│   ├── cli.ts             # models · tasks · arena run/triage/generation · report
+│   ├── cli.ts             # models · tasks · arena run/publish/triage/generation · report
 │   ├── arena.ts           # match loop: forfeits, health stop, budget stop
 │   ├── scheduler.ts       # seeded, exposure-balanced deterministic scheduling
 │   ├── judges.ts          # anonymization, per-judge A/B permutation, majority vote

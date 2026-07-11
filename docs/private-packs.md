@@ -28,6 +28,7 @@ Resolution order in `src/tasks.ts`: an explicit `privateRoot` constructor argume
 | `npm run tasks -- validate` (public schema + pack balance) | `npm run arena -- run` (judges need the hidden reference) |
 | `npm run report` (rebuild snapshots/leaderboards from a journal) | Starting a run from the dashboard |
 | `npm run triage`, `arena generation <id>` | Authoring/validating private halves |
+| `npm run arena -- publish` (journal sync; admin key required) | `npm run tasks -- publish` (the API stores both halves) |
 | The dashboard's Leaderboard and Matches views | |
 | `npm test` (offline suites synthesize a stand-in reference) | |
 
