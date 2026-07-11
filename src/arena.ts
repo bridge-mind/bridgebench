@@ -4,16 +4,21 @@ import { noopLogger, type ArenaLogger } from './logger.js';
 import { getModel, listModels } from './models.js';
 import { sanitizeError } from './openrouter.js';
 import { writeReports } from './report.js';
+import { createRunManifest, runIdFromManifest, runManifestHash } from './run-manifest.js';
 import { scheduleMatches } from './scheduler.js';
 import { ArenaStore } from './store.js';
 import { buildCompetitorPrompt } from './tasks.js';
 import { detectResponseAnomalies } from './triage.js';
 import {
   METHODOLOGY_VERSION,
-  type ArenaEvent,
+  competitorCost,
+  competitorOutputTokens,
+  competitorReasoningTokens,
+  type ArenaEventInput,
   type ArenaEventSink,
   type ArenaRunConfig,
   type CompleteArenaTask,
+  type CompetitorFailure,
   type CompetitorResponse,
   type MatchResult,
   type OpenRouterGateway,
@@ -24,18 +29,28 @@ import {
 const HEALTH_STOP_MIN_MATCHES = 4;
 const HEALTH_STOP_FAILURE_RATE = 0.5;
 
-function failedResponse(modelId: string, error: unknown, latencyMs: number): CompetitorResponse {
+interface RunProgress {
+  costUsd: number;
+  completed: number;
+  matchesWithFailures: number;
+  stoppedForBudget: boolean;
+}
+
+interface PreparedRun {
+  runId: string;
+  manifestHash: string;
+  schedule: ScheduledMatch[];
+  tasksById: Map<string, CompleteArenaTask>;
+  completedIds: Set<string>;
+  progress: RunProgress;
+}
+
+function failedResponse(modelId: string, error: unknown, latencyMs: number): CompetitorFailure {
   return {
     modelId,
     success: false,
     error: sanitizeError(error),
-    generationId: '',
-    content: '',
-    inputTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
     latencyMs,
-    finishReason: 'error',
   };
 }
 
@@ -53,35 +68,69 @@ export class ArenaRunner {
     this.judges = new JudgePanel(gateway, onEvent, logger);
   }
 
-  private emit(event: Omit<ArenaEvent, 'timestamp'>): void {
+  private emit(event: ArenaEventInput): void {
     this.onEvent?.({ ...event, timestamp: new Date().toISOString() });
   }
 
-  async run(
+  private async prepareRun(
     config: ArenaRunConfig,
     tasks: CompleteArenaTask[],
-  ): Promise<{ runId: string; completed: number; costUsd: number; stoppedForBudget: boolean }> {
+  ): Promise<PreparedRun> {
     const mismatched = tasks.filter((task) => task.public.category !== config.category);
     if (mismatched.length > 0) {
-      throw new Error(`Run category ${config.category} received tasks from another arena: ${mismatched.map((t) => t.public.id).join(', ')}`);
+      throw new Error(
+        `Run category ${config.category} received tasks from another arena: ${mismatched.map((task) => task.public.id).join(', ')}`,
+      );
     }
+
+    const journal = this.store.readAll();
+    const incompatible = journal.find((match) => match.methodologyVersion !== METHODOLOGY_VERSION);
+    if (incompatible) {
+      throw new Error(
+        `Cannot append ${METHODOLOGY_VERSION} matches to a ${incompatible.methodologyVersion} journal; archive it and start a new journal`,
+      );
+    }
+    // Fail before model validation or paid work if any existing line is invalid.
+    this.store.rebuildEloState();
+
     const competitors = listModels('competitor');
-    await Promise.all([...competitors, ...listModels('judge')].map((model) => this.gateway.validateModel(model)));
+    await Promise.all(
+      [...competitors, ...listModels('judge')].map((model) => this.gateway.validateModel(model)),
+    );
+    const manifest = createRunManifest(config, tasks);
+    const manifestHash = runManifestHash(manifest);
+    const runId = runIdFromManifest(manifest);
+    this.store.writeRunManifest(runId, manifest);
     const schedule = scheduleMatches({
       category: config.category,
       seed: config.seed,
       count: config.matches,
       modelIds: competitors.map((model) => model.id),
       tasks,
+      runId,
     });
-    const runId = schedule[0]?.runId ?? 'run';
-    const byTask = new Map(tasks.map((task) => [task.public.id, task]));
-    const completedIds = this.store.completedMatchIds();
-    const existingRunResults = this.store.readAll().filter((result) => result.runId === runId);
-    let runCost = existingRunResults.reduce((sum, result) => sum + result.matchCostUsd, 0);
-    let completed = 0;
-    let matchesWithFailures = 0;
-    let stoppedForBudget = false;
+    const existing = journal.filter((result) => result.runId === runId);
+    return {
+      runId,
+      manifestHash,
+      schedule,
+      tasksById: new Map(tasks.map((task) => [task.public.id, task])),
+      completedIds: new Set(journal.map((result) => result.matchId)),
+      progress: {
+        costUsd: existing.reduce((sum, result) => sum + result.matchCostUsd, 0),
+        completed: 0,
+        matchesWithFailures: 0,
+        stoppedForBudget: false,
+      },
+    };
+  }
+
+  async run(
+    config: ArenaRunConfig,
+    tasks: CompleteArenaTask[],
+  ): Promise<{ runId: string; completed: number; costUsd: number; stoppedForBudget: boolean }> {
+    const { runId, manifestHash, schedule, tasksById, completedIds, progress } =
+      await this.prepareRun(config, tasks);
 
     this.logger.info('run.started', {
       runId,
@@ -95,24 +144,37 @@ export class ArenaRunner {
     this.emit({
       id: `${runId}-started`,
       type: 'run.started',
-      data: { runId, category: config.category, seed: config.seed, matches: config.matches, maxCostUsd: config.maxCostUsd },
+      data: {
+        runId,
+        category: config.category,
+        seed: config.seed,
+        matches: config.matches,
+        maxCostUsd: config.maxCostUsd,
+      },
     });
 
     for (const match of schedule) {
       if (completedIds.has(match.id)) {
         if (config.resume) continue;
-        throw new Error(`Match ${match.id} is already journaled; rerun with --resume or choose a new seed`);
+        throw new Error(
+          `Match ${match.id} is already journaled; rerun with --resume or choose a new seed`,
+        );
       }
-      if (runCost >= config.maxCostUsd) {
-        stoppedForBudget = true;
+      if (progress.costUsd >= config.maxCostUsd) {
+        progress.stoppedForBudget = true;
         this.emit({
           id: `${match.runId}-budget-stopped`,
           type: 'run.budget-stopped',
-          data: { runId: match.runId, completed, costUsd: runCost, maxCostUsd: config.maxCostUsd },
+          data: {
+            runId: match.runId,
+            completed: progress.completed,
+            costUsd: progress.costUsd,
+            maxCostUsd: config.maxCostUsd,
+          },
         });
         break;
       }
-      const task = byTask.get(match.taskId);
+      const task = tasksById.get(match.taskId);
       if (!task) throw new Error(`Scheduled task not found: ${match.taskId}`);
       this.emit({
         id: `${match.id}-started`,
@@ -128,13 +190,13 @@ export class ArenaRunner {
           modelB: match.modelB,
         },
       });
-      const result = await this.runMatch(match, task);
+      const result = await this.runMatch(match, task, manifestHash);
       this.store.append(result);
       writeReports(this.store);
-      runCost += result.matchCostUsd;
-      completed += 1;
+      progress.costUsd += result.matchCostUsd;
+      progress.completed += 1;
       if (!result.competitors.responseA.success || !result.competitors.responseB.success) {
-        matchesWithFailures += 1;
+        progress.matchesWithFailures += 1;
       }
       this.emit({
         id: `${match.id}-completed`,
@@ -146,26 +208,23 @@ export class ArenaRunner {
           outcome: result.outcome,
           costUsd: result.matchCostUsd,
           eloAfter: result.eloAfter,
-          completed,
+          completed: progress.completed,
           total: schedule.length,
         },
       });
-      console.log(
-        `[${match.index + 1}/${schedule.length}] ${match.taskId}: ${result.winnerModelId ?? 'no contest'} (${result.outcome}, $${result.matchCostUsd.toFixed(4)})`,
-      );
       if (
         config.healthStop !== false &&
-        completed >= HEALTH_STOP_MIN_MATCHES &&
-        matchesWithFailures / completed >= HEALTH_STOP_FAILURE_RATE
+        progress.completed >= HEALTH_STOP_MIN_MATCHES &&
+        progress.matchesWithFailures / progress.completed >= HEALTH_STOP_FAILURE_RATE
       ) {
         this.logger.error('run.health-stopped', {
           runId,
-          completed,
-          matchesWithFailures,
-          failureRate: matchesWithFailures / completed,
+          completed: progress.completed,
+          matchesWithFailures: progress.matchesWithFailures,
+          failureRate: progress.matchesWithFailures / progress.completed,
         });
         throw new Error(
-          `Run halted after ${completed} matches: ${matchesWithFailures} had failed competitor responses. ` +
+          `Run halted after ${progress.completed} matches: ${progress.matchesWithFailures} had failed competitor responses. ` +
             `The provider path is unhealthy, so continuing would journal junk matches. ` +
             `Inspect the run log${this.logger.filePath ? ` at ${this.logger.filePath}` : ''}, fix the cause, ` +
             `then rerun with --resume (or pass --no-health-stop to override).`,
@@ -176,20 +235,34 @@ export class ArenaRunner {
     writeReports(this.store);
     this.logger.info('run.completed', {
       runId,
-      completed,
-      matchesWithFailures,
-      costUsd: runCost,
-      stoppedForBudget,
+      completed: progress.completed,
+      matchesWithFailures: progress.matchesWithFailures,
+      costUsd: progress.costUsd,
+      stoppedForBudget: progress.stoppedForBudget,
     });
     this.emit({
       id: `${runId}-completed`,
       type: 'run.completed',
-      data: { runId, completed, costUsd: runCost, stoppedForBudget },
+      data: {
+        runId,
+        completed: progress.completed,
+        costUsd: progress.costUsd,
+        stoppedForBudget: progress.stoppedForBudget,
+      },
     });
-    return { runId, completed, costUsd: runCost, stoppedForBudget };
+    return {
+      runId,
+      completed: progress.completed,
+      costUsd: progress.costUsd,
+      stoppedForBudget: progress.stoppedForBudget,
+    };
   }
 
-  private async runMatch(match: ScheduledMatch, task: CompleteArenaTask): Promise<MatchResult> {
+  private async runMatch(
+    match: ScheduledMatch,
+    task: CompleteArenaTask,
+    manifestHash: string,
+  ): Promise<MatchResult> {
     const state = this.store.rebuildEloState();
     const prompt = buildCompetitorPrompt(task);
     const [responseA, responseB] = await Promise.all([
@@ -206,16 +279,16 @@ export class ArenaRunner {
         modelA: {
           success: responseA.success,
           latencyMs: responseA.latencyMs,
-          costUsd: responseA.costUsd,
-          outputTokens: responseA.outputTokens,
-          reasoningTokens: responseA.reasoningTokens ?? null,
+          costUsd: competitorCost(responseA),
+          outputTokens: competitorOutputTokens(responseA),
+          reasoningTokens: competitorReasoningTokens(responseA) ?? null,
         },
         modelB: {
           success: responseB.success,
           latencyMs: responseB.latencyMs,
-          costUsd: responseB.costUsd,
-          outputTokens: responseB.outputTokens,
-          reasoningTokens: responseB.reasoningTokens ?? null,
+          costUsd: competitorCost(responseB),
+          outputTokens: competitorOutputTokens(responseB),
+          reasoningTokens: competitorReasoningTokens(responseB) ?? null,
         },
       },
     });
@@ -254,10 +327,12 @@ export class ArenaRunner {
       eloAfter[match.modelB] = update.ratingB;
     }
 
-    const judgeCost = panel?.votes.reduce((sum, vote) => sum + (vote.completion?.costUsd ?? 0), 0) ?? 0;
+    const judgeCost =
+      panel?.votes.reduce((sum, vote) => sum + (vote.completion?.costUsd ?? 0), 0) ?? 0;
     return {
       methodologyVersion: METHODOLOGY_VERSION,
       runId: match.runId,
+      runManifestHash: manifestHash,
       matchId: match.id,
       scheduleIndex: match.index,
       seed: match.seed,
@@ -277,7 +352,7 @@ export class ArenaRunner {
       eloBefore,
       eloAfter,
       pointAwarded: winnerModelId !== null,
-      matchCostUsd: responseA.costUsd + responseB.costUsd + judgeCost,
+      matchCostUsd: competitorCost(responseA) + competitorCost(responseB) + judgeCost,
     };
   }
 
@@ -335,7 +410,7 @@ export class ArenaRunner {
       return { modelId, success: true, ...completion };
     } catch (error) {
       const failed = failedResponse(modelId, error, Date.now() - startedAt);
-      emitDelta(failed.error ?? 'Request failed', true, false);
+      emitDelta(failed.error, true, false);
       return failed;
     }
   }

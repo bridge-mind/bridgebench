@@ -5,7 +5,7 @@ import { getModel, listModels } from './models.js';
 import { parseJudgeVerdict, sanitizeError } from './openrouter.js';
 import type {
   BenchmarkCategory,
-  CompetitorResponse,
+  CompetitorSuccess,
   CompleteArenaTask,
   ArenaEventSink,
   JudgeVote,
@@ -32,10 +32,7 @@ const exactIdentityTerms = Array.from(
   ),
 ).sort((left, right) => right.length - left.length);
 
-const exactIdentityPattern = new RegExp(
-  exactIdentityTerms.map(escapeRegExp).join('|'),
-  'gi',
-);
+const exactIdentityPattern = new RegExp(exactIdentityTerms.map(escapeRegExp).join('|'), 'gi');
 
 const familyIdentityPatterns = [
   /\bOpenAI\b/gi,
@@ -66,6 +63,33 @@ function shouldSwap(matchId: string, judgeId: string): boolean {
   return Number.parseInt(hex.slice(0, 2), 16) % 2 === 1;
 }
 
+function resolveJudgeOrder(
+  match: ScheduledMatch,
+  swapped: boolean,
+  responseA: CompetitorSuccess,
+  responseB: CompetitorSuccess,
+): {
+  modelAIdentity: string;
+  modelBIdentity: string;
+  answerA: string;
+  answerB: string;
+} {
+  if (!swapped) {
+    return {
+      modelAIdentity: match.modelA,
+      modelBIdentity: match.modelB,
+      answerA: responseA.content,
+      answerB: responseB.content,
+    };
+  }
+  return {
+    modelAIdentity: match.modelB,
+    modelBIdentity: match.modelA,
+    answerA: responseB.content,
+    answerB: responseA.content,
+  };
+}
+
 function mergeCompletions(first: ModelCompletion, second: ModelCompletion): ModelCompletion {
   return {
     ...second,
@@ -76,7 +100,7 @@ function mergeCompletions(first: ModelCompletion, second: ModelCompletion): Mode
   };
 }
 
-function buildJudgePayload(
+export function buildJudgePayload(
   task: CompleteArenaTask,
   modelAResponse: string,
   modelBResponse: string,
@@ -135,6 +159,14 @@ missing evidence outranks a fluent but fabricated answer. Blanket refusal is not
 hedging on a deliverable the reference marks as supported is also an error.`,
 };
 
+export function judgePromptPolicyHash(category: BenchmarkCategory): string {
+  return createHash('sha256').update(JUDGE_SYSTEM_CATEGORY[category]).digest('hex');
+}
+
+export function judgeSystemPrompt(category: BenchmarkCategory): string {
+  return JUDGE_SYSTEM_CATEGORY[category];
+}
+
 export class JudgePanel {
   private readonly logger: ArenaLogger;
 
@@ -142,6 +174,7 @@ export class JudgePanel {
     private readonly gateway: OpenRouterGateway,
     private readonly onEvent?: ArenaEventSink,
     logger: ArenaLogger = noopLogger,
+    private readonly swapForJudge: (matchId: string, judgeId: string) => boolean = shouldSwap,
   ) {
     this.logger = logger;
   }
@@ -149,39 +182,42 @@ export class JudgePanel {
   async judge(input: {
     match: ScheduledMatch;
     task: CompleteArenaTask;
-    responseA: CompetitorResponse;
-    responseB: CompetitorResponse;
+    responseA: CompetitorSuccess;
+    responseB: CompetitorSuccess;
   }): Promise<PanelDecision> {
-    const votes = await Promise.all(listModels('judge').map(async (judge) => {
-      const vote = await this.runJudge(judge.id, input);
-      this.onEvent?.({
-        id: `${input.match.id}-judge-${judge.id}`,
-        type: 'judge.completed',
-        timestamp: new Date().toISOString(),
-        data: {
-          matchId: input.match.id,
-          judgeModelId: judge.id,
-          // The judge's raw label is per-judge permuted; votedFor is the
-          // resolved global model id and is what UIs should display.
-          anonymousWinner: vote.verdict?.winner ?? null,
-          votedFor: vote.winnerModelId,
-          confidence: vote.verdict?.confidence ?? null,
-          valid: vote.verdict !== null,
-          error: vote.error ?? null,
-        },
-      });
-      return vote;
-    }));
+    const votes = await Promise.all(
+      listModels('judge').map(async (judge) => {
+        const vote = await this.runJudge(judge.id, input);
+        this.onEvent?.({
+          id: `${input.match.id}-judge-${judge.id}`,
+          type: 'judge.completed',
+          timestamp: new Date().toISOString(),
+          data: {
+            matchId: input.match.id,
+            judgeModelId: judge.id,
+            // The judge's raw label is per-judge permuted; votedFor is the
+            // resolved global model id and is what UIs should display.
+            anonymousWinner: vote.verdict?.winner ?? null,
+            votedFor: vote.winnerModelId,
+            confidence: vote.verdict?.confidence ?? null,
+            valid: vote.verdict !== null,
+            error: vote.error ?? null,
+          },
+        });
+        return vote;
+      }),
+    );
     const votesByModel: Record<string, number> = {
       [input.match.modelA]: 0,
       [input.match.modelB]: 0,
     };
     for (const vote of votes) {
-      if (vote.winnerModelId) votesByModel[vote.winnerModelId] = (votesByModel[vote.winnerModelId] ?? 0) + 1;
+      if (vote.winnerModelId)
+        votesByModel[vote.winnerModelId] = (votesByModel[vote.winnerModelId] ?? 0) + 1;
     }
     const validVotes = votes.filter((vote) => vote.winnerModelId !== null).length;
     const winnerModelId = Object.entries(votesByModel).find(([, count]) => count >= 2)?.[0] ?? null;
-    const winnerVotes = winnerModelId ? votesByModel[winnerModelId] ?? 0 : 0;
+    const winnerVotes = winnerModelId ? (votesByModel[winnerModelId] ?? 0) : 0;
     return {
       winnerModelId,
       validVotes,
@@ -196,17 +232,18 @@ export class JudgePanel {
     input: {
       match: ScheduledMatch;
       task: CompleteArenaTask;
-      responseA: CompetitorResponse;
-      responseB: CompetitorResponse;
+      responseA: CompetitorSuccess;
+      responseB: CompetitorSuccess;
     },
   ): Promise<JudgeVote> {
-    const swapped = shouldSwap(input.match.id, judgeId);
     // These identity bindings stay local. Only the anonymous answer strings cross
     // the gateway boundary; the judge request never receives either model ID.
-    const modelAIdentity = swapped ? input.match.modelB : input.match.modelA;
-    const modelBIdentity = swapped ? input.match.modelA : input.match.modelB;
-    const answerA = swapped ? input.responseB.content : input.responseA.content;
-    const answerB = swapped ? input.responseA.content : input.responseB.content;
+    const { modelAIdentity, modelBIdentity, answerA, answerB } = resolveJudgeOrder(
+      input.match,
+      this.swapForJudge(input.match.id, judgeId),
+      input.responseA,
+      input.responseB,
+    );
     const judge = getModel(judgeId);
     let accumulated: ModelCompletion | null = null;
 

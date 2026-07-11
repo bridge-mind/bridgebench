@@ -1,0 +1,9 @@
+{
+  "ratings": {
+    "fixture/model-a": 1016,
+    "fixture/model-b": 984
+  },
+  "points": {
+    "fixture/model-a": 1
+  }
+}

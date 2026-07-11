@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 
-import { METHODOLOGY_VERSION, type ArenaTask, type BenchmarkCategory, type ScheduledMatch } from './types.js';
+import {
+  METHODOLOGY_VERSION,
+  type ArenaTask,
+  type BenchmarkCategory,
+  type ScheduledMatch,
+} from './types.js';
 
 function hashSeed(seed: string): number {
   return Number.parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 8), 16);
@@ -20,28 +25,81 @@ function stableId(parts: string[]): string {
   return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 20);
 }
 
+type Candidate = { left: string; right: string; taskId: string };
+type CandidateScore = readonly [
+  maxModelExposure: number,
+  totalModelExposure: number,
+  taskExposure: number,
+  pairExposure: number,
+];
+
+function pairKey(candidate: Pick<Candidate, 'left' | 'right'>): string {
+  return `${candidate.left}|${candidate.right}`;
+}
+
+function candidateScore(
+  candidate: Candidate,
+  modelExposure: Map<string, number>,
+  taskExposure: Map<string, number>,
+  pairExposure: Map<string, number>,
+): CandidateScore {
+  const left = modelExposure.get(candidate.left) ?? 0;
+  const right = modelExposure.get(candidate.right) ?? 0;
+  return [
+    Math.max(left, right),
+    left + right,
+    taskExposure.get(candidate.taskId) ?? 0,
+    pairExposure.get(pairKey(candidate)) ?? 0,
+  ];
+}
+
+function compareScores(left: CandidateScore, right: CandidateScore): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const difference = left[index]! - right[index]!;
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 export function scheduleMatches(input: {
   category: BenchmarkCategory;
   seed: string;
   count: number;
   modelIds: string[];
   tasks: ArenaTask[];
+  /** Production runs derive this from a versioned run manifest. */
+  runId?: string;
 }): ScheduledMatch[] {
-  if (!Number.isInteger(input.count) || input.count < 1) throw new Error('Match count must be a positive integer');
+  if (!Number.isInteger(input.count) || input.count < 1)
+    throw new Error('Match count must be a positive integer');
   if (input.modelIds.length < 2) throw new Error('At least two competitor models are required');
-  if (new Set(input.modelIds).size !== input.modelIds.length) throw new Error('Competitor model IDs must be unique');
+  if (new Set(input.modelIds).size !== input.modelIds.length)
+    throw new Error('Competitor model IDs must be unique');
   const random = mulberry32(hashSeed(`${input.category}|${input.seed}`));
-  const runId = `run-${stableId([METHODOLOGY_VERSION, input.category, input.seed, String(input.count), ...input.tasks.map((t) => t.publicHash)])}`;
+  const runId =
+    input.runId ??
+    `run-${stableId([
+      METHODOLOGY_VERSION,
+      input.category,
+      input.seed,
+      String(input.count),
+      ...[...input.modelIds].sort(),
+      ...input.tasks.map((task) => task.publicHash),
+    ])}`;
   const modelExposure = new Map(input.modelIds.map((id) => [id, 0]));
   const taskExposure = new Map(input.tasks.map((task) => [task.public.id, 0]));
   const pairExposure = new Map<string, number>();
   const used = new Set<string>();
-  const combinations: Array<{ left: string; right: string; taskId: string }> = [];
+  const combinations: Candidate[] = [];
 
   for (let i = 0; i < input.modelIds.length; i += 1) {
     for (let j = i + 1; j < input.modelIds.length; j += 1) {
       for (const task of input.tasks) {
-        combinations.push({ left: input.modelIds[i]!, right: input.modelIds[j]!, taskId: task.public.id });
+        combinations.push({
+          left: input.modelIds[i]!,
+          right: input.modelIds[j]!,
+          taskId: task.public.id,
+        });
       }
     }
   }
@@ -49,38 +107,31 @@ export function scheduleMatches(input: {
   const schedule: ScheduledMatch[] = [];
   for (let index = 0; index < input.count; index += 1) {
     if (used.size === combinations.length) used.clear();
-    const candidates = combinations.filter((candidate) => !used.has(`${candidate.left}|${candidate.right}|${candidate.taskId}`));
-    candidates.sort((a, b) => {
-      const aMax = Math.max(modelExposure.get(a.left)!, modelExposure.get(a.right)!);
-      const bMax = Math.max(modelExposure.get(b.left)!, modelExposure.get(b.right)!);
-      const aSum = modelExposure.get(a.left)! + modelExposure.get(a.right)!;
-      const bSum = modelExposure.get(b.left)! + modelExposure.get(b.right)!;
-      const aPair = pairExposure.get(`${a.left}|${a.right}`) ?? 0;
-      const bPair = pairExposure.get(`${b.left}|${b.right}`) ?? 0;
-      return aMax - bMax || aSum - bSum || taskExposure.get(a.taskId)! - taskExposure.get(b.taskId)! || aPair - bPair;
-    });
+    const candidates = combinations.filter(
+      (candidate) => !used.has(`${candidate.left}|${candidate.right}|${candidate.taskId}`),
+    );
+    candidates.sort((left, right) =>
+      compareScores(
+        candidateScore(left, modelExposure, taskExposure, pairExposure),
+        candidateScore(right, modelExposure, taskExposure, pairExposure),
+      ),
+    );
     const best = candidates[0]!;
-    const bestScore = [
-      Math.max(modelExposure.get(best.left)!, modelExposure.get(best.right)!),
-      modelExposure.get(best.left)! + modelExposure.get(best.right)!,
-      taskExposure.get(best.taskId)!,
-      pairExposure.get(`${best.left}|${best.right}`) ?? 0,
-    ].join('|');
-    const tied = candidates.filter((candidate) =>
-      [
-        Math.max(modelExposure.get(candidate.left)!, modelExposure.get(candidate.right)!),
-        modelExposure.get(candidate.left)! + modelExposure.get(candidate.right)!,
-        taskExposure.get(candidate.taskId)!,
-        pairExposure.get(`${candidate.left}|${candidate.right}`) ?? 0,
-      ].join('|') === bestScore,
+    const bestScore = candidateScore(best, modelExposure, taskExposure, pairExposure);
+    const tied = candidates.filter(
+      (candidate) =>
+        compareScores(
+          candidateScore(candidate, modelExposure, taskExposure, pairExposure),
+          bestScore,
+        ) === 0,
     );
     const selected = tied[Math.floor(random() * tied.length)]!;
     used.add(`${selected.left}|${selected.right}|${selected.taskId}`);
     modelExposure.set(selected.left, modelExposure.get(selected.left)! + 1);
     modelExposure.set(selected.right, modelExposure.get(selected.right)! + 1);
     taskExposure.set(selected.taskId, taskExposure.get(selected.taskId)! + 1);
-    const pairKey = `${selected.left}|${selected.right}`;
-    pairExposure.set(pairKey, (pairExposure.get(pairKey) ?? 0) + 1);
+    const selectedPairKey = pairKey(selected);
+    pairExposure.set(selectedPairKey, (pairExposure.get(selectedPairKey) ?? 0) + 1);
     const swap = random() >= 0.5;
     const modelA = swap ? selected.right : selected.left;
     const modelB = swap ? selected.left : selected.right;
