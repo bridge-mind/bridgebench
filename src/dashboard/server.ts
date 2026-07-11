@@ -18,11 +18,20 @@ import {
   CATEGORIES,
   CATEGORY_META,
   type ArenaEvent,
+  type ArenaEventDataMap,
   type ArenaRunConfig,
   type BenchmarkCategory,
 } from '../types.js';
 
-loadProjectEnv();
+function refreshProjectEnv(): void {
+  const result = loadProjectEnv();
+  if (result.status === 'error') {
+    console.warn(
+      `BridgeBench environment file could not be loaded: ${sanitizeError(result.reason)}`,
+    );
+  }
+}
+refreshProjectEnv();
 
 const HOST = '127.0.0.1';
 const PORT = 4317;
@@ -33,7 +42,12 @@ const MAX_BODY_BYTES = 16_384;
 
 const RunRequestSchema = z.object({
   category: BenchmarkCategorySchema.default('reasoning'),
-  seed: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9._-]+$/),
+  seed: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[a-zA-Z0-9._-]+$/),
   matches: z.number().int().min(1).max(336),
   maxCostUsd: z.number().finite().min(0.01).max(1_000),
   resume: z.boolean().default(false),
@@ -50,13 +64,21 @@ interface DashboardRunState {
   completed: number;
   total: number;
   costUsd: number;
-  currentMatch: Record<string, unknown> | null;
+  currentMatch: ArenaEventDataMap['match.started'] | null;
   error: string | null;
 }
 
 const state: DashboardRunState = {
-  status: 'idle', config: null, runId: null, startedAt: null, finishedAt: null,
-  completed: 0, total: 0, costUsd: 0, currentMatch: null, error: null,
+  status: 'idle',
+  config: null,
+  runId: null,
+  startedAt: null,
+  finishedAt: null,
+  completed: 0,
+  total: 0,
+  costUsd: 0,
+  currentMatch: null,
+  error: null,
 };
 const events: ArenaEvent[] = [];
 const clients = new Set<ServerResponse>();
@@ -79,7 +101,10 @@ function setSecurityHeaders(response: ServerResponse, viteDevelopment = false): 
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   setSecurityHeaders(response);
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
   response.end(JSON.stringify(body));
 }
 
@@ -89,7 +114,8 @@ function isAllowedHost(request: IncomingMessage): boolean {
 
 function isAllowedMutation(request: IncomingMessage): boolean {
   const origin = request.headers.origin;
-  const allowedOrigin = origin === `http://${HOST}:${PORT}` || origin === `http://localhost:${PORT}`;
+  const allowedOrigin =
+    origin === `http://${HOST}:${PORT}` || origin === `http://localhost:${PORT}`;
   return allowedOrigin && request.headers['content-type']?.startsWith('application/json') === true;
 }
 
@@ -149,7 +175,10 @@ async function startRun(config: ArenaRunConfig): Promise<void> {
 
   try {
     const tasks = await new TaskLoader(config.category).loadAll({ requirePrivate: true });
-    const logger = new FileArenaLogger({ dir: path.join(ROOT, 'results', config.category, 'logs'), name: 'dashboard' });
+    const logger = new FileArenaLogger({
+      dir: path.join(ROOT, 'results', config.category, 'logs'),
+      name: 'dashboard',
+    });
     console.log(`Run log: ${logger.filePath}`);
     const runner = new ArenaRunner(
       new OpenRouterClient(process.env.OPENROUTER_API_KEY ?? '', logger),
@@ -179,7 +208,7 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
 
   if (request.method === 'GET' && url.pathname === '/api/state') {
     // A key added to .env after startup should surface without a restart.
-    if (!process.env.OPENROUTER_API_KEY) loadProjectEnv();
+    if (!process.env.OPENROUTER_API_KEY) refreshProjectEnv();
     // Each category is an independent arena: its own task pack, journal, and
     // Elo ladder. The run state machine stays global because only one run may
     // be active at a time regardless of category.
@@ -210,7 +239,12 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
     json(response, 200, {
       run: state,
       hasApiKey: Boolean(process.env.OPENROUTER_API_KEY),
-      models: listModels().map(({ id, displayName, vendor, role }) => ({ id, displayName, vendor, role })),
+      models: listModels().map(({ id, displayName, vendor, role }) => ({
+        id,
+        displayName,
+        vendor,
+        role,
+      })),
       categories: CATEGORIES,
       arenas,
       events,
@@ -241,9 +275,11 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
       json(response, 409, { error: 'An arena run is already active' });
       return true;
     }
-    if (!process.env.OPENROUTER_API_KEY) loadProjectEnv();
+    if (!process.env.OPENROUTER_API_KEY) refreshProjectEnv();
     if (!process.env.OPENROUTER_API_KEY) {
-      json(response, 503, { error: `OPENROUTER_API_KEY is not configured; set it in ${ENV_PATH} or the dashboard environment` });
+      json(response, 503, {
+        error: `OPENROUTER_API_KEY is not configured; set it in ${ENV_PATH} or the dashboard environment`,
+      });
       return true;
     }
     try {
@@ -251,7 +287,9 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
       void startRun(config);
       json(response, 202, { accepted: true, config });
     } catch (error) {
-      json(response, 400, { error: error instanceof z.ZodError ? 'Invalid run configuration' : sanitizeError(error) });
+      json(response, 400, {
+        error: error instanceof z.ZodError ? 'Invalid run configuration' : sanitizeError(error),
+      });
     }
     return true;
   }
@@ -261,21 +299,34 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
 }
 
 const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff',
-  '.map': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 function serveProduction(request: IncomingMessage, response: ServerResponse): void {
   const pathname = new URL(request.url ?? '/', `http://${HOST}:${PORT}`).pathname;
   const relative = pathname === '/' ? 'index.html' : pathname.slice(1);
   let target = path.resolve(UI_DIST, relative);
-  if (!target.startsWith(`${UI_DIST}${path.sep}`) || !existsSync(target) || statSync(target).isDirectory()) {
+  if (
+    !target.startsWith(`${UI_DIST}${path.sep}`) ||
+    !existsSync(target) ||
+    statSync(target).isDirectory()
+  ) {
     target = path.join(UI_DIST, 'index.html');
   }
   setSecurityHeaders(response);
-  response.writeHead(200, { 'Content-Type': MIME[path.extname(target)] ?? 'application/octet-stream' });
+  response.writeHead(200, {
+    'Content-Type': MIME[path.extname(target)] ?? 'application/octet-stream',
+  });
   createReadStream(target).pipe(response);
 }
 

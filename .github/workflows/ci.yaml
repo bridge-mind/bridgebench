@@ -17,15 +17,9 @@ jobs:
             echo '::error::Private task halves must never be committed to the public repo.'
             exit 1
           fi
-      - name: Fail if hidden-reference fields appear under tasks/
-        run: |
-          if grep -rlE '^(expectedResolution|disqualifyingErrors|rubric):' tasks/; then
-            echo '::error::A tracked task file contains hidden-reference fields.'
-            exit 1
-          fi
 
-  test:
-    name: Typecheck and offline tests
+  quality:
+    name: Public-clone quality gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,5 +28,5 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run check

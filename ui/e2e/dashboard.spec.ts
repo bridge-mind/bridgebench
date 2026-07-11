@@ -1,7 +1,5 @@
 import { expect, test } from '@playwright/test';
 
-const SCREENSHOT_DIR = process.env.BRIDGEBENCH_SCREENSHOT_DIR ?? '/tmp';
-
 for (const width of [1440, 800, 390]) {
   test(`dashboard is usable at ${width}px`, async ({ browser }) => {
     const page = await browser.newPage({ viewport: { width, height: 1000 } });
@@ -43,7 +41,6 @@ for (const width of [1440, 800, 390]) {
     }));
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
     expect(errors).toEqual([]);
-    await page.screenshot({ path: `${SCREENSHOT_DIR}/bridgebench-v3-${width}.png`, fullPage: true });
     await page.close();
   });
 }
@@ -54,7 +51,7 @@ test('a journaled match exposes the task the models were given', async ({ page }
   await expect(page.locator('.match-list, .empty').first()).toBeVisible();
 
   const rows = page.locator('.match-row');
-  test.skip((await rows.count()) === 0, 'no journaled matches in results/reasoning on this machine');
+  await expect(rows).toHaveCount(1);
 
   await rows.first().click();
   const taskTab = page.getByRole('tab', { name: 'Task' });
@@ -68,14 +65,11 @@ test('a journaled match exposes the task the models were given', async ({ page }
   await expect(firstArtifact).toBeVisible();
   await firstArtifact.locator('summary').click();
   await expect(firstArtifact.locator('pre')).toBeVisible();
-  await page.screenshot({ path: `${SCREENSHOT_DIR}/bridgebench-v3-match-task.png`, fullPage: true });
 });
 
 test('the live stage advertises the running task', async ({ page }) => {
   // Static check only — no paid run is started. When idle, the explainer
   // renders; the task brief itself is exercised in the match-detail test.
   await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await expect(
-    page.locator('#how-title').or(page.locator('.stage-task')).first(),
-  ).toBeVisible();
+  await expect(page.locator('#how-title').or(page.locator('.stage-task')).first()).toBeVisible();
 });
