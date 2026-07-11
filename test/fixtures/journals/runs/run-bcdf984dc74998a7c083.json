@@ -1,0 +1,84 @@
+{
+  "version": "1.0.0",
+  "methodologyVersion": "arena-v0.3.0",
+  "engineVersion": "3.1.0-alpha.0",
+  "category": "reasoning",
+  "seed": "fixture",
+  "matches": 1,
+  "competitors": [
+    {
+      "id": "fixture/model-a",
+      "canonicalSlug": "fixture/model-a-v1",
+      "role": "competitor",
+      "request": {
+        "maxTokens": 100,
+        "temperature": 0,
+        "reasoningEffort": "low",
+        "excludeReasoning": true,
+        "timeoutMs": 1000
+      }
+    },
+    {
+      "id": "fixture/model-b",
+      "canonicalSlug": "fixture/model-b-v1",
+      "role": "competitor",
+      "request": {
+        "maxTokens": 100,
+        "temperature": 0,
+        "reasoningEffort": "low",
+        "excludeReasoning": true,
+        "timeoutMs": 1000
+      }
+    }
+  ],
+  "judges": [
+    {
+      "id": "fixture/judge-1",
+      "canonicalSlug": "fixture/judge-1-v1",
+      "role": "judge",
+      "request": {
+        "maxTokens": 100,
+        "temperature": 0,
+        "reasoningEffort": "low",
+        "excludeReasoning": true,
+        "timeoutMs": 1000
+      }
+    },
+    {
+      "id": "fixture/judge-2",
+      "canonicalSlug": "fixture/judge-2-v1",
+      "role": "judge",
+      "request": {
+        "maxTokens": 100,
+        "temperature": 0,
+        "reasoningEffort": "low",
+        "excludeReasoning": true,
+        "timeoutMs": 1000
+      }
+    },
+    {
+      "id": "fixture/judge-3",
+      "canonicalSlug": "fixture/judge-3-v1",
+      "role": "judge",
+      "request": {
+        "maxTokens": 100,
+        "temperature": 0,
+        "reasoningEffort": "low",
+        "excludeReasoning": true,
+        "timeoutMs": 1000
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "id": "fixture-task",
+      "version": "1.0.0",
+      "publicHash": "public-fixture",
+      "privateHash": "private-fixture"
+    }
+  ],
+  "promptPolicyHashes": {
+    "competitor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "judge": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

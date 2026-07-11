@@ -67,8 +67,8 @@ export function detectResponseAnomalies(response: CompetitorResponse): string[] 
   return flags;
 }
 
-function describeFlags(response: CompetitorResponse, flags: string[]): string {
-  if (flags[0] === 'failed') return response.error ?? 'request failed';
+function describeFlags(response: CompetitorResponse): string {
+  if (!response.success) return response.error;
   return `${response.latencyMs}ms, ${response.outputTokens} output tokens, reasoning ${
     response.reasoningTokens ?? 'unreported'
   }, finish ${response.finishReason}, $${response.costUsd.toFixed(4)}`;
@@ -116,8 +116,14 @@ export function triageJournal(results: MatchResult[]): RunTriage[] {
           const errorClass = classifyError(response.error ?? '');
           report.errorClasses[errorClass] = (report.errorClasses[errorClass] ?? 0) + 1;
         } else {
-          model.avgLatencyMs = ((model.avgLatencyMs ?? 0) * (model.matches - model.failures - 1) + response.latencyMs) / (model.matches - model.failures);
-          model.avgOutputTokens = ((model.avgOutputTokens ?? 0) * (model.matches - model.failures - 1) + response.outputTokens) / (model.matches - model.failures);
+          model.avgLatencyMs =
+            ((model.avgLatencyMs ?? 0) * (model.matches - model.failures - 1) +
+              response.latencyMs) /
+            (model.matches - model.failures);
+          model.avgOutputTokens =
+            ((model.avgOutputTokens ?? 0) * (model.matches - model.failures - 1) +
+              response.outputTokens) /
+            (model.matches - model.failures);
           if (response.reasoningTokens) model.reasoningReported += 1;
         }
         const flags = detectResponseAnomalies(response);
@@ -128,7 +134,7 @@ export function triageJournal(results: MatchResult[]): RunTriage[] {
             taskId: result.task.id,
             modelId: response.modelId,
             flag,
-            detail: describeFlags(response, flags),
+            detail: describeFlags(response),
           });
         }
       }
@@ -168,7 +174,8 @@ export function triageJournal(results: MatchResult[]): RunTriage[] {
     }
 
     if (confidences.length > 0) {
-      report.judge.avgConfidence = confidences.reduce((sum, value) => sum + value, 0) / confidences.length;
+      report.judge.avgConfidence =
+        confidences.reduce((sum, value) => sum + value, 0) / confidences.length;
     }
     reports.push(report);
   }
@@ -177,14 +184,17 @@ export function triageJournal(results: MatchResult[]): RunTriage[] {
 }
 
 const HEALTH_ADVICE: Record<string, string> = {
-  failed: 'Request failed — check the run log for the attempt-level error and whether retries were exhausted.',
+  failed:
+    'Request failed — check the run log for the attempt-level error and whether retries were exhausted.',
   'fast-response': `Response landed under ${FAST_RESPONSE_MS / 1_000}s — the task may be too easy for this model, or reasoning effort was not applied.`,
   'low-output': `Fewer than ${LOW_OUTPUT_TOKENS} output tokens — likely a shallow answer; consider hardening the task.`,
   truncated: 'finish_reason=length — raise maxTokens or shorten the prompt.',
-  'reasoning-unreported': 'Provider reported no reasoning tokens — verify the reasoning parameter reaches the model (arena generation <id>).',
+  'reasoning-unreported':
+    'Provider reported no reasoning tokens — verify the reasoning parameter reaches the model (arena generation <id>).',
   'zero-cost': 'Zero cost on a successful response — usage accounting may be broken.',
   'zero-cost-match': 'A judged match with $0 spend means usage accounting is broken end to end.',
-  'judge-abstained': 'A judge returned no valid structured verdict twice — inspect judge.verdict-parse-failed entries in the run log.',
+  'judge-abstained':
+    'A judge returned no valid structured verdict twice — inspect judge.verdict-parse-failed entries in the run log.',
 };
 
 export function formatTriage(reports: RunTriage[]): string {
@@ -203,11 +213,14 @@ export function formatTriage(reports: RunTriage[]): string {
     }
     lines.push(
       `  judges: ${report.judge.validVotes} valid votes, ${report.judge.abstentions} abstentions, ${report.judge.unanimous} unanimous / ${report.judge.split} split panels` +
-        (report.judge.avgConfidence === null ? '' : `, avg confidence ${report.judge.avgConfidence.toFixed(2)}`),
+        (report.judge.avgConfidence === null
+          ? ''
+          : `, avg confidence ${report.judge.avgConfidence.toFixed(2)}`),
     );
     for (const [modelId, model] of Object.entries(report.models)) {
       const latency = model.avgLatencyMs === null ? '—' : `${Math.round(model.avgLatencyMs)}ms`;
-      const tokens = model.avgOutputTokens === null ? '—' : `${Math.round(model.avgOutputTokens)} tok`;
+      const tokens =
+        model.avgOutputTokens === null ? '—' : `${Math.round(model.avgOutputTokens)} tok`;
       lines.push(
         `    ${modelId.padEnd(30)} matches ${model.matches}, wins ${model.wins}, failures ${model.failures}, avg ${latency} / ${tokens}, reasoning reported ${model.reasoningReported}/${model.matches - model.failures}`,
       );
@@ -225,7 +238,9 @@ export function formatTriage(reports: RunTriage[]): string {
       for (const [flag, anomalies] of byFlag) {
         lines.push(`    ${flag} ×${anomalies.length} — ${HEALTH_ADVICE[flag] ?? ''}`);
         for (const anomaly of anomalies.slice(0, 4)) {
-          lines.push(`      [${anomaly.scheduleIndex}] ${anomaly.taskId} ${anomaly.modelId ?? ''}: ${anomaly.detail.slice(0, 140)}`);
+          lines.push(
+            `      [${anomaly.scheduleIndex}] ${anomaly.taskId} ${anomaly.modelId ?? ''}: ${anomaly.detail.slice(0, 140)}`,
+          );
         }
         if (anomalies.length > 4) lines.push(`      … ${anomalies.length - 4} more`);
       }

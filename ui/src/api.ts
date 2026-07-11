@@ -1,4 +1,4 @@
-import type { ArenaEvent, ArenaSnapshot, MatchResult } from '../../src/types';
+import type { ArenaEvent, ArenaEventDataMap, ArenaSnapshot, MatchResult } from '../../src/types';
 
 export type BenchmarkCategory = 'reasoning' | 'hallucination';
 
@@ -33,23 +33,20 @@ export interface DashboardTask {
 
 export interface DashboardRun {
   status: 'idle' | 'running' | 'completed' | 'budget-stopped' | 'failed';
-  config: { category: BenchmarkCategory; seed: string; matches: number; maxCostUsd: number; resume: boolean } | null;
+  config: {
+    category: BenchmarkCategory;
+    seed: string;
+    matches: number;
+    maxCostUsd: number;
+    resume: boolean;
+  } | null;
   runId: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   completed: number;
   total: number;
   costUsd: number;
-  currentMatch: {
-    matchId?: string;
-    index?: number;
-    total?: number;
-    category?: BenchmarkCategory;
-    taskId?: string;
-    taskTitle?: string;
-    modelA?: string;
-    modelB?: string;
-  } | null;
+  currentMatch: ArenaEventDataMap['match.started'] | null;
   error: string | null;
 }
 

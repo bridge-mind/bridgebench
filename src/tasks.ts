@@ -4,7 +4,11 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import YAML from 'yaml';
+import { z } from 'zod';
 
+import { buildJudgePayload, judgeSystemPrompt } from './judges.js';
+import { listModels } from './models.js';
+import { MAX_PROMPT_CHARS } from './openrouter-transport.js';
 import {
   CATEGORY_CLUSTERS,
   TaskPrivateSchema,
@@ -18,6 +22,7 @@ import { findProjectRoot } from './paths.js';
 const ROOT = findProjectRoot(import.meta.url);
 export const TASKS_PER_CATEGORY = 12;
 export const TASKS_PER_CLUSTER = 2;
+const APPROXIMATE_CHARS_PER_TOKEN = 4;
 
 export function defaultTaskRoot(category: BenchmarkCategory): string {
   return path.join(ROOT, 'tasks', category);
@@ -25,6 +30,138 @@ export function defaultTaskRoot(category: BenchmarkCategory): string {
 
 function sha256(content: string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+async function parseYamlFile<TSchema extends z.ZodTypeAny>(
+  filePath: string,
+  schema: TSchema,
+): Promise<{ raw: string; value: z.output<TSchema> }> {
+  let raw: string;
+  try {
+    raw = await readFile(filePath, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw new Error(`Missing file ${filePath}`, { cause: error });
+    }
+    throw new Error(
+      `Unable to read ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  try {
+    return { raw, value: schema.parse(YAML.parse(raw)) };
+  } catch (error) {
+    const detail =
+      error instanceof z.ZodError
+        ? error.issues
+            .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+            .join('; ')
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    throw new Error(`Invalid task file ${filePath}: ${detail}`, { cause: error });
+  }
+}
+
+function validatePublicTask(
+  file: string,
+  task: z.infer<typeof TaskPublicSchema>,
+  category: BenchmarkCategory,
+): void {
+  if (path.basename(file, '.yaml') !== task.id) {
+    throw new Error(`${file} must use the task id ${task.id} as its filename`);
+  }
+  if (task.category !== category) {
+    throw new Error(`${file} declares category ${task.category} inside the ${category} pack`);
+  }
+  if (!CATEGORY_CLUSTERS[category].includes(task.cluster)) {
+    throw new Error(`${file} uses cluster ${task.cluster}, which is not a ${category} cluster`);
+  }
+  const artifactIds = task.artifacts.map((artifact) => artifact.id);
+  const uniqueArtifactIds = new Set(artifactIds);
+  if (uniqueArtifactIds.size !== artifactIds.length) {
+    const duplicates = artifactIds.filter((id, index) => artifactIds.indexOf(id) !== index);
+    throw new Error(
+      `${file} contains duplicate artifact ids: ${[...new Set(duplicates)].join(', ')}`,
+    );
+  }
+}
+
+function validatePrivatePair(
+  file: string,
+  publicTask: z.infer<typeof TaskPublicSchema>,
+  privateTask: z.infer<typeof TaskPrivateSchema>,
+): void {
+  if (publicTask.id !== privateTask.id || publicTask.version !== privateTask.version) {
+    throw new Error(`Public/private identity mismatch for ${file}`);
+  }
+  const evidenceIds = new Set(publicTask.artifacts.map((artifact) => artifact.id));
+  for (const required of privateTask.requiredEvidence) {
+    if (!evidenceIds.has(required)) {
+      throw new Error(`${file} requires missing artifact ${required}`);
+    }
+  }
+}
+
+function validatePromptBudgets(task: ArenaTask): void {
+  const competitor = buildCompetitorPrompt(task);
+  const competitorChars = competitor.system.length + competitor.user.length;
+  if (competitorChars > MAX_PROMPT_CHARS) {
+    throw new Error(
+      `${task.public.id} renders a ${competitorChars}-character competitor prompt; limit ${MAX_PROMPT_CHARS}`,
+    );
+  }
+  if (task.private === null || task.privateHash === null) return;
+
+  const maxAnswerChars =
+    Math.max(...listModels('competitor').map((model) => model.request.maxTokens)) *
+    APPROXIMATE_CHARS_PER_TOKEN;
+  const judgePayload = buildJudgePayload(
+    task as CompleteArenaTask,
+    'x'.repeat(maxAnswerChars),
+    'x'.repeat(maxAnswerChars),
+  );
+  const judgeChars = judgeSystemPrompt(task.public.category).length + judgePayload.length;
+  if (judgeChars > MAX_PROMPT_CHARS) {
+    throw new Error(
+      `${task.public.id} can render a ${judgeChars}-character worst-case judge prompt; limit ${MAX_PROMPT_CHARS}`,
+    );
+  }
+}
+
+function validatePackComposition(category: BenchmarkCategory, tasks: ArenaTask[]): void {
+  const filesById = new Map<string, number>();
+  for (const task of tasks) {
+    filesById.set(task.public.id, (filesById.get(task.public.id) ?? 0) + 1);
+  }
+  const duplicates = [...filesById].filter(([, count]) => count > 1).map(([id]) => id);
+  if (duplicates.length > 0) {
+    throw new Error(`${category} task IDs must be unique: ${duplicates.join(', ')}`);
+  }
+  for (const cluster of CATEGORY_CLUSTERS[category]) {
+    const count = tasks.filter((task) => task.public.cluster === cluster).length;
+    if (count !== TASKS_PER_CLUSTER) {
+      throw new Error(`Expected exactly ${TASKS_PER_CLUSTER} ${cluster} tasks, found ${count}`);
+    }
+  }
+  if (tasks.length !== TASKS_PER_CATEGORY) {
+    throw new Error(`Expected ${TASKS_PER_CATEGORY} ${category} tasks, found ${tasks.length}`);
+  }
+}
+
+export async function validatePublicTaskFile(filePath: string): Promise<ArenaTask> {
+  const resolved = path.resolve(filePath);
+  const { raw, value } = await parseYamlFile(resolved, TaskPublicSchema);
+  validatePublicTask(path.basename(resolved), value, value.category);
+  const task: ArenaTask = {
+    public: value,
+    private: null,
+    publicHash: sha256(raw),
+    privateHash: null,
+  };
+  validatePromptBudgets(task);
+  return task;
 }
 
 export class TaskLoader {
@@ -67,56 +204,43 @@ export class TaskLoader {
       );
     }
     const files = (await readdir(publicDir)).filter((file) => file.endsWith('.yaml')).sort();
-    const clusters = CATEGORY_CLUSTERS[this.category];
     const tasks: ArenaTask[] = [];
 
     for (const file of files) {
-      const publicRaw = await readFile(path.join(publicDir, file), 'utf8');
-      const publicTask = TaskPublicSchema.parse(YAML.parse(publicRaw));
-      if (publicTask.category !== this.category) {
-        throw new Error(`${file} declares category ${publicTask.category} inside the ${this.category} pack`);
-      }
-      if (!clusters.includes(publicTask.cluster)) {
-        throw new Error(`${file} uses cluster ${publicTask.cluster}, which is not a ${this.category} cluster`);
-      }
+      const publicFile = path.join(publicDir, file);
+      const { raw: publicRaw, value: publicTask } = await parseYamlFile(
+        publicFile,
+        TaskPublicSchema,
+      );
+      validatePublicTask(file, publicTask, this.category);
 
       let privateRaw: string | null = null;
       let privateTask: ArenaTask['private'] = null;
       if (havePrivate) {
         try {
-          privateRaw = await readFile(path.join(this.privateDir, file), 'utf8');
-        } catch {
-          throw new Error(`Missing private half for ${file} in ${this.privateDir}`);
+          const loaded = await parseYamlFile(path.join(this.privateDir, file), TaskPrivateSchema);
+          privateRaw = loaded.raw;
+          privateTask = loaded.value;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`Private half for ${file} failed validation: ${message}`, {
+            cause: error,
+          });
         }
-        privateTask = TaskPrivateSchema.parse(YAML.parse(privateRaw));
-        if (publicTask.id !== privateTask.id || publicTask.version !== privateTask.version) {
-          throw new Error(`Public/private identity mismatch for ${file}`);
-        }
-        const evidenceIds = new Set(publicTask.artifacts.map((artifact) => artifact.id));
-        for (const required of privateTask.requiredEvidence) {
-          if (!evidenceIds.has(required)) throw new Error(`${file} requires missing artifact ${required}`);
-        }
+        validatePrivatePair(file, publicTask, privateTask);
       }
 
-      tasks.push({
+      const task: ArenaTask = {
         public: publicTask,
         private: privateTask,
         publicHash: sha256(publicRaw),
         privateHash: privateRaw === null ? null : sha256(privateRaw),
-      });
+      };
+      validatePromptBudgets(task);
+      tasks.push(task);
     }
 
-    const ids = new Set(tasks.map((task) => task.public.id));
-    if (ids.size !== tasks.length) throw new Error(`${this.category} task IDs must be unique`);
-    for (const cluster of clusters) {
-      const count = tasks.filter((task) => task.public.cluster === cluster).length;
-      if (count !== TASKS_PER_CLUSTER) {
-        throw new Error(`Expected exactly ${TASKS_PER_CLUSTER} ${cluster} tasks, found ${count}`);
-      }
-    }
-    if (tasks.length !== TASKS_PER_CATEGORY) {
-      throw new Error(`Expected ${TASKS_PER_CATEGORY} ${this.category} tasks, found ${tasks.length}`);
-    }
+    validatePackComposition(this.category, tasks);
     return tasks;
   }
 }
@@ -146,9 +270,16 @@ const CATEGORY_SYSTEM: Record<BenchmarkCategory, string> = {
     'conflicting sources into one figure; and never refuse a deliverable the artifacts do support.',
 };
 
+export function competitorPromptPolicyHash(category: BenchmarkCategory): string {
+  return sha256(CATEGORY_SYSTEM[category]);
+}
+
 export function buildCompetitorPrompt(task: ArenaTask): { system: string; user: string } {
   const artifacts = task.public.artifacts
-    .map((artifact) => `### [${artifact.id}] ${artifact.label} (${artifact.type})\n${artifact.content}`)
+    .map(
+      (artifact) =>
+        `### [${artifact.id}] ${artifact.label} (${artifact.type})\n${artifact.content}`,
+    )
     .join('\n\n');
   return {
     system: CATEGORY_SYSTEM[task.public.category],

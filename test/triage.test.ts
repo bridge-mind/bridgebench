@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { classifyError, detectResponseAnomalies, triageJournal } from '../src/triage.js';
-import type { CompetitorResponse, MatchResult } from '../src/types.js';
+import {
+  competitorCost,
+  type CompetitorFailure,
+  type CompetitorResponse,
+  type CompetitorSuccess,
+  type MatchResult,
+} from '../src/types.js';
 
-function response(overrides: Partial<CompetitorResponse>): CompetitorResponse {
+function response(overrides: Partial<CompetitorSuccess>): CompetitorSuccess {
   return {
     modelId: 'openai/gpt-5.6-sol',
     success: true,
@@ -19,7 +25,22 @@ function response(overrides: Partial<CompetitorResponse>): CompetitorResponse {
   };
 }
 
-function match(overrides: Partial<MatchResult> & { responseA: CompetitorResponse; responseB: CompetitorResponse }): MatchResult {
+function failure(overrides: Partial<CompetitorFailure> = {}): CompetitorFailure {
+  return {
+    modelId: 'openai/gpt-5.6-sol',
+    success: false,
+    error: 'Premature close',
+    latencyMs: 0,
+    ...overrides,
+  };
+}
+
+function match(
+  overrides: Partial<MatchResult> & {
+    responseA: CompetitorResponse;
+    responseB: CompetitorResponse;
+  },
+): MatchResult {
   const { responseA, responseB, ...rest } = overrides;
   return {
     methodologyVersion: 'reasoning-arena-v0.2.0',
@@ -28,7 +49,13 @@ function match(overrides: Partial<MatchResult> & { responseA: CompetitorResponse
     scheduleIndex: 0,
     seed: 'triage-seed',
     timestamp: '2026-07-10T16:00:00.000Z',
-    task: { id: 'stateful-retry-budget', version: '1.0.0', cluster: 'stateful-execution', publicHash: 'a', privateHash: 'b' },
+    task: {
+      id: 'stateful-retry-budget',
+      version: '1.0.0',
+      cluster: 'stateful-execution',
+      publicHash: 'a',
+      privateHash: 'b',
+    },
     competitors: { modelA: responseA.modelId, modelB: responseB.modelId, responseA, responseB },
     outcome: 'judged',
     winnerModelId: responseA.modelId,
@@ -36,7 +63,7 @@ function match(overrides: Partial<MatchResult> & { responseA: CompetitorResponse
     eloBefore: {},
     eloAfter: {},
     pointAwarded: true,
-    matchCostUsd: responseA.costUsd + responseB.costUsd,
+    matchCostUsd: competitorCost(responseA) + competitorCost(responseB),
     ...rest,
   };
 }
@@ -47,7 +74,7 @@ describe('response anomaly detection', () => {
   });
 
   it('flags failures ahead of everything else', () => {
-    expect(detectResponseAnomalies(response({ success: false, error: 'Premature close', latencyMs: 0 }))).toEqual(['failed']);
+    expect(detectResponseAnomalies(failure())).toEqual(['failed']);
   });
 
   it('flags the suspicious fast-and-shallow profile from the July 10 run', () => {
@@ -67,7 +94,9 @@ describe('response anomaly detection', () => {
 describe('error classification', () => {
   it('classifies the transport failure that killed the first run', () => {
     expect(
-      classifyError('Invalid response body while trying to fetch https://openrouter.ai/api/v1/chat/completions: Premature close'),
+      classifyError(
+        'Invalid response body while trying to fetch https://openrouter.ai/api/v1/chat/completions: Premature close',
+      ),
     ).toBe('premature-close');
     expect(classifyError('OpenRouter request timed out after 300000ms')).toBe('timeout');
     expect(classifyError('429 rate limit exceeded')).toBe('rate-limit');
@@ -84,14 +113,10 @@ describe('journal triage', () => {
         winnerModelId: null,
         pointAwarded: false,
         matchCostUsd: 0,
-        responseA: response({ success: false, error: 'fetch failed: Premature close', latencyMs: 0, outputTokens: 0, costUsd: 0 }),
-        responseB: response({
+        responseA: failure({ error: 'fetch failed: Premature close' }),
+        responseB: failure({
           modelId: 'anthropic/claude-fable-5',
-          success: false,
           error: 'fetch failed: Premature close',
-          latencyMs: 0,
-          outputTokens: 0,
-          costUsd: 0,
         }),
       });
     const [report] = triageJournal([dead(0), dead(1), dead(2)]);
