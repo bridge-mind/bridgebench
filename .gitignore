@@ -1,23 +1,16 @@
-# Dependencies
 node_modules/
-
-# Build output
 dist/
-
-# Environment — never commit secrets
+coverage/
+test-results/
+playwright-report/
+results/
 .env
 .env.*
 !.env.example
-
-# Logs
-logs/
 *.log
+dist-ui/
+.impeccable/
 
-# OS
-.DS_Store
-
-# Editors
-.vscode/
-.idea/
-results/
-tsconfig.tsbuildinfo
+# Hidden task references never enter the public repo — they live in a private
+# overlay (see docs/private-packs.md). CI enforces this too.
+tasks/*/private/

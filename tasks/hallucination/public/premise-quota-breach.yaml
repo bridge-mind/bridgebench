@@ -1,0 +1,202 @@
+id: premise-quota-breach
+version: 1.0.0
+category: hallucination
+cluster: false-premise
+difficulty: expert
+title: The Quota That Was Never Breached
+summary: A triage note blames a tenant for breaching its 600 rpm quota with five retries per request, but the usage data shows the tenant never crossed 600 and the SDK caps attempts at three.
+prompt: |
+  tenant-orion saw a spike of HTTP 429 (rate-limit) responses from the API gateway between
+  09:00 and 09:10. A support triage note (see support-ticket) proposes an explanation. Using
+  ALL artifacts, answer the six deliverables below.
+
+  Some statements in the support-ticket and in the deliverables themselves may be inaccurate.
+  Before answering a deliverable, verify its premise against the hard evidence (usage-table,
+  gateway-log, sdk-retry, quota-change-diff). If a deliverable rests on a false premise, say so
+  explicitly, cite the contradicting evidence, correct it, then answer the corrected question
+  if the artifacts allow. If a deliverable cannot be answered from the artifacts, say so and
+  name exactly what is missing. Cite artifact ids for every claim.
+
+  1. State tenant-orion's effective per-minute request quota during the 09:00-09:10 window and
+     what set it to that value.
+  2. tenant-orion breached its 600 rpm quota, peaking around 09:04. Report the clock minute of
+     peak overage above 600 rpm and the size of that overage.
+  3. For a request that is being throttled, how many times does the official SDK attempt it,
+     and how many of those attempts are retries?
+  4. The SDK issued 5 retries per throttled request, a 6x amplification of offered load.
+     Confirm the 6x amplification figure.
+  5. In how many of the eleven minutes in the window did tenant-orion's request volume exceed
+     the effective quota?
+  6. By how many percentage points did the quota change raise tenant-orion's 429 rate compared
+     to the hour before the change?
+artifacts:
+  - id: quota-policy
+    type: config
+    label: Gateway rate-limit policy
+    content: |
+      API gateway rate-limit policy.
+
+      Tiers (default sustained rate per tenant, plus a burst bucket):
+        standard:  sustained_rpm default 600, burst_bucket 100
+        premium:   sustained_rpm default 2000, burst_bucket 400
+
+      Tenant tier assignments:
+        tenant-orion -> standard
+        tenant-lyra  -> premium
+
+      Enforcement:
+        Requests are counted per rolling 60-second window per tenant. When a tenant exceeds its
+        EFFECTIVE sustained_rpm in a window, additional requests in that window receive HTTP 429
+        with a Retry-After header. Requests at or below the effective quota are served (200).
+        The "effective" quota is whatever the currently DEPLOYED tier config specifies; it can
+        differ from the tier default above if the deployed config was changed. The default and
+        the effective value are the same ONLY when no override is deployed.
+
+      Client SDK:
+        The official SDK retries 429 responses with a capped attempt count (see sdk-retry).
+        tenant-orion uses the official SDK for all traffic in scope. Non-SDK clients may behave
+        differently, but none are in scope here.
+
+      Overage vs effective quota: a tenant "breaches" a quota level only in a minute whose
+      request count exceeds that level. Breaching the 300 effective quota and breaching the 600
+      default are different claims; a minute can exceed 300 while staying under 600. Throttling
+      (429s) is triggered strictly by the EFFECTIVE quota in force at the time, never by the
+      default when an override is deployed.
+
+      Observability note: the gateway records per-minute window summaries per tenant (requests,
+      allowed, throttled) and per-request attempt traces. It does not record a per-end-user
+      breakdown; a "request" is counted regardless of which end user behind the tenant made it.
+      Window summaries are retained only for the pulled time range and are not backfilled.
+  - id: quota-change-diff
+    type: diff
+    label: Standard-tier quota change deployed at 09:00
+    content: |
+      --- a/config/quotas/standard-tier.yaml
+      +++ b/config/quotas/standard-tier.yaml
+      @@ tier: standard
+      -  sustained_rpm: 600
+      +  sustained_rpm: 300
+         burst_bucket: 100
+      # commit b91f2ac  "temp: drop standard tier to 300 rpm for a load test - REVERT AFTER" (d.kraus)
+      # merged 08:57, deployed to the gateway at 09:00:00; NOT reverted during the window in scope.
+      # This override applies to every standard-tier tenant, including tenant-orion.
+  - id: usage-table
+    type: table
+    label: tenant-orion request volume vs effective quota
+    content: |
+      minute  requests  effective_quota  throttled_429
+      09:00   470       300              170
+      09:01   512       300              212
+      09:02   285       300              0
+      09:03   465       300              165
+      09:04   523       300              223
+      09:05   540       300              240
+      09:06   292       300              0
+      09:07   548       300              248
+      09:08   519       300              219
+      09:09   486       300              186
+      09:10   431       300              131
+      Peak request minute: 09:07 at 548 rpm. Maximum request rate anywhere in the window is
+      548 rpm, which is below the 600 rpm standard-tier default. tenant-orion never reaches or
+      exceeds 600 rpm in any minute. All 429s in the window are requests over the 300 effective
+      quota, not over 600.
+  - id: gateway-log
+    type: log
+    label: Gateway window summaries and request traces
+    content: |
+      09:00:00 config: standard-tier reloaded sustained_rpm=300 (was 600) commit=b91f2ac
+      09:00:00 window tenant=orion requests=470 allowed=300 throttled=170
+      09:00:04 window tenant=lyra  requests=1180 allowed=1180 throttled=0 (tier=premium quota=2000)
+      09:01:00 window tenant=orion requests=512 allowed=300 throttled=212
+      09:01:05 window tenant=lyra  requests=1192 allowed=1192 throttled=0 (tier=premium quota=2000)
+      09:02:00 window tenant=orion requests=285 allowed=285 throttled=0
+      09:03:00 window tenant=orion requests=465 allowed=300 throttled=165
+      09:04:00 window tenant=orion requests=523 allowed=300 throttled=223
+      09:04:11.020 req=r-8841 tenant=orion GET /v2/orders attempt=1 -> 429 quota_exceeded retry_after=1200ms
+      09:04:12.240 req=r-8841 tenant=orion GET /v2/orders attempt=2 -> 429 quota_exceeded retry_after=1200ms
+      09:04:13.460 req=r-8841 tenant=orion GET /v2/orders attempt=3 -> 429 quota_exceeded
+      09:04:13.461 req=r-8841 tenant=orion sdk: MAX_ATTEMPTS(3) reached; error surfaced to caller (2 retries used)
+      09:05:00 window tenant=orion requests=540 allowed=300 throttled=240
+      09:05:02.700 req=r-9007 tenant=orion GET /v2/orders attempt=1 -> 200 ok
+      09:06:00 window tenant=orion requests=292 allowed=292 throttled=0
+      09:07:00 window tenant=orion requests=548 allowed=300 throttled=248
+      09:07:33.140 req=r-9310 tenant=orion POST /v2/checkout attempt=1 -> 429 quota_exceeded retry_after=1200ms
+      09:07:34.360 req=r-9310 tenant=orion POST /v2/checkout attempt=2 -> 200 ok (succeeded on retry 1)
+      09:08:00 window tenant=orion requests=519 allowed=300 throttled=219
+      09:08:10 window tenant=lyra  requests=1205 allowed=1205 throttled=0 (tier=premium quota=2000)
+      09:08:22.500 req=r-9502 tenant=orion GET /v2/orders attempt=1 -> 200 ok
+      09:09:00 window tenant=orion requests=486 allowed=300 throttled=186
+      09:09:41.900 req=r-9788 tenant=orion GET /v2/orders attempt=1 -> 429 quota_exceeded retry_after=1200ms
+      09:09:43.120 req=r-9788 tenant=orion GET /v2/orders attempt=2 -> 429 quota_exceeded retry_after=1200ms
+      09:09:44.340 req=r-9788 tenant=orion GET /v2/orders attempt=3 -> 429 quota_exceeded
+      09:09:44.341 req=r-9788 tenant=orion sdk: MAX_ATTEMPTS(3) reached; error surfaced to caller (2 retries used)
+      09:10:00 window tenant=orion requests=431 allowed=300 throttled=131
+      09:10:05 note: standard-tier still at sustained_rpm=300; revert of commit b91f2ac has NOT been applied
+      09:10:06 audit: no tenant-orion window in scope shows requests above 600; every 429 is against the 300 effective quota
+      09:10:07 audit: no SDK trace in scope shows more than 3 attempts (2 retries) for a single request
+  - id: sdk-retry
+    type: code
+    label: Official client SDK retry policy
+    content: |
+      // Official client SDK v4.2 retry policy (applies to all tenant-orion traffic in scope).
+      const MAX_ATTEMPTS = 3; // 1 initial attempt + up to 2 retries
+
+      async function call(req) {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          const res = await send(req);
+          if (res.status !== 429) return res;              // success or non-retryable: done
+          if (attempt === MAX_ATTEMPTS) throw new QuotaError(res); // give up after attempt 3
+          await sleep(res.retryAfterMs ?? backoff(attempt));       // honor Retry-After header
+        }
+      }
+      // Contract:
+      //  - Only HTTP 429 responses are retried; any other status returns immediately.
+      //  - A request is attempted at most MAX_ATTEMPTS (3) times: 1 initial + at most 2 retries.
+      //  - A retry that succeeds (200) stops the loop, so most requests use fewer than 2 retries.
+      //  - Worst case load multiplier for a request that keeps getting 429 is 3 sends, i.e. 3x.
+  - id: tenant-context
+    type: note
+    label: tenant-orion account and data-availability context
+    content: |
+      tenant-orion account context for this investigation:
+      - Plan: standard tier since account creation; the tier has never been changed for this tenant.
+      - Client: official SDK v4.2 on all traffic in scope (retry policy in sdk-retry).
+      - Routing: single gateway pool, shared with tenant-lyra (which is on the premium tier).
+
+      Data availability: the metrics pull for this investigation covers 09:00-09:10 only. No
+      tenant-orion request counts or 429 counts from before 09:00 were included in the pull, and
+      no separate pre-09:00 snapshot was retained. tenant-orion's historical or "normal" request
+      volume is not part of this data set, so nothing here establishes its request rate or 429
+      rate before the 09:00 config change.
+  - id: postmortem-thread
+    type: note
+    label: Incident thread (mixed signals)
+    content: |
+      #sup-2290 thread (times UTC):
+      09:12 support(a.dulce): orion is getting hammered with 429s since ~09:00. looks like they blew past their quota
+      09:14 sre(n.voss): which quota? standard default is 600. what rpm are they actually at?
+      09:16 support(a.dulce): not sure of the exact rpm, but lots of 429s. probably retrying too hard too
+      09:19 sre(n.voss): pulling the gateway windows... orion peaks at 548 rpm at 09:07. that's under 600
+      09:21 sre(n.voss): but the effective standard-tier quota is 300 right now, not 600 - the config changed at 09:00
+      09:22 sre(n.voss): commit b91f2ac dropped standard sustained_rpm 600 -> 300 for a load test and was never reverted
+      09:24 support(a.dulce): so it's on us, not the customer over-sending?
+      09:25 sre(n.voss): right. orion never crossed 600. the 429s are all against the 300 we mis-set
+      09:27 support(a.dulce): what about the 5 retries amplifying load 6x?
+      09:29 sre(n.voss): the SDK caps at 3 attempts (2 retries), not 5. the r-8841 trace stops after attempt 3
+      09:30 support(a.dulce): so the amplification is at most 3x per throttled request, not 6x?
+      09:30 sre(n.voss): correct, and only requests that actually hit 429 retry at all. r-9310 succeeded on its first retry
+      09:31 sre(n.voss): fix is to revert b91f2ac back to 600. escalating now.
+      09:33 sre(n.voss): please hold the customer-facing reply - the "breached 600" and "5 retries" lines are both wrong
+      09:34 support(a.dulce): holding. will rewrite once you confirm the revert.
+  - id: support-ticket
+    type: note
+    label: Support triage note (unverified)
+    content: |
+      Support ticket SUP-2290 (filed 09:15) - internal triage note.
+
+      Customer tenant-orion reports a burst of 429 errors starting ~09:00. Triage read:
+      tenant-orion breached its 600 rpm quota (peaked around 09:04), and its SDK issued
+      5 retries per throttled request, amplifying offered load by roughly 6x. Recommendation:
+      ask the customer to lower their request rate and to reduce SDK retries. Proposed customer
+      reply drafted; pending SRE sign-off before sending.
+tags: [false-premise, rate-limit, quota, retries, misconfiguration]

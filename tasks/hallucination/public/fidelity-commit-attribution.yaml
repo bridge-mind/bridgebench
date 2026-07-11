@@ -1,0 +1,304 @@
+id: fidelity-commit-attribution
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: Regression Commit and Revert Attribution From a Git History
+summary: Reconstruct which commit introduced a lease-renewal regression, which reverted it, and the exact CI error and release tag, from a git log, CI log, blame, changelog, PR, and tags dense with near-duplicate SHAs, messages, and version numbers.
+prompt: |
+  You are reconstructing exactly what happened around a regression in the
+  harbor-lease repository. Answer using only the artifacts.
+
+  Rules:
+    - Quote commit subjects, SHAs, authors, dates, error lines, and version tags
+      character-for-character from the named artifact.
+    - Quote commit subjects from the git log (git-log), NOT from the CHANGELOG or
+      the PR description - both paraphrase the commits and are not verbatim
+      commit messages.
+    - Short SHAs, commit subjects, revert messages, and version tags include
+      deliberate near-duplicates. Do not collapse a singular and a plural
+      subject, transpose a short SHA, or blend two similar error lines.
+    - Compare version tags by comparing each dotted field numerically, not as
+      text (v2.3.11 is a later release than v2.3.1).
+
+  Deliverables:
+    1. Give the exact commit subject line (verbatim, as written in the git log)
+       and the short SHA of the commit that introduced the empty-batch
+       regression. Use the git blame at tag v2.3.1 and the CI stack trace to
+       identify it. Quote the subject from the commit, not from the CHANGELOG.
+    2. Give the exact first line of the CI failure message for the empty-batch
+       test (the test named "renews an empty batch without throwing"). The same
+       CI run contains a second, similar TypeError for a different test - do not
+       report that one.
+    3. Give the exact author and commit date of the commit that reverted the
+       regression. A different revert with a near-identical message exists;
+       attribute precisely.
+    4. Quote the CHANGELOG entry for v2.3.1 verbatim, then state exactly how its
+       wording differs from the underlying commit subject.
+    5. Two commits have the near-identical subjects "fix: handle empty lease
+       renewal" and "fix: handle empty lease renewals". State which one (by short
+       SHA and exact subject) added the empty-batch guard to
+       src/renewer/lease_renewer.ts, and name the first release tag that contains
+       it (mind v2.3.1 versus v2.3.11).
+    6. From the git blame excerpt of src/renewer/lease_renewer.ts at v2.3.1, give
+       the exact line number and exact content of the line that throws on an
+       empty batch, and the short SHA blamed for it.
+artifacts:
+  - id: git-log
+    type: log
+    label: harbor-lease git log (2.3.x line)
+    content: |
+      git log --pretty=format:'%h  %ad  %-12an  %s' --date=format:'%Y-%m-%d %H:%M'
+      (harbor-lease, branch main; newest first; excerpt of the 2.3.x line)
+
+      b0417fa  2026-04-21 10:47  Oscar Duarte  chore: prepare 2.3.11 release notes
+      f3c8a71  2026-04-20 15:12  Mei Cho       test: assert LeaseRenewalResult.empty on no pending
+      e9b6d14  2026-04-19 09:33  Ines Fabbri   docs: note batching returns in 2.3.11
+      7c2a5e0  2026-04-18 09:10  Ravi Nadel    test: cover re-landed batch empty case
+      3b9e6d7  2026-04-16 13:52  Lena Ostrom   fix: handle empty lease renewals
+      5e0c2b9  2026-04-14 09:30  Oscar Duarte  build: bump deps for v2.3.10
+      2a9f0c4  2026-04-13 11:05  Lena Ostrom   docs: clarify empty-batch behavior in README
+      d41b7a8  2026-04-12 10:24  Tomas Beck    test: add single_renewal edge cases
+      3b9e6d4  2026-04-11 16:40  Mei Cho       fix: handle empty lease renewal
+      a2f7e19  2026-04-10 14:03  Ravi Nadel    docs: update CHANGELOG for the 2.3.x line
+      88d3c60  2026-04-09 11:22  Ines Fabbri   perf: reuse pool client across renewals
+      6b1e4f7  2026-04-08 09:48  Mei Cho       fix: correct renewal metric label
+      3c5a9d2  2026-04-07 10:15  Oscar Duarte  chore: pin vitest to 1.4.0
+      7e2f5c8  2026-04-05 17:26  Tomas Beck    Revert "feat: batch lease renewals in a single round-trip"
+      c6e2d90  2026-04-04 12:38  Oscar Duarte  ci: add coverage upload step
+      c2b8e17  2026-04-03 08:12  Ravi Nadel    test: cover empty renewal batch
+      9f3ab21  2026-04-01 11:07  Lena Ostrom   feat: batch lease renewals in a single round-trip
+      2d6c8b1  2026-03-30 09:55  Ines Fabbri   chore: add renewal batching benchmark harness
+      7b3f1a6  2026-03-29 14:20  Lena Ostrom   test: benchmark baseline for renewals
+      4d2e8c1  2026-03-27 16:33  Ravi Nadel    refactor: rename RenewReq to RenewRequest
+      9f3ba12  2026-03-26 15:20  Tomas Beck    docs: document lease renewal batching design
+      7e2f5c3  2026-03-25 10:48  Mei Cho       Revert "feat: batch lease renewals behind a flag"
+      f0b7c22  2026-03-24 13:12  Oscar Duarte  feat: batch lease renewals behind a flag
+      d7e1a02  2026-03-19 16:33  Ravi Nadel    docs: describe LeaseRenewer public API
+      b2c9f45  2026-03-18 14:05  Mei Cho       test: add LeaseRenewer unit tests
+      a4c1d90  2026-03-16 09:21  Ravi Nadel    refactor: extract LeaseRenewer from LeaseManager
+      e1a7b30  2026-03-14 11:40  Tomas Beck    test: LeaseManager renewal happy path
+      1f8b6d5  2026-03-13 10:02  Mei Cho       feat: lease TTL computation helper
+      c88b2f0  2026-03-12 10:02  Ravi Nadel    feat: LeaseManager core renewal loop
+      9aa0c31  2026-03-11 08:30  Tomas Beck    chore: add eslint config
+      4a1c7e9  2026-03-10 08:14  Ines Fabbri   chore: initial monorepo tooling for harbor-lease
+      0b5d2e8  2026-03-09 17:50  Ines Fabbri   chore: repo scaffold and license
+
+      Reminder: two feature subjects begin "feat: batch lease renewals " (9f3ab21
+      and f0b7c22); two subjects are "fix: handle empty lease renewal" (3b9e6d4)
+      and "fix: handle empty lease renewals" (3b9e6d7); two commits start
+      Revert "feat: batch lease renewals (7e2f5c8 and 7e2f5c3). They are distinct
+      commits.
+  - id: ci-failure
+    type: log
+    label: harbor-lease CI run #2287 (failure)
+    content: |
+      harbor-lease CI - GitHub Actions - workflow "test" - run #2287
+      branch main   commit c2b8e17   trigger push
+      started 2026-04-03T08:12:44Z   node 20.11.1   runner ubuntu-22.04
+      vitest 1.4.0
+
+      $ npm run test
+
+       RUN  v1.4.0  /home/runner/work/harbor-lease/harbor-lease
+
+       PASS  test/manager/lease_manager.test.ts (18)
+       PASS  test/renewer/single_renewal.test.ts (12)
+       FAIL  test/renewer/lease_renewer.test.ts (9)
+       FAIL  test/renewer/ttl.test.ts (7)
+
+       FAIL  test/renewer/lease_renewer.test.ts > LeaseRenewer > renews an empty batch without throwing
+      TypeError: Cannot read properties of undefined (reading 'expiresAt')
+          at LeaseRenewer.renewBatch (src/renewer/lease_renewer.ts:47:35)
+          at test/renewer/lease_renewer.test.ts:88:20
+
+       FAIL  test/renewer/ttl.test.ts > computeRemaining > returns 0 for an already-expired lease
+      TypeError: Cannot read properties of undefined (reading 'expiresIn')
+          at computeRemaining (src/renewer/ttl.ts:23:19)
+          at test/renewer/ttl.test.ts:41:12
+
+       Test Files  2 failed | 34 passed (36)
+            Tests  2 failed | 291 passed (293)
+         Duration  22.41s   exit code 1
+
+      Triage note (added by the release engineer, not part of the raw CI output)
+        The empty-batch failure in lease_renewer.test.ts is the batching
+        regression and traces to src/renewer/lease_renewer.ts line 47. The
+        ttl.test.ts failure, which reads 'expiresIn', is a separate long-standing
+        flaky test unrelated to the batching change. The two TypeError lines
+        differ only by that one word. When asked for the empty-batch failure,
+        quote the 'expiresAt' line.
+  - id: changelog
+    type: log
+    label: harbor-lease CHANGELOG.md excerpt
+    content: |
+      # Changelog
+
+      All notable changes to harbor-lease are recorded here. This file is written
+      by hand and each bullet summarizes a release; the bullets paraphrase the
+      underlying commits and are not verbatim commit messages.
+
+      ## [2.3.11] - 2026-04-22
+      ### Fixed
+      - Empty renewal batches no longer crash; the batch path short-circuits when there are no pending leases.
+
+      ## [2.3.10] - 2026-04-14
+      ### Changed
+      - Dependency and documentation maintenance for the 2.3 line.
+
+      ## [2.3.2] - 2026-04-06
+      ### Changed
+      - Backed out single-round-trip renewal batching while the empty-batch crash was investigated.
+
+      ## [2.3.1] - 2026-04-02
+      ### Added
+      - Batched lease renewals into one network round-trip to cut renewal latency.
+
+      ## [2.3.0] - 2026-03-20
+      ### Added
+      - First release of the standalone LeaseRenewer.
+
+      Note: these bullets are summaries. For example, the 2.3.1 bullet paraphrases
+      the commit 9f3ab21 whose actual subject is "feat: batch lease renewals in a
+      single round-trip". Do not quote a CHANGELOG bullet as if it were a commit
+      message.
+  - id: pr-description
+    type: note
+    label: Pull request #412 description
+    content: |
+      Pull request #412 - "fix: handle empty lease renewals"
+      Author Lena Ostrom   State merged   Merged at 2026-04-16   Base main
+      Squash-merged as commit 3b9e6d7. Target release v2.3.11.
+
+      ## What happened
+      9f3ab21 shipped single-round-trip batching in v2.3.1. When a renewal batch
+      had no pending leases, renewBatch read renewals[0] and threw. c2b8e17 added
+      an empty-batch test that turned main red, and 7e2f5c8 reverted the batching
+      feature in v2.3.2 to stop the crash.
+
+      ## This change
+      Re-lands batching with a guard: when batch.pending is empty, renewBatch now
+      returns LeaseRenewalResult.empty() before touching renewals[0]. The guard
+      lives in src/renewer/lease_renewer.ts and lands as commit 3b9e6d7.
+
+      ## Not to be confused with
+      - 3b9e6d4 ("fix: handle empty lease renewal", singular) - that fixed a null
+        log line in src/renewer/single_renewal.ts and does not touch the batch
+        path.
+      - 7e2f5c3 (Mei Cho) - that reverted the older flag-gated experiment f0b7c22,
+        not this regression. The revert this builds on is 7e2f5c8 (Tomas Beck).
+
+      ## Release
+      First tag to include this fix is v2.3.11. Note that v2.3.1 is the release
+      that introduced the bug; v2.3.11 (patch 11) is later than v2.3.1 (patch 1),
+      not earlier.
+  - id: git-blame
+    type: log
+    label: git blame of lease_renewer.ts at tag v2.3.1
+    content: |
+      git blame v2.3.1 -- src/renewer/lease_renewer.ts   (excerpt, lines 39-54)
+
+      a4c1d90 (Ravi Nadel   2026-03-16 39)   /**
+      a4c1d90 (Ravi Nadel   2026-03-16 40)    * Renew every pending lease in one batch.
+      a4c1d90 (Ravi Nadel   2026-03-16 41)    */
+      a4c1d90 (Ravi Nadel   2026-03-16 42)   renewBatch(batch: RenewalBatch): LeaseRenewalResult {
+      9f3ab21 (Lena Ostrom  2026-04-01 43)     this.metrics.mark('renew_batch_start');
+      9f3ab21 (Lena Ostrom  2026-04-01 44)     const renewals = batch.pending;
+      9f3ab21 (Lena Ostrom  2026-04-01 45)     const client = this.pool.acquire();
+      9f3ab21 (Lena Ostrom  2026-04-01 46)     const request = new RenewRequest(client.id);
+      9f3ab21 (Lena Ostrom  2026-04-01 47)     const soonest = renewals[0].expiresAt;
+      a4c1d90 (Ravi Nadel   2026-03-16 48)     const deadline = this.clock.now() + this.window;
+      9f3ab21 (Lena Ostrom  2026-04-01 49)     request.notBefore = min(soonest, deadline);
+      9f3ab21 (Lena Ostrom  2026-04-01 50)     request.leaseIds = renewals.map((r) => r.leaseId);
+      9f3ab21 (Lena Ostrom  2026-04-01 51)     const reply = client.send(request);
+      a4c1d90 (Ravi Nadel   2026-03-16 52)     this.metrics.mark('renew_batch_end');
+      a4c1d90 (Ravi Nadel   2026-03-16 53)     return LeaseRenewalResult.from(reply);
+      a4c1d90 (Ravi Nadel   2026-03-16 54)   }
+
+      Line 47 is the unguarded read that throws when renewals is empty. It is
+      blamed to 9f3ab21 (Lena Ostrom, 2026-04-01), the batching commit. Line 48
+      (const deadline ...) survived from the extraction and is blamed to a4c1d90;
+      it is not the throwing line.
+  - id: release-tags
+    type: table
+    label: harbor-lease release tags (2.3.x)
+    content: |
+      Release tags - harbor-lease (annotated tags on the 2.3.x line)
+
+      Tag       Tagged      Relevant commit  Effect on the batch path
+      v2.3.0    2026-03-20  d7e1a02          no batching (baseline LeaseRenewer)
+      v2.3.1    2026-04-02  9f3ab21          batching added; ships the empty-batch crash
+      v2.3.2    2026-04-06  7e2f5c8          batching reverted; crash gone, no batching
+      v2.3.3    2026-04-08  6b1e4f7          unrelated metric-label fix; still no batching
+      v2.3.10   2026-04-14  5e0c2b9          dependency bump; still no batching
+      v2.3.11   2026-04-22  3b9e6d7          batching re-landed with empty-batch guard (the fix)
+
+      v2.3.4 through v2.3.9 were dependency and documentation releases and are
+      omitted here.
+
+      Semver ordering (compare each dotted field numerically, NOT as text)
+        v2.3.0 < v2.3.1 < v2.3.2 < v2.3.3 < v2.3.10 < v2.3.11
+        The patch field 11 is greater than 2, 1, and 0, so v2.3.11 is the NEWEST
+        tag. A text sort would wrongly place v2.3.11 right after v2.3.1; do not
+        read v2.3.1 as later than v2.3.11. The empty-batch guard first appears in
+        v2.3.11, released 2026-04-22. The bug first shipped in v2.3.1, released
+        2026-04-02.
+  - id: commit-reference
+    type: note
+    label: Commit reference and near-duplicate index
+    content: |
+      Commit reference and near-duplicate index (harbor-lease, 2.3.x). This note
+      is the source of record for disambiguating the confusable commits.
+
+      The regression
+        - 9f3ab21  Lena Ostrom  2026-04-01  "feat: batch lease renewals in a single round-trip"
+          Introduced the empty-batch crash. Shipped in v2.3.1. Blame at v2.3.1
+          attributes the throwing line (lease_renewer.ts line 47) to 9f3ab21.
+
+      Confusable short SHAs (each pair differs by transposed characters or a
+      single character)
+        - 9f3ab21 (the regression) vs 9f3ba12 (Tomas Beck, "docs: document lease
+          renewal batching design", a documentation commit that changes no code).
+        - 7e2f5c8 (Tomas Beck, revert of the regression) vs 7e2f5c3 (Mei Cho,
+          revert of the flag experiment). Two different reverts.
+        - 3b9e6d7 (Lena Ostrom, the empty-batch guard) vs 3b9e6d4 (Mei Cho, an
+          unrelated log-line fix in single_renewal.ts).
+
+      Near-duplicate commit subjects (distinct commits, not the same change)
+        - "feat: batch lease renewals in a single round-trip" (9f3ab21, the
+          regression) vs "feat: batch lease renewals behind a flag" (f0b7c22, an
+          earlier flag-gated experiment reverted by 7e2f5c3 before v2.3.1).
+        - "fix: handle empty lease renewals" (3b9e6d7, plural, adds the guard on
+          lease_renewer.ts, first shipped in v2.3.11) vs "fix: handle empty lease
+          renewal" (3b9e6d4, singular, fixes a log line on single_renewal.ts,
+          contained in v2.3.10).
+        - Revert "feat: batch lease renewals in a single round-trip" (7e2f5c8) vs
+          Revert "feat: batch lease renewals behind a flag" (7e2f5c3).
+
+      The revert of the regression
+        - 7e2f5c8  Tomas Beck  2026-04-05  reverted 9f3ab21 and shipped in v2.3.2.
+          The other revert, 7e2f5c3 (Mei Cho, 2026-03-25), undid the flag
+          experiment f0b7c22 and is NOT the revert of the regression.
+
+      The fix
+        - 3b9e6d7  Lena Ostrom  2026-04-16  re-landed batching with an empty-batch
+          guard ("fix: handle empty lease renewals"). First release containing it
+          is v2.3.11. 3b9e6d4 ("fix: handle empty lease renewal") is a different,
+          unrelated fix.
+
+      CHANGELOG versus commit subjects
+        - CHANGELOG bullets paraphrase commits; they are NOT verbatim commit
+          messages. The v2.3.1 CHANGELOG bullet ("Batched lease renewals into one
+          network round-trip to cut renewal latency.") paraphrases the commit
+          subject "feat: batch lease renewals in a single round-trip".
+
+      CI failures on run #2287
+        - The empty-batch regression fails with "reading 'expiresAt'" at
+          lease_renewer.ts:47. The ttl test fails with "reading 'expiresIn'" and
+          is an unrelated flaky test. The two error lines differ only in that word.
+
+      Release ordering
+        - v2.3.0 < v2.3.1 < v2.3.2 < v2.3.3 < v2.3.10 < v2.3.11 (numeric patch
+          order). v2.3.11 is the newest tag. The bug shipped in v2.3.1; the guard
+          first shipped in v2.3.11.
+tags: [hallucination, citation-fidelity, git, commit-attribution, verbatim]

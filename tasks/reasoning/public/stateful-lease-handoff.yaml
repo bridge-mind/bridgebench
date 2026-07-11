@@ -1,0 +1,213 @@
+id: stateful-lease-handoff
+version: 2.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Distributed Lease Handoff With Generation Fencing Across Two Jobs
+summary: >-
+  Reconstruct the terminal ownership, commit validity, and fencing-store state of two jobs run by
+  three workers through a partition, an expiry, delayed renewals, a stale monitoring cache, and a
+  proposed lease-timeout change, using an authoritative database clock.
+prompt: |
+  A lease coordinator hands job ownership between workers. Two jobs (J7 and J3) run across workers
+  worker-a, worker-b, and worker-c. All acquire, renew, and expiry decisions are judged by the
+  authoritative database clock in [lease-protocol]; worker local clocks in [lease-config] matter only
+  for the client-side self-fencing rule. The exact commit path is [commit-routine]. Commits are
+  validated against the fencing object store in [fencing-store]. The full database-ordered history is
+  [cluster-events]; every store write attempt and its outcome is in [store-ledger]. A monitoring cache
+  appears in [ownership-snapshot]. A proposed configuration change appears in [proposed-change].
+
+  Answer every deliverable. Each requires cross-referencing multiple artifacts; a single-artifact
+  reading will be wrong.
+
+  1. Terminal ownership. Give the owner and generation of J7 and of J3 at the end of [cluster-events],
+     and name the event that established each.
+  2. Commit validity for J7. State which worker's J7 commit is valid, and for every worker that
+     attempted to commit J7 but did not succeed, cite the exact protocol step ([commit-routine]) that
+     stopped it (lease fence vs. store fence) and why.
+  3. Fencing-store accounting. For J7 alone, give the number of store write attempts that reached the
+     store, how many were accepted, how many rejected, and the final high-water-mark. Then do the same
+     for J3. Reconcile your counts against [store-ledger].
+  4. Monitoring reconciliation. [ownership-snapshot] reports ownership for J7 and J3. Is it correct as
+     of the end of [cluster-events]? For each job, state what the snapshot claims, what is actually
+     true, and the reason for any discrepancy.
+  5. Proposed change. Under [proposed-change], explain precisely what fails and why, grounding the
+     failure in concrete evidence from [cluster-events]. Give the minimal configuration fix that
+     preserves the intended renewal cadence, and state one plausible-but-wrong diagnosis the change
+     invites.
+artifacts:
+  - id: lease-protocol
+    type: spec
+    label: Lease and commit protocol
+    content: |
+      CLOCK
+        - The database clock is authoritative for acquire, renew, and expiry. A lease row is
+          {job, owner, generation, expires_at}. generation is a monotonically increasing integer that
+          never resets and never decreases for a given job.
+
+      ACQUIRE(job, worker)
+        - Permitted only if there is no lease row for job, OR now_db >= expires_at (the lease has
+          expired by the database clock).
+        - On success: generation := previous_generation + 1 (or 1 if none), owner := worker,
+          expires_at := now_db + lease_ttl_ms. The new generation value is the fencing token for
+          that ownership. Acquire is an atomic compare-and-swap; only one worker can win. A worker
+          that loses the compare-and-swap receives null and must not proceed as owner.
+
+      RENEW(job, worker, generation)
+        - Succeeds only if ALL hold at the moment the request reaches the database: the lease's owner
+          equals worker, the lease's generation equals generation, and now_db < expires_at.
+        - On success: expires_at := now_db + lease_ttl_ms. generation is UNCHANGED by renewal.
+        - Otherwise the renewal is rejected and changes nothing. The time a renewal was *sent* is
+          irrelevant; only its arrival time at the database and the current row at that instant matter.
+          A renewal that was sent while the sender still (locally) believed it held the lease can still
+          arrive after expiry and after another worker has acquired a new generation.
+
+      COMMIT(job, worker, generation) — two steps, in order (see [commit-routine]):
+        - Step L (lease fence): re-read the lease row. Proceed only if its owner == worker AND its
+          generation == generation AND now_db < expires_at. If not, ABORT the commit (no store write).
+        - Step S (store fence): write to [fencing-store] with fencing_token = generation. The store
+          decides acceptance. A commit "succeeds" only if Step L passes AND Step S is accepted.
+
+      SELF-FENCING (client-side guard)
+        - A correct worker must not begin Step S once its own local clock reads
+          >= (expires_at - safety_margin_ms) for the generation it believes it holds. This only
+          prevents wasted writes; Step L and the store fence are the real safety net. A worker that
+          skips or is late on this guard is still caught by Step L or the store fence.
+  - id: fencing-store
+    type: spec
+    label: Fencing object store rule
+    content: |
+      The store keeps one high-water-mark (HWM) fencing token per job, initialized to 0. It has no
+      knowledge of leases, owners, or generations beyond the integer token it is handed; it enforces
+      only that tokens presented for a job never move backwards.
+      On a write with token t for a job:
+        - if t >= HWM(job): ACCEPT, then HWM(job) := t (equal tokens are accepted; an idempotent retry
+          of the same generation does not move the HWM).
+        - if t <  HWM(job): REJECT, HWM(job) unchanged.
+      Worked example for a job starting at HWM 0: write token 1 -> accept, HWM 1; write token 1 again
+      -> accept (equal), HWM stays 1; write token 3 -> accept, HWM 3; write token 2 -> reject (2 < 3),
+      HWM stays 3. Because the store cannot tell a valid owner from a stale one, a stale writer that
+      manages to present the current-or-higher token would be accepted — which is why Step L in
+      [commit-routine] must run first and why generation only ever increases.
+  - id: commit-routine
+    type: code
+    label: Worker acquire/renew/commit pseudocode
+    content: |
+      // Run by every worker. db is the authoritative primary; store is the fencing object store.
+      // ttl = lease_ttl_ms; safetyMargin = safety_margin_ms (see [lease-config]).
+
+      function acquire(job, self):
+        row = db.readLease(job)
+        if row == null or db.now() >= row.expires_at:
+          nextGen = (row == null) ? 1 : row.generation + 1
+          ok = db.cas(job, expected = row,
+                      next = { owner: self, generation: nextGen, expires_at: db.now() + ttl })
+          if ok: return Lease{ job, owner: self, generation: nextGen }   // fencing token = nextGen
+        return null                                                       // not expired, or lost CAS
+
+      function renew(lease):
+        // db applies: row.owner == lease.owner AND row.generation == lease.generation
+        //             AND db.now() < row.expires_at ; else rejected, no change.
+        return db.renewCAS(lease.job, lease.owner, lease.generation, newExpiry = db.now() + ttl)
+
+      function commit(lease, payload):
+        row = db.readLease(lease.job)                       // Step L: lease fence
+        if row.owner != lease.owner
+           or row.generation != lease.generation
+           or db.now() >= row.expires_at:
+          return ABORT_STALE_LEASE                          // never reaches the store
+        if localClock() >= row.expires_at - safetyMargin:   // client-side self-fence
+          return ABORT_SELF_FENCED
+        return store.write(lease.job, token = lease.generation, payload)  // Step S: store fence
+  - id: lease-config
+    type: config
+    label: Coordinator configuration
+    content: |
+      lease_ttl_ms: 10000
+      renewal_interval_ms: 4000        # a worker attempts renewal every 4s while it holds a lease
+      safety_margin_ms: 1000           # self-fencing guard; see [lease-protocol] / [commit-routine]
+      heartbeat_interval_ms: 3000      # liveness only; heartbeats never renew a lease
+      dashboard_replica_lag_ms: 1600   # the ownership dashboard reads a lagging read-replica
+      worker_clock_offsets_ms:         # worker_local_time = db_time + offset
+        worker-a: -200                 # 200ms behind the database clock
+        worker-b: +100                 # 100ms ahead
+        worker-c: +600                 # 600ms ahead
+      notes: |
+        Offsets describe skew only. Acquire/renew/expiry are evaluated by the database clock, so an
+        offset never changes whether a renewal is accepted. Self-fencing uses the local clock: e.g. a
+        worker holding a lease with expires_at 12:00:18.000 and offset -200 stops issuing writes once
+        its local clock reads 12:00:17.000, i.e. at db_time 12:00:17.200. The dashboard's lagging
+        replica means [ownership-snapshot] reflects primary state from ~1.6s before its poll time.
+  - id: cluster-events
+    type: table
+    label: Database-ordered event history
+    content: |
+      db_time        | job | actor       | event                                   | result / effect
+      11:59:58.000   | --  | coordinator | bootstrap: lease table empty            | no active leases for J3 or J7
+      12:00:00.000   | J7  | worker-a    | ACQUIRE J7                              | success: gen 1, owner a, expires_at 12:00:10.000, token 1
+      12:00:00.500   | --  | worker-b    | heartbeat: idle, holds no lease         | informational
+      12:00:01.000   | J3  | worker-c    | ACQUIRE J3                              | success: gen 1, owner c, expires_at 12:00:11.000, token 1
+      12:00:04.000   | J7  | worker-a    | RENEW J7 (a, gen 1)                      | success: expires_at -> 12:00:14.000
+      12:00:05.000   | J3  | worker-c    | RENEW J3 (c, gen 1)                      | success: expires_at -> 12:00:15.000
+      12:00:06.000   | J3  | worker-c    | COMMIT J3 Step L (c, gen 1)             | pass: row matches, now < expiry
+      12:00:06.100   | J3  | worker-c    | COMMIT J3 Step S (token 1)             | store accept: HWM 0 -> 1
+      12:00:07.000   | --  | worker-a    | heartbeat: holds J7 gen 1               | informational
+      12:00:08.000   | J7  | worker-a    | RENEW J7 (a, gen 1)                      | success: expires_at -> 12:00:18.000
+      12:00:09.000   | J3  | worker-c    | RENEW J3 (c, gen 1)                      | success: expires_at -> 12:00:19.000
+      12:00:10.200   | --  | coordinator | read-replica lag measured ~1.6s behind  | informational
+      12:00:11.500   | --  | dashboard   | ownership poll against the read-replica | feeds [ownership-snapshot]
+      12:00:12.000   | J7  | worker-a    | RENEW J7 (a, gen 1) SENT                 | enters network queue, delivery delayed
+      12:00:12.050   | J3  | worker-c    | store write (delayed dup of 12:00:06)   | store accept: token 1 >= HWM 1, HWM stays 1
+      12:00:13.000   | J3  | worker-c    | worker-c enters long GC pause           | no further renewals or heartbeats from c
+      12:00:16.000   | J7  | worker-a    | RENEW J7 (a, gen 1) SENT                 | enters network queue, delivery delayed
+      12:00:17.000   | J7  | worker-b    | worker-b begins watching J7             | informational; lease near expiry
+      12:00:18.000   | J7  | --          | J7 lease reaches expires_at 12:00:18.000| acquirable; last success was the 12:00:08 renew
+      12:00:18.100   | J7  | worker-b    | ACQUIRE J7                              | success: now_db >= expiry, gen 2, owner b, expires_at 12:00:28.100, token 2
+      12:00:18.250   | J7  | worker-a    | RENEW J7 (a, gen 1) ARRIVES (from 12:12) | rejected: row is gen 2 / owner b; owner and generation mismatch
+      12:00:18.400   | J7  | worker-a    | RENEW J7 (a, gen 1) ARRIVES (from 12:16) | rejected: row is gen 2 / owner b; owner and generation mismatch
+      12:00:19.000   | J3  | --          | J3 lease reaches expires_at 12:00:19.000| acquirable; c is still paused
+      12:00:19.020   | J7  | worker-b    | COMMIT J7 Step L (b, gen 2)             | pass: row matches gen 2 / owner b, now < expiry
+      12:00:19.060   | J7  | worker-b    | COMMIT J7 Step S (token 2)             | store accept: HWM 0 -> 2
+      12:00:19.500   | J7  | worker-a    | COMMIT J7 Step L (a, gen 1)             | ABORT: row is gen 2 / owner b; a holds gen 1, mismatch. No store write issued.
+      12:00:20.000   | J3  | worker-a    | ACQUIRE J3                              | success: now_db >= expiry, gen 2, owner a, expires_at 12:00:30.000, token 2
+      12:00:20.500   | J3  | worker-a    | COMMIT J3 Step L (a, gen 2)             | pass: row matches gen 2 / owner a, now < expiry
+      12:00:20.600   | J3  | worker-a    | COMMIT J3 Step S (token 2)             | store accept: HWM 1 -> 2
+      12:00:21.000   | J3  | worker-c    | worker-c wakes, stale store write        | issues store write token 1 for J3 (see [store-ledger])
+      12:00:21.200   | J3  | worker-c    | worker-c RENEW J3 (c, gen 1) ARRIVES     | rejected: row is gen 2 / owner a; owner and generation mismatch
+  - id: store-ledger
+    type: table
+    label: Fencing-store write ledger
+    content: |
+      db_time        | job | worker   | token | hwm_before | decision | hwm_after
+      12:00:06.100   | J3  | worker-c | 1     | 0          | accept   | 1
+      12:00:12.050   | J3  | worker-c | 1     | 1          | accept   | 1
+      12:00:19.060   | J7  | worker-b | 2     | 0          | accept   | 2
+      12:00:20.600   | J3  | worker-a | 2     | 1          | accept   | 2
+      12:00:21.000   | J3  | worker-c | 1     | 2          | reject   | 2
+      note: worker-a never issued a J7 store write; its J7 commit aborted at Step L (12:00:19.500), so
+      it is absent from this ledger. Every row here is a write that actually reached the store.
+  - id: ownership-snapshot
+    type: note
+    label: Monitoring cache
+    content: |
+      Ownership dashboard — rendered from a read-replica, polled at db_time 12:00:11.500, cache TTL 30s.
+      Because the replica lags primary by ~1.6s (see [lease-config]) and is not re-polled until the TTL
+      elapses, this card is the newest data the dashboard will show for the whole window.
+        job | owner    | generation | last_renew_at (replica) | state
+        J7  | worker-a | 1          | 12:00:08.000            | healthy
+        J3  | worker-c | 1          | 12:00:09.000            | healthy
+      poll_source: read-replica (lagging)   next_refresh: 12:00:41.500
+  - id: proposed-change
+    type: diff
+    label: Proposed configuration change
+    content: |
+      --- lease-config (current)
+      +++ lease-config (proposed)
+      - lease_ttl_ms: 10000
+      + lease_ttl_ms: 4000            # "tighten failover: reclaim dead leases faster"
+        renewal_interval_ms: 4000     # unchanged
+        safety_margin_ms: 1000        # unchanged
+      Rationale attached to the change request: "Shorter TTL means we detect a dead worker sooner, so
+      failover is quicker." An alternative the author rejected was lowering renewal_interval_ms,
+      "because renewing more often just adds database load." Evaluate the change as written.
+tags: [distributed-systems, leases, fencing, generation, cas, clock-skew]

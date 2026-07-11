@@ -1,0 +1,184 @@
+id: root-event-ordering
+version: 2.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: Order-Status Projection Regresses From Shipped to Processing After a Concurrency Rollout
+summary: A projection service began stranding orders at "processing" after they had already shipped. A consumer concurrency increase rolled out the same hour, one producer's clock runs fast and another's slow, and the broker only promises at-least-once delivery. Reconcile all seven artifacts to find the one true defect, separate it from the concurrency, clock-skew, and broker decoys, and state the durable invariant plus fix.
+prompt: |
+  Order O-5000 is shown as "processing" in the UI even though the carrier confirms it shipped.
+  A consumer concurrency change rolled out at 14:00, producer clocks are known to differ, and the
+  broker rebalanced once during the window. Using only the artifacts, produce:
+
+  1. ROOT CAUSE. Name the single defect and cite the exact artifact id and the specific expression
+     that contains it. Explain why it lets a later state be overwritten by an earlier one.
+  2. CAUSAL CHAIN. In commit order, trace O-5000 from created to its final wrong state, citing the
+     specific pipeline-log lines (timestamp, worker, seq). Explain precisely why the authoritative
+     latest event (seq=4 shipped) can never win under the current logic.
+  3. CONCURRENCY IS NOT THE ROOT CAUSE. Using the contrast between O-5000 and O-5100 in the log,
+     explain why the maxConcurrentPerPartition increase is a trigger and not the defect, and why
+     reverting it would not durably fix the bug.
+  4. SKEW AND DELIVERY DECOYS. Explain why "sync the producer clocks (NTP)" is not the correct fix,
+     and why `exactlyOnce: true` in consumer-config does nothing here. Cite the event contract.
+  5. INVARIANT AND FIX. State the ordering invariant the projector must enforce and give the minimal
+     change that enforces it correctly under concurrent, duplicated, and reordered delivery.
+  6. BLAST RADIUS. State exactly which orders can regress and which are safe, tie it to the producer
+     clock topology, and state what "stranded forever" means for an affected order.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: projector-current
+    type: code
+    label: projection-service apply() (release v2.2, current)
+    content: |
+      // projection-service/src/apply.ts  (release v2.2, currently deployed)
+      // Applies an order event to the read model. Meant to ignore "older" events.
+
+      export async function apply(event) {
+        // v2.2 decides which event is newer by comparing event time (occurredAt).
+        await db.orders.update({
+          where: and(
+            eq(orders.orderId, event.orderId),
+            lt(orders.occurredAt, event.occurredAt),   // apply only if stored time is earlier
+          ),
+          set: {
+            status: event.status,
+            occurredAt: event.occurredAt,
+            lastSeq: event.seq,                        // stored, but not used by the predicate
+          },
+        });
+      }
+  - id: fence-deploy-diff
+    type: diff
+    label: projection-service v2.1 to v2.2 fence change
+    content: |
+      # projection-service v2.1 -> v2.2
+      # commit: "rank order events by event time so late corrections win"
+
+        await db.orders.update({
+          where: and(
+            eq(orders.orderId, event.orderId),
+      -     lt(orders.lastSeq, event.seq),            // v2.1: fence on authoritative per-order seq
+      +     lt(orders.occurredAt, event.occurredAt),  // v2.2: fence on producer event time
+          ),
+          set: { status: event.status, occurredAt: event.occurredAt, lastSeq: event.seq },
+        });
+  - id: consumer-config
+    type: config
+    label: projection consumer configuration
+    content: |
+      # projection-service/consumer.yaml
+      consumer:
+        group: proj
+        partitionKey: orderId
+        maxConcurrentPerPartition: 8      # raised from 1 at 14:00 to clear a backlog
+        deliveryGuarantee: at-least-once
+        dedupeWindowMs: 0                  # no client-side dedupe; duplicates reach apply()
+        maxPollRecords: 500
+        autoCommit: true
+        exactlyOnce: true                 # NOTE: this broker does not support exactly-once; ignored
+      # The 14:00 rollout changed ONLY maxConcurrentPerPartition (1 -> 8). No other consumer setting
+      # and no broker setting changed in the window.
+  - id: event-contract
+    type: spec
+    label: event ordering contract
+    content: |
+      Event ordering contract (stable across all releases):
+        - seq: a strictly increasing integer per orderId, assigned centrally by the order aggregate.
+          It is the ONLY authoritative ordering signal. A higher seq is always a later transition,
+          regardless of which service emitted it or what its clock reads.
+        - occurredAt: the emitting service's LOCAL wall-clock time at emit. Clocks are NOT
+          synchronized across services; occurredAt may be non-monotonic with respect to seq, so a
+          later event (higher seq) can carry an EARLIER occurredAt than an earlier event.
+        - Delivery guarantee: AT-LEAST-ONCE. Duplicates and redeliveries occur, especially around
+          consumer-group rebalances. A projection may see the same (orderId, seq) more than once.
+        - Ordering guarantee: per-partition FIFO; partitioning is by orderId. A consumer MAY process
+          one partition concurrently (see consumer-config), which can interleave the apply order of
+          two events for the same order. Projections MUST remain correct under reordering and duplicates.
+        - Exactly-once delivery is not offered by this broker; any exactlyOnce setting is ignored.
+  - id: producer-topology
+    type: note
+    label: producer clock topology
+    content: |
+      Producers and measured NTP offsets at incident time:
+        order-svc     offset    +0 ms   emits: created, payment_authorized. Hosts the order
+                                          aggregate that assigns the authoritative per-order seq.
+        fulfillment-a offset +2000 ms   emits: processing
+        fulfillment-b offset -1000 ms   emits: shipped
+      Every producer stamps occurredAt from its OWN local clock at emit. seq is assigned centrally.
+      For O-5000, processing (seq=3, fulfillment-a) is stamped occurredAt=14:00:08 while the later
+      shipped (seq=4, fulfillment-b) is stamped occurredAt=14:00:07 — occurredAt is inverted vs seq.
+      For O-5100, both processing and shipped were emitted by fulfillment-a, so their occurredAt
+      values are consistent with seq.
+
+      Why the offsets matter for O-5000: the true (real-time) order is created < payment < processing
+      < shipped. But fulfillment-a runs +2000ms fast, so its processing event is stamped 14:00:08,
+      while fulfillment-b runs -1000ms slow, so its later shipped event is stamped 14:00:07. The later
+      transition therefore carries the smaller timestamp. seq (3 then 4) still reflects the true order.
+      An order is only vulnerable when two of its transitions come from producers whose offsets order
+      the timestamps opposite to seq; orders whose transitions all come from one clock (or from clocks
+      that happen not to invert) keep occurredAt aligned with seq.
+  - id: pipeline-log
+    type: log
+    label: interleaved producer / broker / consumer log (14:00-14:05)
+    content: |
+      14:00:00 order-svc  emit O-5000 seq=1 status=created            occurredAt=14:00:00.000 -> partition p3
+      14:00:03 order-svc  emit O-5000 seq=2 status=payment_authorized occurredAt=14:00:03.000 -> partition p3
+      14:00:06 fulfill-a  emit O-5000 seq=3 status=processing         occurredAt=14:00:08.000 (clock +2000ms) -> partition p3
+      14:00:08 fulfill-b  emit O-5000 seq=4 status=shipped            occurredAt=14:00:07.000 (clock -1000ms) -> partition p3
+      14:00:05 broker     deliver p3 offset=1 (O-5000 seq=1) -> worker w2
+      14:00:05 consumer   w2 apply O-5000 seq=1 fence occurred_at(NULL)<14:00:00 -> APPLY status=created stored.occurred_at=14:00:00
+      14:00:06 broker     deliver p3 offset=2 (O-5000 seq=2) -> worker w2
+      14:00:06 consumer   w2 apply O-5000 seq=2 fence 14:00:00<14:00:03 -> APPLY status=payment_authorized stored.occurred_at=14:00:03
+      14:00:10 broker     deliver p3 offset=3,4 (O-5000 seq=3,4) maxConcurrentPerPartition=8 -> seq=4 to w5, seq=3 to w2
+      14:00:11 consumer   w5 apply O-5000 seq=4 status=shipped     fence 14:00:03<14:00:07 -> APPLY stored.occurred_at=14:00:07
+      14:00:12 consumer   w2 apply O-5000 seq=3 status=processing  fence 14:00:07<14:00:08 -> APPLY stored.occurred_at=14:00:08  ## REGRESSION shipped->processing
+      14:00:12 consumer   w2 note O-5000 status=processing lastSeq=3 (won by occurred_at, not seq)
+      14:00:20 consumer   group=proj lag p3=0 p8=0 (caught up)
+      14:00:45 order-svc  emit O-5077 seq=1 status=created occurredAt=14:00:45.000 -> partition p5
+      14:00:45 consumer   w3 apply O-5077 seq=1 fence occurred_at(NULL)<14:00:45 -> APPLY status=created stored.occurred_at=14:00:45
+      14:01:00 order-svc  emit O-5100 seq=1 status=created    occurredAt=14:01:00.000 -> partition p8
+      14:01:05 fulfill-a  emit O-5100 seq=2 status=processing occurredAt=14:01:05.000 (clock +2000ms) -> partition p8
+      14:01:10 fulfill-a  emit O-5100 seq=3 status=shipped    occurredAt=14:01:10.000 (clock +2000ms) -> partition p8
+      14:01:12 broker     deliver p8 offset=1,2,3 (O-5100 seq=1,2,3) maxConcurrentPerPartition=8 -> seq=3 to w1, seq=2 to w4, seq=1 to w7
+      14:01:12 consumer   w7 apply O-5100 seq=1 status=created  fence occurred_at(NULL)<14:01:00 -> APPLY stored.occurred_at=14:01:00
+      14:01:12 consumer   w1 apply O-5100 seq=3 status=shipped  fence 14:01:00<14:01:10 -> APPLY stored.occurred_at=14:01:10
+      14:01:13 consumer   w4 apply O-5100 seq=2 status=processing fence 14:01:10<14:01:05 -> REJECT (no-op)  ## reordered but NO regression: occurred_at aligned with seq
+      14:02:00 broker     group=proj rebalance: partition p3 reassigned w2 -> w9
+      14:02:01 broker     redeliver p3 offset=3,4 (O-5000 seq=3,4) at-least-once, in order -> w9
+      14:02:01 consumer   w9 apply O-5000 seq=3 status=processing fence 14:00:08<14:00:08 -> REJECT (no-op, duplicate)
+      14:02:01 consumer   w9 apply O-5000 seq=4 status=shipped    fence 14:00:08<14:00:07 -> REJECT (no-op)  ## seq=4 can NEVER win: 08<07 is always false
+      14:02:02 consumer   w9 note O-5000 remains status=processing (stranded; authoritative latest seq=4 shipped never applied)
+      14:03:30 order-svc  emit O-5077 seq=2 status=payment_authorized occurredAt=14:03:30.000 -> partition p5
+      14:03:30 consumer   w3 apply O-5077 seq=2 fence 14:00:45<14:03:30 -> APPLY status=payment_authorized stored.occurred_at=14:03:30
+      14:03:45 fulfill-a  emit O-5077 seq=3 status=processing occurredAt=14:03:47.000 (clock +2000ms) -> partition p5
+      14:03:50 fulfill-a  emit O-5077 seq=4 status=shipped    occurredAt=14:03:52.000 (clock +2000ms) -> partition p5
+      14:03:52 broker     deliver p5 offset=3,4 (O-5077 seq=3,4) maxConcurrentPerPartition=8 -> seq=4 to w3, seq=3 to w8
+      14:03:52 consumer   w3 apply O-5077 seq=4 status=shipped     fence 14:03:30<14:03:52 -> APPLY stored.occurred_at=14:03:52
+      14:03:53 consumer   w8 apply O-5077 seq=3 status=processing  fence 14:03:52<14:03:47 -> REJECT (no-op)  ## reordered but occurred_at aligned with seq -> safe
+      14:03:54 consumer   w8 note O-5077 status=shipped (correct final)
+      14:05:00 support    ticket: O-5000 shows "processing" in UI though carrier confirms shipped
+  - id: order-audit-table
+    type: table
+    label: projection audit and consumer metrics
+    content: |
+      projection audit -- order O-5000
+        appliedAt  seq  status              stored.occurred_at  result
+        14:00:05   1    created             14:00:00            applied
+        14:00:06   2    payment_authorized  14:00:03            applied
+        14:00:11   4    shipped             14:00:07            applied
+        14:00:12   3    processing          14:00:08            applied (regression)
+        14:02:01   3    processing          14:00:08            rejected (duplicate; 08<08 false)
+        14:02:01   4    shipped             14:00:08            rejected (07<08 false)
+
+      projection audit -- order O-5100
+        14:01:12   1    created             14:01:00            applied
+        14:01:12   3    shipped             14:01:10            applied
+        14:01:13   2    processing          14:01:10            rejected (correct)
+
+      consumer metrics (14:00-14:05)
+        consumer_lag_max  rebalances  redeliveries  worker_restarts
+        0                 1           2             0
+      # On-call note: one rebalance and a couple redeliveries in-window; lag stayed at 0.
+      # Broker health looks nominal; no partition was stuck.
+tags: [events, projections, ordering, at-least-once, root-cause]

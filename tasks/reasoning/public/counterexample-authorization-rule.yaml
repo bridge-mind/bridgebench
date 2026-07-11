@@ -1,0 +1,278 @@
+id: counterexample-authorization-rule
+version: 2.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Vault Access Policy Rewrite Equivalence and the Admin Fast-Path Audit
+summary: A team claims its optimized authorization evaluator is behavior-equivalent to the written Vault Access Policy and only short-circuits administrators earlier. Decide whether the equivalence holds across three code modules, and if not produce a minimal counterexample, isolate the diverging spec clause and code line, state the weakest precondition that repairs it, adjudicate three reviewer objections, and judge whether a proposed patch restores equivalence.
+prompt: |
+  A permissions team refactored an access evaluator for a document vault. They assert the new
+  evaluator in evaluate.ts is behavior-equivalent to the authoritative Vault Access Policy v4 for
+  every possible request, differing only in that administrators take a faster path. Three reviewers
+  filed objections and a fourth proposed a patch. You must adjudicate the equivalence rigorously.
+
+  A request is a record of attributes. The authoritative decision is defined only by the policy
+  (the spec), not by any code. Treat the three code modules as the shipped implementation, and the
+  fixtures and ops-samples as observed behavior of that implementation.
+
+  Deliverables (answer every one, and show the derivation that supports it):
+
+  1. Does the equivalence claim hold for all requests? Answer yes or no.
+
+  2. If it does not hold, give a single concrete minimal counterexample: an explicit assignment of
+     every attribute that matters, the decision the policy requires, and the decision the shipped
+     code produces. Trace the code decision step by step through evaluate.ts, and (where reached)
+     eligibility.ts and restrictions.ts, showing which branch is taken at each line. State which
+     attributes are irrelevant to the counterexample and why.
+
+  3. Name the exact policy clause and the exact code line that diverge, and state the direction of
+     the error: does the code over-grant or over-deny relative to the policy, and what is the
+     security consequence?
+
+  4. Give the weakest precondition on the request under which the shipped administrator branch
+     already agrees with the policy, and state the minimal code change that makes the evaluator
+     equivalent to the policy for all requests. Justify the minimality.
+
+  5. Adjudicate the three reviewer objections in reviewer-notes (R1 the clearance comparison, R2
+     administrators opening locked resources, R3 guests denied despite clearance). For each, say
+     whether it is a real divergence from the policy, and justify from the spec and the code.
+
+  6. Does the patch in proposed-patch restore full equivalence to the policy? If not, give a second
+     concrete counterexample on which the patched code still disagrees with the policy, and name the
+     exact line the patch got wrong.
+artifacts:
+  - id: policy
+    type: spec
+    label: Vault Access Policy v4 (authoritative semantics)
+    content: |
+      Vault Access Policy v4. A read request carries these attributes:
+        isAdmin        boolean          principal holds the administrator role
+        role           editor|viewer|guest   principal's non-admin role (ignored when isAdmin)
+        isOwner        boolean          principal is the resource owner
+        clearance      integer 0..3     principal clearance level
+        classification integer 0..3     resource classification level
+        locked         boolean          an editorial lock is set on the resource
+        legalHold      boolean          the resource is under legal hold
+        network        corp|vpn|public  origin network of the request
+        mfa            boolean          this session completed multi-factor authentication
+
+      The authoritative decision is:
+
+        ALLOW  if and only if  Eligible(req) AND NOT Restricted(req)
+
+      Eligibility (may this principal read this resource at all):
+
+        Eligible(req) =
+          isAdmin
+          OR ( clearance >= classification
+               AND ( isOwner OR role == 'editor' OR role == 'viewer' ) )
+
+        Clarifications:
+          - The clearance test is "greater than or equal": clearance 2 may read classification 2.
+          - A plain guest (role guest, not the owner) is never eligible unless isAdmin. Guests are
+            eligible only for resources they own (and only if clearance >= classification).
+          - Ownership substitutes for a reader role: an owner with sufficient clearance is eligible
+            regardless of role.
+
+      Restrictions (hard overrides that block an otherwise-eligible principal). ANY true restriction
+      denies the request:
+
+        R-HOLD   legalHold is set  ->  DENY for every principal, administrators included.
+                 Legal hold overrides all roles; there is NO administrator exemption from it. This
+                 is a compliance control: while a resource is under legal hold, no one reads it
+                 through this evaluator, not even an administrator.
+        R-LOCK   locked is set AND the principal is NOT an administrator  ->  DENY.
+                 Administrators ARE exempt from the editorial lock; non-administrators are not.
+        R-NET    network == 'public' AND NOT mfa  ->  DENY for every principal, administrators
+                 included. A public-network session without MFA is always denied.
+
+      Precedence: restrictions override eligibility. Being an administrator satisfies eligibility
+      and waives only R-LOCK. It does NOT waive R-HOLD and does NOT waive R-NET.
+
+      Worked decisions (authoritative):
+        W1 isAdmin=T, legalHold=T, network=corp, mfa=T, locked=F:
+           Eligible=T (admin). Restricted: R-HOLD true. ALLOW = T AND NOT T = DENY.
+        W2 isAdmin=T, legalHold=F, network=public, mfa=F:
+           Eligible=T. Restricted: R-NET true. ALLOW = DENY.
+        W3 isAdmin=T, legalHold=F, locked=T, network=corp, mfa=T:
+           Eligible=T. Restricted: R-HOLD F, R-LOCK (locked AND not admin)=F, R-NET F. ALLOW.
+        W4 role=viewer, clearance=1, classification=2:
+           Eligible: 1>=2 is false, so NOT eligible. DENY (restrictions not even reached).
+        W5 role=guest, isOwner=F, clearance=3, classification=0:
+           Eligible: 3>=0 true AND (isOwner F OR guest-is-not-editor/viewer F) = false. DENY.
+        W6 role=editor, clearance=3, classification=1, locked=T, network=vpn, mfa=T, isOwner=F:
+           Eligible=T. Restricted: R-LOCK (locked AND not admin)=T. DENY.
+  - id: eligibility
+    type: code
+    label: authz/eligibility.ts (Eligible, with request shape)
+    content: |
+      // authz/types.ts (shown here for reference)
+      export type Role = 'editor' | 'viewer' | 'guest';
+      export type Network = 'corp' | 'vpn' | 'public';
+      export interface AccessRequest {
+        isAdmin: boolean;
+        role: Role;            // ignored when isAdmin is true
+        isOwner: boolean;
+        clearance: number;     // 0..3
+        classification: number; // 0..3
+        locked: boolean;
+        legalHold: boolean;
+        network: Network;
+        mfa: boolean;
+      }
+      export interface Decision { allow: boolean; }
+
+      // authz/eligibility.ts
+      // Base eligibility only ("who may read this resource at all"). Restrictions are separate and
+      // are applied by evaluate.ts, never here.
+      import type { AccessRequest } from './types';
+
+      export function eligible(req: AccessRequest): boolean {
+        if (req.isAdmin) return true;                       // admins are always eligible
+        if (req.clearance < req.classification) return false; // below clearance: never eligible
+        const canRead = req.role === 'editor' || req.role === 'viewer';
+        return req.isOwner || canRead;                      // owner OR a reader role
+      }
+  - id: restrictions
+    type: code
+    label: authz/restrictions.ts (Restricted)
+    content: |
+      // authz/restrictions.ts
+      // Hard overrides. Any true value blocks the request. Evaluation order is irrelevant because
+      // the function is a disjunction; each clause is independent.
+      import type { AccessRequest } from './types';
+
+      export function restricted(req: AccessRequest): boolean {
+        if (req.legalHold) return true;                         // R-HOLD: applies to EVERYONE, admins too
+        if (req.locked && !req.isAdmin) return true;            // R-LOCK: blocks non-admins only
+        if (req.network === 'public' && !req.mfa) return true;  // R-NET: applies to EVERYONE, admins too
+        return false;
+      }
+
+      // Note for reviewers: restricted() alone is a faithful encoding of R-HOLD, R-LOCK, R-NET.
+      // Whether the shipped evaluator actually consults it on every path is a separate question.
+  - id: evaluate
+    type: code
+    label: authz/evaluate.ts (shipped evaluator with administrator fast path)
+    content: |
+      // authz/evaluate.ts
+      import { eligible } from './eligibility';
+      import { restricted } from './restrictions';
+      import type { AccessRequest, Decision } from './types';
+
+      export function decide(req: AccessRequest): Decision {
+        // Fast path: administrators are always eligible and bypass the editorial lock, so we skip
+        // eligibility() and the R-LOCK check for them and answer immediately.
+        if (req.isAdmin) {
+          if (req.network === 'public' && !req.mfa) return { allow: false };
+          return { allow: true };
+        }
+        if (!eligible(req)) return { allow: false };
+        return { allow: !restricted(req) };
+      }
+
+      // Batch auditor used to generate ops-samples. Pure; performs no I/O beyond returning rows.
+      export function auditAll(reqs: AccessRequest[]): Array<{ req: AccessRequest; shipped: Decision }> {
+        return reqs.map((req) => ({ req, shipped: decide(req) }));
+      }
+  - id: fixtures
+    type: table
+    label: Regression fixtures (all currently passing under the shipped code)
+    content: |
+      Each row is an input and the decision the policy requires. The shipped suite is GREEN: shipped
+      decide() matches the "policy" column on every row below. Boolean columns use T/F. A dash means
+      the attribute is unread on that row's code path.
+
+      No fixture sets an administrator together with legalHold=T. That combination is uncovered by
+      the suite, which is why the suite stays green despite the behavior in question.
+
+      #  | isAdmin | role   | clr | cls | owner | locked | hold | net    | mfa | policy
+      1  | T       | -      |  -  |  -  |  -    | F      | F    | corp   |  T  | ALLOW
+      2  | T       | -      |  -  |  -  |  -    | T      | F    | corp   |  T  | ALLOW
+      3  | T       | -      |  -  |  -  |  -    | F      | F    | public |  F  | DENY
+      4  | F       | editor |  2  |  2  | F     | F      | F    | corp   |  T  | ALLOW
+      5  | F       | viewer |  1  |  2  | F     | F      | F    | corp   |  T  | DENY
+      6  | F       | guest  |  2  |  1  | T     | F      | F    | corp   |  T  | ALLOW
+      7  | F       | editor |  3  |  1  | F     | T      | F    | vpn    |  T  | DENY
+      8  | F       | viewer |  3  |  0  | F     | F      | F    | public |  F  | DENY
+      9  | F       | guest  |  3  |  0  | F     | F      | F    | corp   |  T  | DENY
+      10 | F       | editor |  2  |  2  | F     | F      | F    | public |  T  | ALLOW
+      11 | F       | viewer |  0  |  0  | F     | F      | T    | corp   |  T  | DENY
+      12 | T       | -      |  -  |  -  |  -    | T      | F    | vpn    |  T  | ALLOW
+
+      Coverage note: rows 11 exercises legalHold only for a NON-admin (correctly denied). No row
+      pairs isAdmin=T with legalHold=T, so the administrator branch's handling of legal hold is
+      never asserted.
+  - id: ops-samples
+    type: table
+    label: Production decision samples (as emitted by the shipped evaluator via auditAll)
+    content: |
+      Sampled from the live evaluator. The "shipped" column is what decide() returned in production.
+      It is NOT necessarily what the policy requires; deriving the policy decision per row and
+      comparing is the point of the exercise. Boolean columns use T/F.
+
+      #  | isAdmin | role   | clr | cls | owner | locked | hold | net    | mfa | shipped
+      A  | T       | -      |  -  |  -  |  -    | F      | F    | corp   |  T  | ALLOW
+      B  | F       | editor |  2  |  2  | F     | F      | F    | corp   |  T  | ALLOW
+      C  | F       | viewer |  1  |  2  | F     | F      | F    | corp   |  T  | DENY
+      D  | T       | -      |  -  |  -  |  -    | F      | T    | corp   |  T  | ALLOW
+      E  | F       | editor |  3  |  1  | F     | T      | F    | vpn    |  T  | DENY
+      F  | T       | -      |  -  |  -  |  -    | T      | F    | corp   |  T  | ALLOW
+      G  | F       | guest  |  2  |  1  | T     | F      | F    | corp   |  T  | ALLOW
+      H  | T       | -      |  -  |  -  |  -    | F      | F    | public |  F  | DENY
+      I  | T       | -      |  -  |  -  |  -    | T      | T    | vpn    |  T  | ALLOW
+      J  | F       | guest  |  3  |  0  | F     | F      | F    | corp   |  T  | DENY
+
+      Analyst annotations (unverified hunches, not policy findings):
+        - Rows E and F both involve locked resources but differ in outcome. An analyst flagged this
+          as "inconsistent locking." Check whether it actually contradicts the policy.
+        - Row J denies a guest with the highest clearance. An analyst called this "a clearance bug."
+        - Rows D and I both set legalHold=T on an administrator and returned ALLOW. No analyst
+          flagged these, because the reviewers assumed the admin path was trivially correct.
+  - id: reviewer-notes
+    type: note
+    label: Review thread and objections
+    content: |
+      Claim under review (the equivalence claim): authz/evaluate.ts decide() is behavior-equivalent
+      to Vault Access Policy v4 for ALL requests; it merely short-circuits administrators before
+      computing eligibility. A prior static audit "found no divergence," which increased the team's
+      confidence in the claim. Treat that prior audit as unproven.
+
+      Three objections were filed against the claim. None is guaranteed correct:
+
+        R1 (clearance): "eligibility.ts uses clearance >= classification. Read access should require
+        strictly higher clearance than the resource classification, so `>=` over-grants by one level
+        and diverges from the policy." The filer wants the comparison changed to strict `>`.
+
+        R2 (lock bypass): "The administrator fast path returns allow even when locked is true, so an
+        administrator can open a locked resource (see ops-sample F). That looks like a lock-bypass
+        defect the old evaluator would not have permitted."
+
+        R3 (guest): "A guest with clearance 3 reading a classification-0 resource is denied (see
+        ops-sample J and fixture 9). Denying a fully-cleared guest looks too strict to be intended;
+        this must be an eligibility bug."
+
+      A fourth engineer attached a fix; see proposed-patch. Decide the equivalence claim on the
+      merits of the policy first, then judge R1, R2, R3, and the patch. Do not assume any objection,
+      analyst annotation, or the prior audit is correct.
+  - id: proposed-patch
+    type: diff
+    label: Proposed patch to authz/evaluate.ts
+    content: |
+      Proposed change to the administrator fast path in authz/evaluate.ts:
+
+         export function decide(req: AccessRequest): Decision {
+           if (req.isAdmin) {
+      -      if (req.network === 'public' && !req.mfa) return { allow: false };
+      +      if (req.legalHold) return { allow: false };
+             return { allow: true };
+           }
+           if (!eligible(req)) return { allow: false };
+           return { allow: !restricted(req) };
+         }
+
+      Author's note: "This makes administrators respect legal hold, which resolves the reported
+      production sample (D). Equivalence restored. I considered instead deleting the fast path and
+      letting admins fall through to `!restricted(req)`, but this one-line change looked smaller and
+      lower-risk, so I went with it."
+tags: [boolean-logic, authorization, formal-verification, counterexample, access-control]

@@ -1,0 +1,242 @@
+id: uncertainty-conflicting-telemetry
+version: 2.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Checkout Latency Spike Across Contradictory Dashboards
+summary: A checkout API tail-latency spike coincides with an alarming database dashboard, a recent deploy, garbage-collection pauses, and a few auth errors. The signals partly contradict one another and several are unreliable for concrete reasons. Rank the candidate causes, identify which signals cannot be trusted and why, commit to the single best-supported root cause and mechanism, explain why the database is not it, and name the one measurement that would be decisive.
+prompt: |
+  The checkout API showed a tail-latency spike for a few minutes. On-call is split: one engineer
+  blames the database (a dashboard shows database p95 hitting ~1.9s), another points at a deploy
+  minutes earlier, and a few auth errors are in the logs. The evidence partly contradicts itself,
+  and some of it is measured in ways that make it unreliable. Despite the noise, one conclusion is
+  best supported by the artifacts.
+
+  Times are shown per artifact in that artifact's clock. Note the clock status before aligning
+  anything across hosts. This is not a "cannot be determined" task: the internally consistent,
+  synchronized-clock evidence is sufficient to reach one best-supported conclusion.
+
+  Deliverables (answer every one, and show the reasoning that supports it):
+
+  1. Rank the candidate causes from best-supported to least-supported: (a) the deploy, (b) database
+     contention, (c) the auth dependency, (d) network or DNS. For each, weigh the specific evidence
+     for and against.
+
+  2. Identify which signals are unreliable and state the concrete artifact-grounded reason for each
+     (for example clock skew, aggregation across unrelated work, or sampling and truncation). Say
+     what each unreliable signal can and cannot be used for.
+
+  3. State the single best-supported conclusion: the root cause and the mechanism that produced the
+     observed tail-latency signature (be specific about why the median stayed flat).
+
+  4. Explain specifically why the database is not the cause, despite the database dashboard showing
+     a ~1.9s p95.
+
+  5. Give the one additional measurement that would make the conclusion decisive, and state which
+     result would confirm the conclusion and which would refute it.
+artifacts:
+  - id: incident-summary
+    type: note
+    label: Incident summary, change events, and on-call theories
+    content: |
+      SEV-2 checkout-api latency. Customer-facing p99 rose from ~150 ms to ~1.9 s between 14:05 and
+      14:08 (api-host clock) and recovered by 14:09. Median latency barely moved. The client library
+      aborts a checkout request at a 2 s timeout.
+
+      Change events (deploy pipeline clock, NTP healthy):
+        11:20:04  checkout-api  d-8790  dependency bump, no config change
+        14:03:10  checkout-api  d-8842  config: catalogCache.maxEntries 5000 -> 50000 (in-process
+                                        cache), warmed on boot
+        14:03:10  database                no schema migration or config change in the window
+        14:03:10  auth-service            no change in the window
+      d-8842 raised the in-process catalog cache capacity tenfold. No database or auth change
+      shipped during the incident window.
+
+      On-call theories (do not assume any is correct):
+        - Engineer A: "The database dashboard shows query p95 hitting 1.9 s at 14:07. The database
+          is overloaded and is stalling checkout." A wants to fail over the primary.
+        - Engineer B: "There was a checkout-api deploy at 14:03, minutes before the spike."
+        - A third note: the auth service returned three HTTP 500s during the window, so an auth
+          outage is 'possible.'
+      Decide the cause from the artifacts before any disruptive action (failover, rollback) is taken.
+  - id: api-latency
+    type: table
+    label: checkout-api latency percentiles (api-host clock, NTP healthy)
+    content: |
+      Per-minute percentiles:
+        minute | p50_ms | p90_ms | p95_ms | p99_ms
+        14:01  | 55     | 78     | 90     | 140
+        14:02  | 56     | 79     | 92     | 150
+        14:03  | 58     | 96     | 120    | 300
+        14:04  | 57     | 150    | 260    | 900
+        14:05  | 58     | 320    | 620    | 1950
+        14:06  | 59     | 360    | 700    | 1880
+        14:07  | 57     | 340    | 650    | 1820
+        14:08  | 56     | 180    | 300    | 900
+        14:09  | 55     | 96     | 150    | 210
+        14:10  | 55     | 80     | 95     | 150
+
+      Per-second p99 within the worst minute (14:05:xx), showing the spike is spiky, not sustained:
+        14:05:03 160 ms | 14:05:07 1910 ms | 14:05:12 150 ms | 14:05:19 170 ms
+        14:05:41 1780 ms | 14:05:44 160 ms | 14:05:55 155 ms
+
+      The median is flat (~55-59 ms) throughout, and even p90 stays modest. Only the far tail (p95,
+      p99) spikes, and within a minute only a few seconds carry it. p99 peaks near the value of a
+      single ~1.8 s stall added to a normal ~55 ms request.
+
+      Request rate (requests per minute) for context:
+        14:01 | 2980   14:03 | 3010   14:05 | 3040   14:07 | 2995   14:09 | 3005
+      Traffic is flat across the incident (no surge, no drop), so a load spike or a mass client
+      retry storm is not in play; whatever slowed the tail did so without changing offered load.
+  - id: resource-metrics
+    type: table
+    label: checkout-api host runtime metrics (api-host clock, NTP healthy)
+    content: |
+      minute | oldGen_used_pct | heap_used_mb | gc_time_ms_per_min | sys_cpu_pct
+      14:01  | 42              | 2100         | 60                 | 30
+      14:02  | 41              | 2080         | 55                 | 31
+      14:03  | 55              | 2750         | 120                | 34
+      14:04  | 78              | 3600         | 900                | 45
+      14:05  | 95              | 4300         | 5400               | 88
+      14:06  | 96              | 4350         | 5200               | 90
+      14:07  | 95              | 4320         | 5100               | 86
+      14:08  | 90              | 4050         | 2600               | 70
+      14:09  | 72              | 3100         | 300                | 40
+      14:10  | 55              | 2400         | 70                 | 33
+
+      Old-generation occupancy and heap climb from 14:03 (the deploy) and peak at ~95% during the
+      spike, then recede. Time spent in garbage collection per minute jumps by ~90x during the
+      spike, and system CPU tracks it (CPU spent collecting rather than serving).
+
+      The heap growth begins at 14:03 and not before, and it recedes only after 14:08 once the
+      collector reclaims the promoted objects; the shape is a step change at the deploy, not a slow
+      organic drift. The 5,400 ms/min of GC time at 14:05 is close to the sum of the Full GC pauses
+      in gc-log for that minute, i.e. the host spent a large fraction of the minute stopped.
+  - id: gc-log
+    type: log
+    label: checkout-api garbage-collection log (api-host clock)
+    content: |
+      14:01:30 GC(minor) pause 12ms
+      14:02:44 GC(minor) pause 14ms
+      14:03:15 GC(minor) pause 18ms  (post-deploy heap warmup)
+      14:04:02 GC(minor) pause 40ms  promoted 512M -> oldGen
+      14:04:51 GC(minor) pause 55ms  promoted 640M -> oldGen
+      14:05:07 Full GC (Allocation Failure) pause 1.81s  oldGen 4180M -> 3020M
+      14:05:41 Full GC (Allocation Failure) pause 1.78s  oldGen 4205M -> 3050M
+      14:06:12 Full GC (Allocation Failure) pause 1.72s  oldGen 4210M -> 3080M
+      14:07:20 Full GC (Allocation Failure) pause 1.68s  oldGen 4190M -> 3050M
+      14:08:33 GC (Allocation Failure) pause 0.90s        oldGen 3900M -> 2600M
+      14:10:05 GC(minor) pause 15ms
+
+      Before 14:04 only sub-60 ms minor collections. Several ~1.7-1.8 s stop-the-world Full GCs
+      occur inside the spike window (14:05-14:07), each freeing old-gen space that quickly refills.
+      The Full GC timestamps line up second-for-second with the per-second p99 spikes in
+      api-latency (14:05:07, 14:05:41, ...), on the same api-host clock.
+  - id: trace-sample
+    type: log
+    label: Distributed trace samples (api-host clock; head-sampled at 1%)
+    content: |
+      Sampling: head-sampled at 1% of requests. Requests that exceed the 2 s client timeout are
+      cancelled before their spans export, so the very slowest requests are absent from this sample.
+
+      trace T-19 14:05:07 total 1.812s
+        span http.handler        1.795s  [on-CPU/runnable-stalled 1.740s]
+        span db.query            0.038s
+        span auth.verify         0.024s
+        span serialize.response  0.014s
+      trace T-27 14:05:41 total 1.774s
+        span http.handler        1.756s  [on-CPU/runnable-stalled 1.690s]
+        span db.query            0.041s
+        span auth.verify         0.022s
+      trace T-44 14:06:12 total 1.719s
+        span http.handler        1.701s  [on-CPU/runnable-stalled 1.640s]
+        span db.query            0.036s
+        span auth.verify         0.026s
+      trace T-31 14:05:50 total 0.056s  (normal request, same window)
+        span db.query            0.035s
+        span auth.verify         0.020s
+        span serialize.response  0.001s
+
+      In every slow trace the db.query and auth.verify spans are normal (~40 ms and ~24 ms); the
+      extra ~1.6-1.7 s is on-CPU/runnable-stalled time inside the handler, and its start aligns with
+      a Full GC timestamp in gc-log. Normal requests in the same window are ~56 ms end to end.
+
+      On the sampling limitation: 1% head sampling and the loss of >2 s timed-out requests mean this
+      set understates HOW MANY and HOW SLOW the worst requests were. It does not bias WHERE the time
+      is spent within a captured slow request: the db and auth spans are measured directly and are
+      small, and a stall that lived inside the db or auth call would have shown up as a large db.query
+      or auth.verify span, which it does not. So the sample is unusable for counting the tail but
+      valid for attributing it.
+  - id: db-metrics
+    type: table
+    label: Database query latency (database-host clock; see clock-note)
+    content: |
+      Pooled p95 across ALL schemas (single percentile over every query on the host):
+        minute | p95_ms
+        14:03  | 92
+        14:04  | 95
+        14:05  | 120
+        14:06  | 900
+        14:07  | 1900
+        14:08  | 1500
+        14:09  | 300
+        14:10  | 110
+
+      Per-schema p95 (same host, same queries, decomposed by schema):
+        minute | checkout_ms | analytics_ms | sessions_ms
+        14:05  | 40          | 210          | 33
+        14:06  | 44          | 3200         | 35
+        14:07  | 41          | 4200         | 34
+        14:08  | 39          | 3100         | 36
+        14:09  | 37          | 260          | 33
+
+      A batch job report_rollup ran on the analytics schema from 14:06:40 to 14:09:30 (database-host
+      clock). Because the pooled p95 is one percentile computed over ALL schemas' queries together,
+      the heavy analytics batch dominates the pooled tail. The checkout schema's own p95 stayed
+      ~37-44 ms throughout, and the sessions schema was flat too.
+  - id: clock-note
+    type: note
+    label: Time synchronization status
+    content: |
+      The api host, its garbage-collection log, and the trace collector all stamp events with the
+      api-host clock, which held NTP sync throughout (measured offset < 20 ms). Those three sources
+      are therefore mutually alignable second-for-second.
+
+      The database metrics host lost NTP sync at ~13:40. An audit at 14:15 measured its clock
+      running +2 minutes 51 seconds ahead of true time. Database-host timestamps in db-metrics are
+      therefore roughly three minutes ahead of true time and cannot be aligned tick-for-tick to the
+      api-host timeline; the database dashboard's "14:07" is not the api host's 14:07. The
+      per-schema decomposition WITHIN the database host is still internally valid, because it
+      compares schemas measured on the same (skewed) clock at the same instants.
+
+      Practical consequence: any argument of the form "the database spiked at 14:07 and the API
+      spiked at 14:05-14:08, so they line up" is unsound, because the database "14:07" is really
+      ~14:04 true time, and the alignment is an artifact of comparing two clocks that are three
+      minutes apart. Cross-host causality here needs synchronized timestamps or shared trace IDs,
+      neither of which exists for the database path in this window.
+  - id: auth-dependency
+    type: table
+    label: Auth service latency and errors (auth-host clock, NTP healthy)
+    content: |
+      Auth verify p95 (ms):
+        14:01 | 22
+        14:02 | 21
+        14:03 | 24
+        14:04 | 23
+        14:05 | 25
+        14:06 | 23
+        14:07 | 26
+        14:08 | 24
+        14:09 | 22
+        14:10 | 22
+
+      HTTP 500s recorded (auth-host clock):
+        14:01:12  endpoint=/token/refresh   (1 event)
+        14:12:40  endpoint=/token/refresh   (1 event)
+        14:14:05  endpoint=/token/refresh   (1 event)
+
+      Auth verify latency (the path checkout actually calls) is flat 21-26 ms across the incident.
+      The three 500s are all on /token/refresh, a different endpoint that checkout does not call on
+      the read path, and they fall at 14:01 and after 14:12, outside the 14:05-14:08 spike. This
+      500 rate matches the pre-incident baseline for that endpoint.
+tags: [uncertainty, telemetry, garbage-collection, clock-skew, root-cause, calibration]

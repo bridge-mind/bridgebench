@@ -1,0 +1,307 @@
+id: fidelity-config-drift
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: Pricing-Engine Config Drift Extraction
+summary: Extract exact keys, values, versions, and timestamps from four near-duplicate environment configs and a changelog where singular and plural key names and confusable version numbers differ by a single character.
+prompt: |
+  Extract the following facts EXACTLY from the artifacts.
+
+  Quote key names, values, version strings, and timestamps character-for-character
+  from the named artifact. Rules:
+    - Do not normalize singular vs plural key names (maxConnection vs maxConnections
+      are different keys and both exist in this system).
+    - Do not round or restate numeric values.
+    - Do not blend environments (dev, staging, prod, dr) or versions.
+    - When asked to quote a note, reproduce the sentence word-for-word.
+
+  Deliverables:
+    1. State the exact key name and its value for the database connection-pool
+       maximum in the PROD config.
+    2. State the exact key name that configures the TLS cipher list in the DR config.
+    3. Give the exact version string in which the retry.backoff.maxMs default was
+       CHANGED (not the version that introduced it), and state the old and new values.
+    4. Quote verbatim the deprecation note for the CACHE time-to-live key from the
+       changelog.
+    5. State the exact last-applied timestamp and the version tag recorded in the
+       PROD config header.
+    6. State the exact key name and its value for the database connection-pool
+       maximum in the DR config.
+artifacts:
+  - id: config-dev
+    type: config
+    label: pricing-engine dev config
+    content: |
+      # service: pricing-engine
+      # env: dev
+      # last-applied: 2026-05-02T09:15:00Z version=v1.15.0
+      server.host: 0.0.0.0
+      server.port: 8080
+      log.level: debug
+      metrics.enabled: true
+      http.maxBodyBytes: 1048576
+      http.keepAliveMs: 5000
+      db.host: pricing-db-dev.internal
+      db.readReplica.host: pricing-db-dev-ro.internal
+      db.pool.maxConnections: 20
+      db.pool.acquireTimeoutMs: 5000
+      db.statementTimeoutMs: 10000
+      cache.provider: redis
+      cache.ttlSeconds: 60
+      cache.maxEntries: 10000
+      cache.evictionPolicy: allkeys-lru
+      rateLimiter.enabled: true
+      rateLimiter.requestsPerMinute: 1000
+      rateLimiter.burst: 100
+      retry.enabled: true
+      retry.maxAttempts: 4
+      retry.backoff.maxMs: 5000
+      circuitBreaker.failureThreshold: 10
+      circuitBreaker.resetTimeoutMs: 15000
+      observability.tracingSampleRate: 1.0
+      observability.exporter: otlp
+      tls.enabled: true
+      tls.minVersion: TLSv1.2
+      tls.cipherSuites: TLS_AES_128_GCM_SHA256
+      security.hstsMaxAgeSeconds: 0
+      pricing.roundingMode: HALF_EVEN
+      pricing.currencyDefault: USD
+      queue.name: pricing-dev-events
+      shutdown.gracePeriodMs: 5000
+      featureFlags.newPricing: false
+  - id: config-staging
+    type: config
+    label: pricing-engine staging config
+    content: |
+      # service: pricing-engine
+      # env: staging
+      # last-applied: 2026-05-28T18:40:11Z version=v1.15.0
+      server.host: 0.0.0.0
+      server.port: 8080
+      log.level: info
+      metrics.enabled: true
+      http.maxBodyBytes: 2097152
+      http.keepAliveMs: 5000
+      db.host: pricing-db-staging.internal
+      db.readReplica.host: pricing-db-staging-ro.internal
+      db.pool.maxConnections: 50
+      db.pool.acquireTimeoutMs: 4000
+      db.statementTimeoutMs: 8000
+      cache.provider: redis
+      cache.ttlSeconds: 300
+      cache.maxEntries: 50000
+      cache.evictionPolicy: allkeys-lru
+      rateLimiter.enabled: true
+      rateLimiter.requestsPerMinute: 6000
+      rateLimiter.burst: 600
+      retry.enabled: true
+      retry.maxAttempts: 4
+      retry.backoff.maxMs: 5000
+      circuitBreaker.failureThreshold: 15
+      circuitBreaker.resetTimeoutMs: 20000
+      observability.tracingSampleRate: 0.5
+      observability.exporter: otlp
+      tls.enabled: true
+      tls.minVersion: TLSv1.2
+      tls.cipherSuites: TLS_AES_128_GCM_SHA256
+      security.hstsMaxAgeSeconds: 3600
+      pricing.roundingMode: HALF_EVEN
+      pricing.currencyDefault: USD
+      queue.name: pricing-staging-events
+      shutdown.gracePeriodMs: 10000
+      featureFlags.newPricing: true
+  - id: config-prod
+    type: config
+    label: pricing-engine prod config
+    content: |
+      # service: pricing-engine
+      # env: prod
+      # last-applied: 2026-06-10T14:22:07Z version=v2.0.1
+      server.host: 0.0.0.0
+      server.port: 443
+      log.level: warn
+      metrics.enabled: true
+      http.maxBodyBytes: 5242880
+      http.keepAliveMs: 15000
+      db.host: pricing-db-prod.internal
+      db.readReplica.host: pricing-db-prod-ro.internal
+      db.pool.maxConnections: 200
+      db.pool.acquireTimeoutMs: 3000
+      db.statementTimeoutMs: 5000
+      cache.provider: redis
+      cache.ttlSeconds: 900
+      cache.maxEntries: 500000
+      cache.evictionPolicy: allkeys-lru
+      rateLimiter.enabled: true
+      rateLimiter.requestsPerMinute: 30000
+      rateLimiter.burst: 3000
+      retry.enabled: true
+      retry.maxAttempts: 4
+      retry.backoff.maxMs: 5000
+      circuitBreaker.failureThreshold: 20
+      circuitBreaker.resetTimeoutMs: 30000
+      observability.tracingSampleRate: 0.1
+      observability.exporter: otlp
+      tls.enabled: true
+      tls.minVersion: TLSv1.3
+      tls.cipherSuites: TLS_AES_256_GCM_SHA384
+      security.hstsMaxAgeSeconds: 31536000
+      pricing.roundingMode: HALF_EVEN
+      pricing.currencyDefault: USD
+      queue.name: pricing-prod-events
+      shutdown.gracePeriodMs: 30000
+      featureFlags.newPricing: true
+  - id: config-dr
+    type: config
+    label: pricing-engine dr config
+    content: |
+      # service: pricing-engine
+      # env: dr
+      # last-applied: 2026-06-09T22:05:44Z version=v2.0.0
+      server.host: 0.0.0.0
+      server.port: 443
+      log.level: warn
+      metrics.enabled: true
+      http.maxBodyBytes: 5242880
+      http.keepAliveMs: 15000
+      db.host: pricing-db-dr.internal
+      db.readReplica.host: pricing-db-dr-ro.internal
+      db.pool.maxConnection: 120
+      db.pool.acquireTimeoutMs: 3000
+      db.statementTimeoutMs: 5000
+      cache.provider: redis
+      cache.ttlSecond: 900
+      cache.maxEntries: 300000
+      cache.evictionPolicy: allkeys-lru
+      rateLimiter.enabled: true
+      rateLimiter.requestPerMinute: 15000
+      rateLimiter.burst: 1500
+      retry.enabled: true
+      retry.maxAttempts: 4
+      retry.backoff.maxMs: 5000
+      circuitBreaker.failureThreshold: 20
+      circuitBreaker.resetTimeoutMs: 30000
+      observability.tracingSampleRate: 0.1
+      observability.exporter: otlp
+      tls.enabled: true
+      tls.minVersion: TLSv1.2
+      tls.cipherSuite: TLS_AES_128_GCM_SHA256
+      security.hstsMaxAgeSeconds: 31536000
+      pricing.roundingMode: HALF_EVEN
+      pricing.currencyDefault: USD
+      queue.name: pricing-dr-events
+      shutdown.gracePeriodMs: 30000
+      featureFlags.newPricing: true
+  - id: config-changelog
+    type: log
+    label: pricing-engine configuration changelog
+    content: |
+      pricing-engine configuration changelog (most recent last)
+
+      v1.14.0  (2026-01-02): Initial externalized configuration for pricing-engine.
+      v1.14.2  (2026-01-14): Introduced retry.backoff.maxMs with a default of 2000.
+      v1.14.5  (2026-02-10): Added circuitBreaker.failureThreshold and circuitBreaker.resetTimeoutMs.
+      v1.14.12 (2026-03-02): Changed retry.backoff.maxMs default from 2000 to 5000.
+      v1.14.20 (2026-04-19): Deprecated cache.ttlSecond.
+                 Note: "cache.ttlSecond is deprecated; use cache.ttlSeconds. The singular key will be removed in v2.0.0."
+      v1.15.0  (2026-05-05): Deprecated rateLimiter.requestPerMinute.
+                 Note: "rateLimiter.requestPerMinute is deprecated; use rateLimiter.requestsPerMinute. The singular key will be removed in v2.1.0."
+      v1.15.2  (2026-05-20): Added observability.tracingSampleRate per environment.
+      v2.0.0   (2026-06-01): Removed cache.ttlSecond from dev, staging, and prod. DR retains the
+                 legacy singular keys pending a failover-tool update.
+      v2.0.1   (2026-06-10): Raised prod db.pool.maxConnections from 150 to 200.
+      v2.0.2   (planned, not yet applied to any environment): migrate dr off the legacy singular keys.
+
+      Version quick reference (to avoid confusing near-identical version strings)
+        - v1.14.2  != v1.14.12: v1.14.2 INTRODUCED retry.backoff.maxMs at 2000; v1.14.12 CHANGED
+          it to 5000. These are different versions two months apart.
+        - v1.14.20 is a third, later version and is unrelated to the retry default; it deprecated a
+          cache key.
+        - The current retry.backoff.maxMs default in every environment is 5000 (set by v1.14.12).
+        - The current prod db.pool.maxConnections is 200 (set by v2.0.1); the pre-v2.0.1 value 150
+          is historical and must not be reported as current.
+
+      Environment version tags (from each config header)
+        - dev:     v1.15.0   (last-applied 2026-05-02T09:15:00Z)
+        - staging: v1.15.0   (last-applied 2026-05-28T18:40:11Z)
+        - prod:    v2.0.1     (last-applied 2026-06-10T14:22:07Z)
+        - dr:      v2.0.0     (last-applied 2026-06-09T22:05:44Z)
+  - id: key-glossary
+    type: note
+    label: Singular vs plural key reference
+    content: |
+      Configuration key reference (singular and plural forms both exist in this system)
+
+        - db.pool.maxConnections (plural): canonical key used in dev, staging, prod.
+        - db.pool.maxConnection  (singular): legacy key, present in dr ONLY.
+        - cache.ttlSeconds (plural): canonical, used in dev, staging, prod.
+          cache.ttlSecond (singular): legacy key, present in dr ONLY.
+        - rateLimiter.requestsPerMinute (plural): canonical, used in dev, staging, prod.
+          rateLimiter.requestPerMinute (singular): legacy key, present in dr ONLY.
+        - tls.cipherSuites (plural): used in dev, staging, prod.
+          tls.cipherSuite (singular): used in dr ONLY.
+
+      Rules
+        - These singular and plural forms are DISTINCT keys, not aliases.
+        - Do not assume the plural key exists in dr, or that the singular key exists outside dr.
+        - Only the four pairs above have singular/plural variants; all other keys share one name
+          across environments (only their values differ).
+
+      Value drift summary for the connection-pool maximum (the most-confused value)
+        - dev uses db.pool.maxConnections = 20.
+        - staging uses db.pool.maxConnections = 50.
+        - prod uses db.pool.maxConnections = 200 (raised from 150 in v2.0.1).
+        - dr uses db.pool.maxConnection = 120 (note the singular key name in dr).
+        - There is no single "the pool max"; it is per-environment, and the key name differs in dr.
+
+      Value drift summary for the TLS cipher list
+        - dev and staging use tls.cipherSuites = TLS_AES_128_GCM_SHA256.
+        - prod uses tls.cipherSuites = TLS_AES_256_GCM_SHA384.
+        - dr uses tls.cipherSuite = TLS_AES_128_GCM_SHA256 (singular key name in dr).
+  - id: env-diff
+    type: table
+    label: Selected key comparison across environments
+    content: |
+      Config key comparison (selected keys). Authoritative source is each env's own config file;
+      this table is only a summary and uses each env's actual key name.
+
+      db.pool connection maximum
+        dev     db.pool.maxConnections = 20
+        staging db.pool.maxConnections = 50
+        prod    db.pool.maxConnections = 200
+        dr      db.pool.maxConnection  = 120
+
+      cache time-to-live
+        dev     cache.ttlSeconds = 60
+        staging cache.ttlSeconds = 300
+        prod    cache.ttlSeconds = 900
+        dr      cache.ttlSecond  = 900
+
+      rate limiter (requests per minute)
+        dev     rateLimiter.requestsPerMinute = 1000
+        staging rateLimiter.requestsPerMinute = 6000
+        prod    rateLimiter.requestsPerMinute = 30000
+        dr      rateLimiter.requestPerMinute  = 15000
+
+      tls cipher list
+        dev     tls.cipherSuites = TLS_AES_128_GCM_SHA256
+        staging tls.cipherSuites = TLS_AES_128_GCM_SHA256
+        prod    tls.cipherSuites = TLS_AES_256_GCM_SHA384
+        dr      tls.cipherSuite  = TLS_AES_128_GCM_SHA256
+
+      tls minimum version
+        dev     tls.minVersion = TLSv1.2
+        staging tls.minVersion = TLSv1.2
+        prod    tls.minVersion = TLSv1.3
+        dr      tls.minVersion = TLSv1.2
+
+      retry backoff maximum (same key and value in every environment)
+        dev / staging / prod / dr  retry.backoff.maxMs = 5000 (default set by v1.14.12)
+
+      config header last-applied and version (per environment)
+        dev     2026-05-02T09:15:00Z  version=v1.15.0
+        staging 2026-05-28T18:40:11Z  version=v1.15.0
+        prod    2026-06-10T14:22:07Z  version=v2.0.1
+        dr      2026-06-09T22:05:44Z  version=v2.0.0
+tags: [hallucination, citation-fidelity, config, exact-value, key-names]

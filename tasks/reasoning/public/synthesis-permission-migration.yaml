@@ -1,0 +1,190 @@
+id: synthesis-permission-migration
+version: 2.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Explicit-Grant Lockout Where the Backfill Ran but the Read Model Was Never Rebuilt
+summary: A role-to-grants authorization migration locked out every legacy editor and viewer while admins kept working. The obvious story (backfill never ran, or enforcement shipped first) is contradicted by the artifacts because the backfill completed and the source grants exist. Reconcile both models, the authz check, the rollout plan, and the audit evidence to find the real gap, reject three decoys, and specify a recovery that restores access without broadening it.
+prompt: |
+  After cutover to explicit grants, legacy editors and viewers are denied document.read while admins
+  are allowed. On-call's first guess was "enforcement shipped before the backfill." Using only the
+  artifacts, produce:
+
+  1. ROOT CAUSE. Name the single gap and cite the exact artifacts and lines that prove it. Explain
+     why grants exist yet authorization still denies.
+  2. REFUTE THE OBVIOUS STORY. Explain, with citations, why "the backfill never ran" and "enforcement
+     shipped before the backfill" are NOT the operative cause here.
+  3. ADMIN VS EVERYONE ELSE. Explain why admin-01 is allowed while editor-17 and viewer-04 are denied,
+     even though all three have rows in the grants source table.
+  4. DEAD-FLAG DECOY. Explain why `useLegacyRoleFallback` cannot rescue the locked-out accounts.
+  5. BLAST RADIUS. State exactly which subjects are locked out and which are safe, tied to how each was
+     provisioned, and which operations are affected.
+  6. MINIMAL RECOVERY. Give the smallest fix that restores access without granting anyone more than
+     their legacy role implied and without making role names authoritative again. State what must NOT
+     be done.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: legacy-model
+    type: spec
+    label: legacy role model (pre-migration)
+    content: |
+      Legacy role model (in force until cutover):
+        editor -> implicit document.read AND document.write
+        viewer -> implicit document.read
+        admin  -> implicit all permissions
+      Authorization was derived directly from role membership; a check looked up the caller's role
+      and expanded it to the implied permission set at request time. There was no grants table, and
+      no per-subject permission rows existed anywhere. Role assignments live in a legacy table
+      `role_assignments(subject_id, role)`, which the backfill reads (see backfill-script).
+
+      Population at cutover (from role_assignments):
+        editors: 1812   (each should end with document.read + document.write = 3624 grant rows)
+        viewers:  455   (each should end with document.read            =  455 grant rows)
+      Expected backfill output: 3624 + 455 = 4079 grant rows for editors and viewers (all via direct SQL).
+      Separately, 6 admins plus service accounts were provisioned through the grants API; those account
+      for the 41 rows currently visible in grant_view and are included in the 4120-row grants total.
+      The intent of the migration is to preserve EXACTLY these permissions as explicit grants and
+      nothing more (viewers must not gain write; editors must not gain admin).
+  - id: grant-model
+    type: spec
+    label: new explicit-grant model
+    content: |
+      New authorization model:
+        - All permissions are explicit rows in the `grants` table: (subject, permission, scope).
+        - The authorization service NEVER reads `grants` directly. It reads ONLY `grant_view`, a
+          materialized read model derived from `grants`.
+        - `grant_view` is maintained by a projector that reacts to writes made THROUGH the grants API.
+          A grants-API write updates `grants` AND emits a change event the projector consumes to
+          upsert `grant_view`.
+        - Direct SQL writes to `grants` do NOT emit a change event, so they do NOT appear in
+          `grant_view` until a projector rebuild (full re-projection from `grants`) is run.
+        - Role names (editor, viewer, admin) are retained for display only and confer no permissions.
+
+      Schema:
+        CREATE TABLE grants (subject text, permission text, scope text);     -- source of truth
+        CREATE MATERIALIZED VIEW-LIKE grant_view (subject, permission, scope); -- projector output
+      Example rows AFTER a correct grants-API write for admin-01 (both tables in sync):
+        grants:     (admin-01, document.read, global)
+        grant_view: (admin-01, document.read, global)
+      Example rows AFTER the direct-SQL backfill for editor-17 (source only, view missing):
+        grants:     (editor-17, document.read, global), (editor-17, document.write, global)
+        grant_view: <no rows>
+      The projector's only trigger is the grants-API change event. A `rebuild` command re-projects the
+      entire `grants` table into `grant_view` from scratch; it is the supported way to reconcile rows
+      that were inserted out-of-band. Until it runs, out-of-band rows are invisible to authorization.
+  - id: authz-check
+    type: code
+    label: authorization check (enforcement, current)
+    content: |
+      // authz-service/src/check.ts  (enforcement.mode = strict)
+      export async function can(subject, permission, scope) {
+        const rows = await db.query(
+          `SELECT 1 FROM grant_view
+             WHERE subject = $1 AND permission = $2 AND scope IN ('global', $3)
+             LIMIT 1`,
+          [subject, permission, scope],
+        );
+        return rows.length > 0;   // deny if the read model has no matching grant
+      }
+
+      // Called by the document service on every read/write:
+      //   if (!await can(user.id, 'document.read', doc.workspaceId)) throw Forbidden();
+      // NOTE: this query targets grant_view (the projected read model), NEVER the grants source
+      // table. There is no role lookup and no fallback path; an empty grant_view result = deny.
+  - id: deploy-plan
+    type: table
+    label: migration deployment plan and status
+    content: |
+      step  action                                              via              owner       status
+      1     create grants table                                 migration        platform    complete
+      2     deploy grant_view projector (grants -> grant_view)   deploy           platform    complete
+      3     deploy enforcement (authz reads grant_view only)     deploy           authz       complete
+      4     bootstrap admin grants                               grants API       authz       complete
+      5     backfill grants from legacy roles                    direct SQL       data-eng    complete
+      6     rebuild grant_view from backfilled grants rows       projector rerun  data-eng    NOT STARTED (scheduled)
+      # Steps 1-5 are all COMPLETE. Step 6 (the read-model rebuild after the direct-SQL backfill)
+      # was scheduled as a separate job and has not run. It is the only incomplete step.
+  - id: backfill-script
+    type: code
+    label: backfill script (deploy step 5)
+    content: |
+      // scripts/backfill-grants.ts  (ran to completion in step 5)
+      // Reads legacy role_assignments and materializes explicit grants.
+      let inserted = 0;
+      for (const a of await legacy.roleAssignments()) {   // SELECT subject_id, role FROM role_assignments
+        const perms =
+          a.role === 'editor' ? ['document.read', 'document.write'] :
+          a.role === 'viewer' ? ['document.read'] : [];
+        for (const p of perms) {
+          // Direct INSERT into the SOURCE table via the DB connection. This does NOT go through the
+          // grants API, so no change event is emitted and the grant_view projector is never notified.
+          await db.query(
+            `INSERT INTO grants (subject, permission, scope) VALUES ($1, $2, 'global')`,
+            [a.subjectId, p],
+          );
+          inserted++;
+        }
+      }
+      console.log(`backfill complete: inserted ${inserted} grants for legacy editors/viewers, 0 errors`);
+      // The script never calls grantsApi.create(); it writes the source table directly for speed.
+  - id: authz-audit
+    type: log
+    label: authorization decisions and ops reconciliation queries
+    content: |
+      # authorization path (reads grant_view) — sampled after cutover
+      editor-17  action=document.read   source=grant_view rows=0  -> DENY   role=editor
+      editor-17  action=document.write  source=grant_view rows=0  -> DENY   role=editor
+      editor-31  action=document.write  source=grant_view rows=0  -> DENY   role=editor
+      viewer-04  action=document.read   source=grant_view rows=0  -> DENY   role=viewer
+      admin-01   action=document.read   source=grant_view rows=1  -> ALLOW  role=admin
+      svc-88     action=document.read   source=grant_view rows=1  -> ALLOW  role=none
+
+      # ops reconciliation queries (run manually; NOT part of the authz path)
+      ops SELECT count(*) FROM grants     WHERE subject='editor-17' -> 2   # read + write present in SOURCE
+      ops SELECT count(*) FROM grant_view WHERE subject='editor-17' -> 0   # but absent from the VIEW
+      ops SELECT count(*) FROM grants     WHERE subject='editor-31' -> 2
+      ops SELECT count(*) FROM grant_view WHERE subject='editor-31' -> 0
+      ops SELECT count(*) FROM grants     WHERE subject='viewer-04' -> 1
+      ops SELECT count(*) FROM grant_view WHERE subject='viewer-04' -> 0
+      ops SELECT count(*) FROM grants     WHERE subject='admin-01'  -> 1
+      ops SELECT count(*) FROM grant_view WHERE subject='admin-01'  -> 1   # admin present in BOTH
+      ops SELECT count(*) FROM grants     WHERE subject='svc-88'    -> 3
+      ops SELECT count(*) FROM grant_view WHERE subject='svc-88'    -> 3   # API-provisioned; in BOTH
+      # Aggregate: SELECT count(*) FROM grants -> 4120 ; SELECT count(*) FROM grant_view -> 41
+      # The 41 rows in grant_view are exactly the admin/service subjects provisioned via the grants API.
+  - id: migration-ticket
+    type: note
+    label: migration ticket and on-call notes
+    content: |
+      SEC-4400 Migration to explicit grants.
+        - Backfill (step 5) completed successfully: grants inserted for every legacy editor and viewer
+          (see the ops counts in authz-audit and store-state-table). The `grants` source table now
+          holds 4120 rows; only 41 are visible in `grant_view`.
+        - enforcement.mode = strict. A flag `useLegacyRoleFallback` still exists in the OLD gateway
+          config, but it was REMOVED from the authorization service during the enforcement deploy and
+          is now ignored; it can no longer re-derive permissions from role names. Setting it true has
+          no effect on `can()`.
+        - Rollback of enforcement to permissive was considered; it would allow ALL actions (fail-open),
+          so it is only acceptable as short-term containment, not as the fix.
+        - On-call first hypothesis: "enforcement shipped before the backfill (deploy-order inversion)."
+          Recorded at 02:10 before the ops queries returned. Second note at 02:40: "backfill IS done and
+          grants exist — deny persists anyway; revisit against deploy-plan and the source-vs-view counts."
+  - id: store-state-table
+    type: table
+    label: source-vs-view grant reconciliation
+    content: |
+      subject    role     grants_source_rows  grant_view_rows  provisioned_via     authz_result
+      editor-17  editor   2 (read, write)     0                backfill (SQL)      DENY
+      editor-31  editor   2 (read, write)     0                backfill (SQL)      DENY
+      viewer-04  viewer   1 (read)            0                backfill (SQL)      DENY
+      viewer-77  viewer   1 (read)            0                backfill (SQL)      DENY
+      admin-01   admin    1 (all)             1                grants API (boot)   ALLOW
+      admin-02   admin    1 (all)             1                grants API (boot)   ALLOW
+      svc-88     none     3 (scoped)          3                grants API (new)    ALLOW
+      # Every subject provisioned via direct-SQL backfill has source rows but 0 view rows and is denied.
+      # Every subject provisioned through the grants API has matching source and view rows and is allowed.
+      # svc-88 was created via the grants API after cutover and works, isolating the projector path.
+      # The ONLY variable that predicts DENY is provisioned_via = backfill (SQL); role is not predictive
+      # (both admins and editors have source rows; only the API-written ones reached grant_view).
+tags: [authorization, migration, read-model, projection, multi-artifact-synthesis]

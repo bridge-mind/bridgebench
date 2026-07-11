@@ -1,220 +1,89 @@
-/**
- * Run-scoped debug logger — the flight recorder for a benchmark run.
- *
- * Every stage of a run (provider request/stream/response, extraction,
- * normalization, validation, browser evaluation, qualification) emits
- * structured events here so a failed task can be diagnosed from the log
- * alone, without re-running the model.
- *
- * Two sinks per run, both under results/ui/logs/<run-id>/:
- *   run.jsonl   full-fidelity structured events (one JSON object per line)
- *   run.log     human-readable mirror (long strings truncated for scanning)
- *
- * The logger is a process-wide singleton so deep modules (providers,
- * evaluator) can emit events without threading a logger through every
- * constructor. Until `initRunLogger()` is called it is a no-op, which keeps
- * tests and non-run CLI commands silent.
- *
- * Env knobs:
- *   BRIDGEBENCH_LOG_LEVEL   minimum level written to file  (default: debug)
- *   BRIDGEBENCH_LOG_ECHO    minimum level echoed to stderr  (default: warn)
- *
- * API keys never flow through this module by design (request bodies carry no
- * credentials), and `redact()` scrubs anything key-shaped as a safety net.
- */
-
-import { createWriteStream, mkdirSync } from 'node:fs';
-import type { WriteStream } from 'node:fs';
-import * as path from 'node:path';
-import { inspect } from 'node:util';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-const LEVEL_RANK: Record<LogLevel, number> = {
-  debug: 0,
-  info: 1,
-  warn: 2,
-  error: 3,
+const KEY_PATTERNS: Array<[RegExp, string]> = [
+  [/sk-or-v1-[A-Za-z0-9_-]+/g, '[REDACTED_OPENROUTER_KEY]'],
+  [/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]'],
+];
+
+export function redactSecrets(value: string): string {
+  let redacted = value;
+  for (const [pattern, replacement] of KEY_PATTERNS) redacted = redacted.replace(pattern, replacement);
+  return redacted;
+}
+
+/** Structured logger every arena boundary reports into; one JSONL file per process. */
+export interface ArenaLogger {
+  readonly filePath: string | null;
+  debug(event: string, data?: Record<string, unknown>): void;
+  info(event: string, data?: Record<string, unknown>): void;
+  warn(event: string, data?: Record<string, unknown>): void;
+  error(event: string, data?: Record<string, unknown>): void;
+}
+
+export const noopLogger: ArenaLogger = {
+  filePath: null,
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
 };
 
-/** Field names whose values are always replaced, wherever they appear. */
-const REDACTED_KEY_RE = /(api[-_]?key|authorization|secret|password|bearer)/i;
+const MAX_DATA_CHARS = 16_000;
 
-/** Max string length mirrored into the human-readable run.log. */
-const TEXT_SINK_MAX_STRING = 400;
-
-function redact(value: unknown, depth = 0): unknown {
-  if (depth > 8 || value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
-  const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    out[key] = REDACTED_KEY_RE.test(key) ? '[redacted]' : redact(val, depth + 1);
+function sanitizeData(data: Record<string, unknown>): Record<string, unknown> {
+  // Redaction happens on serialized text so nested strings are covered too.
+  // The replacement tokens contain no quotes, so the JSON stays parseable.
+  let serialized = redactSecrets(JSON.stringify(data));
+  if (serialized.length > MAX_DATA_CHARS) {
+    serialized = JSON.stringify({ truncated: true, preview: serialized.slice(0, MAX_DATA_CHARS) });
   }
-  return out;
+  return JSON.parse(serialized) as Record<string, unknown>;
 }
 
-/** JSON.stringify that survives circular refs and BigInt. */
-function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-  return JSON.stringify(value, (_key, val) => {
-    if (typeof val === 'bigint') return val.toString();
-    if (typeof val === 'object' && val !== null) {
-      if (seen.has(val)) return '[circular]';
-      seen.add(val);
-    }
-    return val;
-  });
-}
+export class FileArenaLogger implements ArenaLogger {
+  readonly filePath: string;
+  private readonly verbose: boolean;
 
-function truncateForText(value: unknown): unknown {
-  if (typeof value === 'string' && value.length > TEXT_SINK_MAX_STRING) {
-    return `${value.slice(0, TEXT_SINK_MAX_STRING)}… [${value.length} chars total — full value in run.jsonl]`;
-  }
-  if (Array.isArray(value)) return value.map(truncateForText);
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = truncateForText(val);
-    }
-    return out;
-  }
-  return value;
-}
-
-function parseLevel(raw: string | undefined, fallback: LogLevel): LogLevel {
-  return raw && raw in LEVEL_RANK ? (raw as LogLevel) : fallback;
-}
-
-export interface RunLoggerConfig {
-  /** Directory the log files are written into (created if missing). */
-  dir: string;
-  /** Minimum level written to file. Default: debug (everything). */
-  level?: LogLevel;
-  /** Minimum level echoed to stderr. Default: warn. */
-  echoLevel?: LogLevel;
-}
-
-interface LoggerCore {
-  dir: string;
-  level: LogLevel;
-  echoLevel: LogLevel;
-  jsonl: WriteStream | null;
-  text: WriteStream | null;
-}
-
-export class RunLogger {
-  private constructor(
-    private readonly core: LoggerCore | null,
-    private readonly context: Record<string, unknown>,
-  ) {}
-
-  static noop(): RunLogger {
-    return new RunLogger(null, {});
+  constructor(options: { dir: string; verbose?: boolean; name?: string }) {
+    mkdirSync(options.dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.filePath = path.join(options.dir, `${options.name ?? 'arena'}-${stamp}.log.jsonl`);
+    this.verbose = options.verbose ?? false;
   }
 
-  static open(config: RunLoggerConfig): RunLogger {
-    mkdirSync(config.dir, { recursive: true });
-    const core: LoggerCore = {
-      dir: config.dir,
-      level: config.level ?? parseLevel(process.env.BRIDGEBENCH_LOG_LEVEL, 'debug'),
-      echoLevel:
-        config.echoLevel ?? parseLevel(process.env.BRIDGEBENCH_LOG_ECHO, 'warn'),
-      jsonl: createWriteStream(path.join(config.dir, 'run.jsonl'), { flags: 'a' }),
-      text: createWriteStream(path.join(config.dir, 'run.log'), { flags: 'a' }),
-    };
-    return new RunLogger(core, {});
+  debug(event: string, data: Record<string, unknown> = {}): void {
+    this.write('debug', event, data);
   }
 
-  get dir(): string | null {
-    return this.core?.dir ?? null;
+  info(event: string, data: Record<string, unknown> = {}): void {
+    this.write('info', event, data);
   }
 
-  /** A logger sharing this one's sinks with extra context on every event. */
-  child(context: Record<string, unknown>): RunLogger {
-    return new RunLogger(this.core, { ...this.context, ...context });
+  warn(event: string, data: Record<string, unknown> = {}): void {
+    this.write('warn', event, data);
   }
 
-  event(level: LogLevel, event: string, data?: Record<string, unknown>): void {
-    if (!this.core) return;
-    const entry = {
-      ts: new Date().toISOString(),
-      level,
-      event,
-      ...this.context,
-      ...(data ? (redact(data) as Record<string, unknown>) : {}),
-    };
+  error(event: string, data: Record<string, unknown> = {}): void {
+    this.write('error', event, data);
+  }
 
-    if (LEVEL_RANK[level] >= LEVEL_RANK[this.core.level] && this.core.jsonl) {
-      this.core.jsonl.write(`${safeStringify(entry)}\n`);
-      if (this.core.text) {
-        const { ts, level: lvl, event: name, ...rest } = entry;
-        const detail = Object.keys(rest).length
-          ? ` ${inspect(truncateForText(rest), { depth: 6, breakLength: 200, compact: true })}`
-          : '';
-        this.core.text.write(`${ts} [${lvl.toUpperCase().padEnd(5)}] ${name}${detail}\n`);
-      }
-    }
-
-    if (LEVEL_RANK[level] >= LEVEL_RANK[this.core.echoLevel]) {
-      process.stderr.write(
-        `[bridgebench:${level}] ${event} ${inspect(truncateForText({ ...this.context, ...(data ?? {}) }), { depth: 4, breakLength: 160, compact: true })}\n`,
-      );
+  private write(level: LogLevel, event: string, data: Record<string, unknown>): void {
+    const entry = { ts: new Date().toISOString(), level, event, ...sanitizeData(data) };
+    appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+    if (level === 'warn' || level === 'error') {
+      console.error(formatConsoleLine(entry));
+    } else if (this.verbose) {
+      console.log(formatConsoleLine(entry));
     }
   }
-
-  debug(event: string, data?: Record<string, unknown>): void {
-    this.event('debug', event, data);
-  }
-
-  info(event: string, data?: Record<string, unknown>): void {
-    this.event('info', event, data);
-  }
-
-  warn(event: string, data?: Record<string, unknown>): void {
-    this.event('warn', event, data);
-  }
-
-  error(event: string, data?: Record<string, unknown>): void {
-    this.event('error', event, data);
-  }
-
-  async close(): Promise<void> {
-    if (!this.core) return;
-    const { jsonl, text } = this.core;
-    this.core.jsonl = null;
-    this.core.text = null;
-    await Promise.all(
-      [jsonl, text].map(
-        (stream) =>
-          new Promise<void>((resolve) => {
-            if (!stream) return resolve();
-            stream.end(() => resolve());
-          }),
-      ),
-    );
-  }
 }
 
-// ---------------------------------------------------------------------------
-// Process-wide singleton
-// ---------------------------------------------------------------------------
-
-let active: RunLogger = RunLogger.noop();
-
-/** Open the run logger. Subsequent `getRunLogger()` calls anywhere return it. */
-export function initRunLogger(config: RunLoggerConfig): RunLogger {
-  active = RunLogger.open(config);
-  return active;
-}
-
-/** The active run logger, or a no-op when no run is in progress. */
-export function getRunLogger(): RunLogger {
-  return active;
-}
-
-/** Flush and detach the active run logger. */
-export async function closeRunLogger(): Promise<void> {
-  const current = active;
-  active = RunLogger.noop();
-  await current.close();
+function formatConsoleLine(entry: { level: LogLevel; event: string } & Record<string, unknown>): string {
+  const { ts, level, event, ...rest } = entry;
+  const detail = JSON.stringify(rest);
+  const suffix = detail === '{}' ? '' : ` ${detail.length > 400 ? `${detail.slice(0, 400)}…` : detail}`;
+  return `[bridgebench ${String(ts).slice(11, 19)}] ${level.toUpperCase().padEnd(5)} ${event}${suffix}`;
 }

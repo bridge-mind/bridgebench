@@ -8,143 +8,185 @@
 <h1 align="center">BridgeBench</h1>
 
 <p align="center">
-  <strong>The world's #1 vibe coding benchmark.</strong><br/>
-  Real workflows, measured direct from every provider's API — and rebuilt every 90 days so no model trains on it.
+  <strong>Autonomous arenas for vibe coding models.</strong><br/>
+  Head-to-head matches, a blind three-judge panel, Elo — and a replayable journal behind every number.
 </p>
 
 <p align="center">
   <a href="https://bridgebench.ai">bridgebench.ai</a> &nbsp;&bull;&nbsp;
-  <a href="#benchmark-suites">Suites</a> &nbsp;&bull;&nbsp;
-  <a href="#seasons--the-90-day-rotation">Seasons</a> &nbsp;&bull;&nbsp;
-  <a href="#methodology">Methodology</a> &nbsp;&bull;&nbsp;
+  <a href="#the-arenas">Arenas</a> &nbsp;&bull;&nbsp;
+  <a href="#autonomous-match-lifecycle">Methodology</a> &nbsp;&bull;&nbsp;
+  <a href="#task-packs">Tasks</a> &nbsp;&bull;&nbsp;
   <a href="#contributing">Contributing</a>
 </p>
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-8A63D2.svg">
-  <img alt="Season" src="https://img.shields.io/badge/season_1-in_development-orange.svg">
+  <img alt="Season One" src="https://img.shields.io/badge/season_one-arena-blue.svg">
 </p>
 
 ---
 
-> **Status: Season 1 engine is here.** The first suite — **UI Bench**, 10 creative Three.js tasks scored in a real browser — is runnable today. The first official model roster run and the bridgebench.ai v3 leaderboard are next. Leaderboards live at [bridgebench.ai](https://bridgebench.ai).
-
 ## What is BridgeBench?
 
-BridgeBench measures how models perform as vibe coding partners — not how they score on puzzle sets. Every task starts from something a builder actually does: describe a feature in plain language, hand over a bug, ship an interface, ask about an API, push back when the premise is wrong.
+BridgeBench measures how models perform as vibe coding partners. Every task is a software-engineering scenario — source code, diffs, CI logs, API specs, migrations, telemetry, agent sessions — and every deliverable is a question a coding agent would actually face.
+
+V3 is **arena-first**: models compete head-to-head on the same task, three independent model judges choose the stronger answer blind, and every majority decision awards one point and one Elo update. There is no weighted aggregate score and no opaque formula — a ranking is exactly the sum of the match record behind it, and the journal that produced it is replayable line by line.
 
 It's built by [BridgeMind](https://bridgemind.ai), the agentic organization behind BridgeSpace, BridgeVoice, and BridgeAgent. We benchmark models because we ship with them daily — the leaderboard is the same data we use to pick our own teammates.
 
-Three rules separate BridgeBench from every other leaderboard:
+> **Where did the season engine go?** This repo previously hosted the Season 1 *season-engine* alpha (UI Bench: 10 Three.js tasks scored in a real browser, ranked by community A/B voting). That work is preserved intact on the [`season-engine-alpha`](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha) branch — its model registry, provider layer, and browser-determinism harness will return as future arenas. The autonomous arena you're looking at replaces it as BridgeBench's core mechanism: same transparency principles, but every ranking now traces to pairwise matches instead of suite scores. Season framing resets with this pivot; nothing measured by the old engine mixes with arena Elo.
 
-1. **Real workflows.** Tasks mirror vibe coding as builders practice it: intent in natural language, code out, verified end to end. If a task wouldn't come up while shipping real software, it doesn't belong in the benchmark.
-2. **Direct to provider.** Every measurement hits the provider's own API — OpenAI, Anthropic, Google, xAI, and the rest. No aggregators in the measurement path. You measure the model, not the middleman.
-3. **A 90-day shelf life.** Every season, tasks retire and fresh ones take their place. A benchmark that never changes ends up in someone's training set; ours expires before it can.
+## The arenas
 
-## Seasons — the 90-day rotation
+Two independent arenas ship today, each with its own task pack, journal, Elo ladder, and leaderboard:
 
-Static benchmarks decay. Tasks leak into training data, scores inflate, and the leaderboard stops measuring the model and starts measuring memorization. BridgeBench is built around that reality instead of pretending it away:
+| Arena | What it measures | What a winning answer looks like |
+|---|---|---|
+| **Reasoning** | Inference depth. Every task is fully determinable from its artifacts — interlocking specs, logs, code, and configs with planted decoy paths. | Derives the one defensible resolution for every numbered deliverable, with the inference chain and artifact citations. |
+| **Hallucination** | Epistemic discipline. Tasks are seeded with false premises, missing evidence, fabrication bait (plausible entities that don't exist), conflicting sources, and near-duplicate values. | Answers the supported deliverables exactly, corrects false premises with the contradicting evidence, names precisely what is missing — and never invents entities, values, quotes, or blended figures. |
 
-- **Every ~90 days a new season ships.** A season is a versioned generation of tasks across all suites (e.g. `2026-S1`, `2026-S2`).
-- **Hidden tests stay hidden — until retirement.** During a season, public task prompts live in this repo; the hidden correctness and adversarial tests that decide scores do not. When the season ends, the full task set — hidden tests included — is published to the archive, so anyone can audit exactly what was measured.
-- **Methodology persists, tasks rotate.** Scoring dimensions, weights, and the measurement pipeline stay stable across seasons, so a model's trajectory is comparable even as the tasks underneath it change.
-- **Scores are stamped with their season.** No mixing results across task generations. Ever.
+The two arenas share the arena contract (pairing, blind three-judge panel, Elo) but never share ratings: a model's reasoning Elo says nothing about its hallucination Elo. Judges receive category-specific instructions — the reasoning panel punishes hedging on determinable questions, the hallucination panel weighs fabrication heaviest and treats blanket refusal as an error too.
 
-## Benchmark suites
+The same contract expands to security, debugging, and refactoring arenas next.
 
-### UI Bench — live in this repo
+## Autonomous match lifecycle
 
-Season 1 opens with the suite that made BridgeBench famous — the lava lamp test — rebuilt for real 3D. **10 creative tasks**, all Three.js (pinned `0.182.0`, vendored in this repo), all scored in a real browser:
+1. A seeded scheduler selects one task and two distinct competitors while balancing exposure. The same seed always produces the same schedule.
+2. Both competitors receive identical task context and run concurrently. They don't know they're in a match.
+3. One exhausted competitor failure forfeits; two failures create a no-contest.
+4. Each judge independently receives the task, hidden rubric, and anonymous answers.
+5. Explicit model IDs, canonical slugs, provider names, and model-family names are redacted from responses; judges see only `Model A` and `Model B`.
+6. A/B order is independently permuted per judge to reduce position bias.
+7. Two valid votes decide the winner. Judges never see identities, ratings, costs, or other votes.
+8. The winner earns one point. Elo starts at 1000 and uses K=32.
+9. The complete result is appended to the journal before reports are rebuilt. Snapshots are derived, never authoritative.
 
-Lava Lamp Redux · Aurora Over a Frozen Lake · Galaxy Forge · Synthwave Horizon · Deep-Sea Jellyfish Ballet · Clockwork Orrery · Voxel Weather Diorama · Kinetic Typography · Rubik's Playground · Bioluminescent Terrarium
+Candidate answers are treated as untrusted data. Judge prompts explicitly reject instructions embedded in answers; structured verdicts are schema validated; malformed verdicts get one retry and then abstain. No generated code or model-provided command is ever executed.
 
-Every artifact is one self-contained HTML file whose only external reference is the pinned, same-origin three.js import map.
+The full protocol — scheduling math, anonymization rules, vote resolution, drift detection — is in [docs/methodology.md](docs/methodology.md).
 
-**Graded by builders, not bots.** No AI and no scoring formula judges the output. Models are ranked by **blind A/B community voting** on [bridgebench.ai](https://bridgebench.ai): two artifacts for the same task, models hidden, builders pick the better one, Elo does the math. The vote log is public and the ratings replay from it.
+## Model roster and transport
 
-The harness's only judgment is objective **arena qualification** — an artifact enters the vote pool if it:
+All requests go through [OpenRouter](https://openrouter.ai) using exact, pinned model slugs. `latest` aliases are prohibited. Before a paid run, the CLI verifies each ID and canonical slug against OpenRouter and confirms that judges still support structured output.
 
-| Gate | Check |
-|---|---|
-| Self-contained | Static validation: pinned vendor import map is the only external reference |
-| Runs | Loads without an uncaught startup error |
-| Follows the contract | Both BridgeBench harness globals appear |
-| Shows something | First frame isn't blank |
-| Stays offline | Zero non-vendor network attempts (every request is intercepted) |
+We say this plainly: the arena measures models *through one aggregator's routing*, not direct provider APIs. In exchange, every competitor and judge runs over the identical transport, and OpenRouter's per-generation records (`arena generation <id>`) give independently checkable token and cost accounting for every journal line.
 
-Everything else the harness measures — WebGL context, FPS, animation, control coverage, `reset(seed)` determinism replay, hidden interaction probes — is recorded as **informational badges** beside the artifact, so voters can see whether the controls actually work. Badges never touch the ranking.
+Competitors: GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, Claude Fable 5, Claude Opus 4.8, MiniMax M3, MiniMax M2.7, and Kimi K2.7 Code.
+Judges: Gemini 3.1 Pro Preview, Grok 4.5, and GLM 5.2. Judges are not eligible competitors.
 
-Docs: [architecture](docs/architecture.md) · [running](docs/running.md) · [task authoring](docs/task-authoring.md) · [season policy](docs/season-policy.md) · [model registry](docs/model-registry.md)
+## Setup
 
-### On the roadmap
+Requirements: Node.js 20+ and an OpenRouter API key with an account-level spending limit.
 
-The suites the previous engine proved out, returning season by season: **Speed** (TTFT/throughput direct from each API), **Cost**, **Debugging**, **Refactoring**, **Algorithms**, **Security**, **Hallucination**, **Reasoning**, and **Pushback** (the premise is nonsense — does the model say so?). Agentic and repo-scale tasks are on the roadmap too.
+```bash
+git clone https://github.com/bridge-mind/bridgebench.git
+cd bridgebench && npm install
+export OPENROUTER_API_KEY='set-this-in-your-shell'
 
-## Methodology
+npm run tasks -- validate     # validates the public packs — no key or private overlay needed
+npm run models -- validate    # verifies every pinned slug against OpenRouter
+```
 
-The principles the engine is being rebuilt on:
+## Run an arena
 
-- **Deterministic first.** Executable tests, real browsers, and structural assertions before LLM judges. Where a judge is unavoidable (e.g. pushback quality), the judge model and rubric are disclosed.
-- **Public/private task split.** Visible tests show the contract; hidden correctness and adversarial tests decide the score. Passing the happy path is not passing.
-- **Every run is journaled.** Append-only run logs, derived snapshots, full resume. A leaderboard number traces back to the raw runs that produced it.
-- **One provider abstraction.** Every provider implements a single streaming interface, so adding a model never touches the measurement logic.
-- **Season-stamped provenance.** Model ID, season, methodology version, and timestamp on every result.
+```bash
+# Default: 12 reasoning matches, reproducible seed, $25 stop boundary
+npm run arena -- run
 
-Full methodology docs land in [`docs/`](docs/) as the engine takes shape.
+# The hallucination arena — same contract, its own tasks, journal, and Elo
+npm run arena -- run --category hallucination
+
+# Custom batch
+npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40
+
+# Resume the exact deterministic schedule after interruption or budget stop
+npm run arena -- run --matches 24 --seed july-calibration --max-cost-usd 40 --resume
+
+# Rebuild reports for both arenas without API calls (or one: --category reasoning)
+npm run report
+```
+
+**Judged runs need the hidden references.** Task prompts are public in this repo; the expected resolutions and comparative rubrics that judges use are not, so they can't be trained against. Runs require `BRIDGEBENCH_PRIVATE_DIR` to point at a private-pack checkout — see [docs/private-packs.md](docs/private-packs.md) for the layout, the contamination guard, and the publish-at-retirement policy. Everything else — validation, report rebuilds, triage, the dashboard's read views — works from the public halves alone.
+
+Results are local, ignored by Git, and kept per arena:
+
+```text
+results/<category>/journal.jsonl      # append-only source of truth (category = reasoning | hallucination)
+results/<category>/snapshot.json      # derived atomically; delete and rebuild any time
+results/<category>/leaderboard.md
+```
+
+A repeated schedule is rejected unless `--resume` is explicit. To verify any published ladder yourself, see [docs/replay-elo.md](docs/replay-elo.md).
+
+## Local dashboard
+
+A BridgeMind-branded control surface split into three views — Arena, Leaderboard, and Matches — with a live competitor + anonymous-judge stage during runs, durable match history with raw responses and judge rationales, and an SSE activity feed.
+
+```bash
+npm run dashboard
+# Open http://127.0.0.1:4317
+```
+
+The control plane binds only to `127.0.0.1`. The API key stays in the server process and is never serialized to the browser. State-changing requests require a same-origin JSON request, only one run may be active at once, and the browser renders model output as escaped text.
+
+## Task packs
+
+Both packs hold 12 expert-difficulty tasks across six category-specific clusters (two tasks each). Tasks are deliberately heavyweight — five to eight interlocking artifacts (~9–18k characters) and four to ten numbered deliverables — so a match exercises real deliberation budget instead of a one-screen skim.
+
+**Domain invariant: every task is a coding / software-engineering scenario.** No generic business ops. Public prompts live under `tasks/<category>/public/`; hidden references live in the private overlay. Every journal line records the SHA-256 of both task halves, so task drift is externally detectable.
+
+Cluster definitions, the public/private YAML schemas, and the authoring rules (including how decoys map to disqualifying errors) are in [docs/task-authoring.md](docs/task-authoring.md).
+
+## Debugging & the continuous improvement loop
+
+Every arena and dashboard run writes a structured, key-redacted JSONL log to `results/<category>/logs/`. The triage command analyzes journals for anomalies — failed requests, suspiciously fast responses, truncation, judge abstentions — and a health stop halts runs that are mostly producing failures.
+
+```bash
+npm run arena -- run --debug        # mirror every log entry to the console
+npm run triage                      # analyze the journal (auto-printed after every run)
+npm run arena -- generation gen-... # OpenRouter's ground-truth record for any journaled generation
+```
+
+The loop: run → read the auto-printed health report → chase flags with the run log → fix the task, prompt, or model policy → rerun with a fresh seed → compare triage reports.
 
 ## Repository layout
 
 ```
 bridgebench/
 ├── src/
-│   ├── cli.ts             # bridgebench ui run / evaluate / tasks · models · providers
-│   ├── config.ts          # season pins: dates, three.js version, viewport
-│   ├── providers/         # provider adapters (one stream() each) + model registry
-│   │                      #   (models.ts: identity, pricing, tuning, lifecycle)
-│   └── suites/ui/         # runner → extractor → normalizer → validator →
-│                          #   evaluator (Playwright, 2 phases) → score → snapshot
+│   ├── cli.ts             # models · tasks · arena run/triage/generation · report
+│   ├── arena.ts           # match loop: forfeits, health stop, budget stop
+│   ├── scheduler.ts       # seeded, exposure-balanced deterministic scheduling
+│   ├── judges.ts          # anonymization, per-judge A/B permutation, majority vote
+│   ├── tasks.ts           # pack loader + public/private overlay resolution
+│   ├── elo.ts / store.ts / report.ts / triage.ts
+│   └── dashboard/         # localhost-only control plane (SSE)
 ├── tasks/
-│   ├── current/ui/        # active season — public prompts + declared controls
-│   └── retired/           # past seasons, published in full (hidden tests included)
-├── vendor/three@0.182.0/  # season-pinned three.js + addons (committed, hermetic)
-├── fixtures/              # golden artifacts (correct / broken / cheating)
-├── snapshots/             # committed season snapshots
-├── docker/Dockerfile.eval # pinned Chromium for official, reproducible runs
-├── scripts/               # vendor-three, sync-to-ui
-└── docs/                  # architecture, running, task authoring, season policy
+│   ├── reasoning/public/       # 12 public task prompts
+│   └── hallucination/public/   # 12 public task prompts
+├── ui/                    # local dashboard SPA (React + Vite)
+├── test/                  # offline vitest suites (mock gateway, no credits spent)
+└── docs/                  # methodology · task authoring · private packs · replay Elo
 ```
 
-## Quick start
+## Development
 
 ```bash
-git clone https://github.com/bridge-mind/bridgebench.git
-cd bridgebench && npm install
-cp .env.example .env       # add your provider keys
-
-# Grade the included golden artifact — no API keys needed
-npm run ui -- evaluate fixtures/golden-correct.html -t s1-lava-lamp-redux
-
-# Run a model across all 10 Season 1 tasks
-npm run ui -- run -m openai/gpt-5.4
-
-# List tasks and configured providers
-npm run ui -- tasks
-npm run providers
-
-# Explore the model registry (see docs/model-registry.md)
-npm run models -- list
-npm run models -- validate
+npm run typecheck
+npm test
+npm run build
 ```
 
-Interaction scoring uses hidden probes (private during the season, published at rotation — see [season policy](docs/season-policy.md)). Without them, runs are still fully functional and marked `partial`.
+Tests use a mock OpenRouter gateway and never spend credits — they pass from a fresh public clone with no API key and no private overlay. Live catalog validation and arena runs are operator-invoked only.
 
 ## Contributing
 
 BridgeBench is open source and open to builders:
 
-- **Propose tasks** for a future season. Task submissions go through a private channel so hidden tests stay uncontaminated — see `CONTRIBUTING.md` (coming with Season 1).
-- **Add a provider or model.** If it speaks an OpenAI-compatible API, it's a provider entry plus one model-registry entry with pricing — see [docs/model-registry.md](docs/model-registry.md).
-- **Audit the archive.** Retired seasons are published in full. If a score doesn't reproduce, open an issue.
+- **Propose tasks.** Public halves are authored in the open; hidden references go through a private channel so they stay uncontaminated. Start from [docs/task-authoring.md](docs/task-authoring.md) and open an issue.
+- **Audit a ladder.** Every published ranking replays from its journal — [docs/replay-elo.md](docs/replay-elo.md). If a number doesn't reproduce, open an issue.
+- **Extend the contract.** New arenas (security, debugging, refactoring) reuse the same match lifecycle; the season-engine branch holds a provider layer and browser harness earmarked for future suites.
 
 ## License
 

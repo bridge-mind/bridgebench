@@ -1,0 +1,203 @@
+id: constraint-deployment-policy
+version: 2.0.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Reconciling Four Tiers of Deployment Policy for a Regulated Release
+summary: >-
+  Decide whether a regulated financial-data release may ship on a Friday, compute the exact permitted
+  deployment shape and the earliest and latest compliant start times, and evaluate a proposed
+  emergency-compression exception, across four priority-ordered policy tiers with buried clauses.
+prompt: |
+  Release R51 wants to ship. Resolve its request against a four-tier policy stack whose precedence is
+  in [policy-precedence]: security controls [security-controls] outrank compliance controls
+  [compliance-controls], which outrank product policies, which outrank operations preferences (both in
+  [product-ops-policies]). The request is [release-request]. Use [business-calendar] for dates and the
+  close window, [residency-token] for the eu-west gate, and [proposed-exception] for deliverable 4.
+
+  All times are UTC. Answer every deliverable; each requires combining rules from at least three
+  artifacts and doing the date/time arithmetic.
+
+  1. Can it ship as requested? State whether R51 may ship on Friday 2026-03-13, and specifically
+     whether it may ship in the exact form requested (start 17:30 UTC, full 100% rollout). If not, say
+     what about the request is impermissible.
+  2. Permitted shape and earliest start. Give the exact permitted deployment shape (stages and minimum
+     durations) and the earliest compliant start time, with the time each stage and 100% is reached,
+     including the responder and residency conditions that must hold.
+  3. Blocking rules. Name the specific rule id(s) that block the requested plan and show the arithmetic
+     (in particular the change-record timing and the rollout-shape rule).
+  4. Emergency compression. Evaluate the proposal in [proposed-exception] to invoke the emergency
+     compression to hit 17:30. Is it valid? If R51 used it, what would still block the plan?
+  5. Latest compliant start. Give the latest compliant start time and name the single rule that binds
+     it. State explicitly why it is that rule and not the product deadline.
+artifacts:
+  - id: policy-precedence
+    type: spec
+    label: Policy precedence
+    content: |
+      Four tiers, highest to lowest: SECURITY, then COMPLIANCE, then PRODUCT, then OPERATIONS.
+        - A higher-tier rule overrides a lower-tier rule ONLY where they directly conflict. A direct
+          conflict means the two rules cannot both be satisfied by any single plan.
+        - Rules within the same tier are cumulative (all apply) unless they are jointly impossible, in
+          which case the release cannot ship in that form.
+        - A lower-tier PREFERENCE never prohibits an action that all higher tiers permit; it only
+          expresses what to avoid when there is a compliant choice. A preference cannot, by itself,
+          make a plan non-compliant.
+      A release is permitted iff it satisfies every SECURITY and COMPLIANCE control and the binding
+      PRODUCT requirements; OPERATIONS items are honored only when they do not force a higher-tier
+      requirement to be missed.
+      WORKED READING: if OPERATIONS says "avoid X" but a binding PRODUCT requirement can only be met by
+      doing X, then X is permitted and the operations item is noted-but-overridden, not a blocker. If
+      two SECURITY controls cannot both hold, no plan ships. When several compliant start times exist,
+      choose per the deliverable asked (earliest vs latest); do not treat a preference as narrowing the
+      compliant window.
+      DEFINITIONS:
+        - A "binding PRODUCT requirement" is a PRODUCT rule stated as a requirement (P1), not a
+          preference (P2). Binding requirements can override lower-tier preferences; preferences at any
+          tier never override anything.
+        - "Directly conflict" is strict: two rules conflict only if no single plan satisfies both. Two
+          rules that merely point in different directions but admit a common plan do NOT conflict, and
+          both must be satisfied.
+        - Where a lower-tier preference happens to agree with the compliant plan, it is satisfied
+          incidentally; where it disagrees, it is overridden. Either way it never changes whether the
+          release is permitted.
+      ORDER OF EVALUATION: establish the SECURITY-required shape, then intersect the COMPLIANCE timing
+      windows, then confirm the binding PRODUCT deadline is met, and only then note which OPERATIONS
+      preferences are honored or overridden. A plan is compliant iff a non-empty start-time window
+      survives the SECURITY and COMPLIANCE steps and meets P1.
+  - id: security-controls
+    type: spec
+    label: Security controls (highest tier)
+    content: |
+      S1. A service handling regulated financial data must deploy as a staged canary: 5% held for at
+          least 60 minutes, then 25% held for at least 60 minutes, then 100%. The only permitted stage
+          percentages are 5, 25, and 100. "Held for at least N minutes" means the stage's traffic share
+          is maintained continuously for >= N minutes before advancing; advancing between stages is
+          instantaneous. A direct full (100%) rollout in one step is prohibited for such services, as
+          is any reordering or omission of the 5% and 25% stages.
+      S2. A staffed security responder — a named on-call engineer actively monitoring the rollout —
+          must be online for the entire rollout window (from the 5% start until 100% is reached) AND
+          for 1 hour after 100% is reached.
+      S3. Any deployment to eu-west requires a data-residency review token that is valid at the deploy
+          start instant (the 5% start). An expired or not-yet-valid token blocks the eu-west portion.
+      S4. The S1 staging MAY be compressed to a single 10% step held for at least 30 minutes, but ONLY
+          for a release that the on-call security lead has classified, in writing and before the
+          deploy start, as an emergency-hotfix. This exception applies to nothing else and does not
+          alter any COMPLIANCE control.
+      S5. A validated rollback plan that can be executed within 5 minutes at any stage must be attached
+          before start. (A capability requirement, not a timing constraint.)
+      S6. Every stage transition of a regulated deploy must emit a signed audit event. (Satisfied by
+          the deploy tooling automatically; not a timing constraint.)
+      NOTE ON S1 MECHANICS: the three stages are sequential and non-overlapping. The minimum elapsed
+      time from the 5% start to the 100% start is therefore 60 + 60 = 120 minutes, achieved only if
+      each hold runs exactly its minimum. A slower rollout (longer holds) is allowed by S1 but pushes
+      the 100% time later, which interacts with the COMPLIANCE deadline in C2. The responder in S2 is a
+      single named engineer for the whole window; no responder handoff is scheduled on 2026-03-13
+      outside the O2 coverage.
+  - id: compliance-controls
+    type: spec
+    label: Compliance controls (second tier)
+    content: |
+      C1. A regulated service may not deploy during the monthly close window. The close window is the
+          last two BUSINESS days of a month plus the first business day of the following month. A
+          business day is Monday-Friday excluding holidays (there are no holidays in the relevant
+          range). A deploy is placed in a window by its START date.
+      C2. Any eu-west deployment must reach 100% no later than 21:00 UTC (inclusive) on a business day.
+          "Reach 100%" is the instant the 100% stage begins.
+      C3. A change record must be filed at least 24 wall-clock hours before the deploy start time. The
+          change record's filed timestamp is authoritative; 24 wall-clock hours is measured on the
+          clock, not in business hours.
+      C4. A rollback plan must be attached to the change record. (Satisfied when S5's plan is filed
+          with the record.)
+      C5. The change record must name an approver from the change-advisory board. (Satisfied by the
+          board approval on the record.)
+      CLOSE-WINDOW COMPUTATION (C1): identify the last two business days of the month from
+      [business-calendar] (skip weekend days), then add the first business day of the following month.
+      The window is those three dates. A start date outside all three is not in the close window. Note
+      that the close window is anchored to month boundaries, not to the calendar midpoint, so a
+      mid-month Friday is not automatically inside or outside it — you must compute the actual dates.
+      DEADLINE ARITHMETIC (C3): earliest permitted start = change-record filed timestamp + exactly 24
+      hours. A start even one minute earlier than that is non-compliant.
+  - id: product-ops-policies
+    type: spec
+    label: Product requirements and operations preferences
+    content: |
+      PRODUCT (third tier, binding requirements):
+        P1. Contractual availability requires R51 to BEGIN rollout (the 5% start) no later than Friday
+            2026-03-13 20:00 UTC.
+        P2. Prefer to reach 100% on the same calendar day as the start. (A product preference.)
+      OPERATIONS (fourth tier, preferences only):
+        O1. Avoid production changes on Fridays after 16:00 UTC.
+        O2. Security responder on-call coverage on Friday 2026-03-13 is 16:00-22:30 UTC (responder
+            "SecOncall-3"). No responder is scheduled outside that window that day.
+        O3. EU change-control staffing is available 08:00-21:00 UTC on weekdays.
+        O4. Prefer deploys during business hours 09:00-17:00 UTC when possible.
+        O5. A batch-analytics freeze runs 22:00-02:00 UTC; avoid overlapping deploys with it.
+      Note: O1, O4, and O5 are preferences and cannot by themselves prohibit a release; O2 and O3 are
+      staffing facts that constrain feasibility only insofar as a higher-tier rule requires staffing
+      that must fall inside them.
+  - id: release-request
+    type: note
+    label: Release request R51
+    content: |
+      Release: R51, service "ledger-api" (classification: regulated financial data).
+      Target regions: us-east and eu-west (single coordinated rollout; both regions advance together).
+      Desired start: Friday 2026-03-13, 17:30 UTC.
+      Desired shape: full 100% rollout in one step.
+      Change record: CR-8841, filed 2026-03-12, 18:00 UTC.
+      Change-advisory-board approval: granted 2026-03-12, 19:10 UTC.
+      Data-residency review token presented: eu-res-2231.
+      Emergency-hotfix classification by on-call security lead: none requested, none on file.
+      Rollback plan: validated, executable in ~3 minutes at every stage, attached to CR-8841.
+      Build artifact hash: 9f4c-ledgerapi-r51. Prior deploy attempts for R51: none.
+      Deploy tooling supports exactly two shapes: the 5/25/100 staged canary, or a single-step 100%.
+  - id: business-calendar
+    type: table
+    label: March-April 2026 calendar (this scenario)
+    content: |
+      In this scenario the weekends of March 2026 fall on the 7th-8th, 14th-15th, 21st-22nd, and
+      28th-29th; every other day is a business day, and there are no holidays in March or early April.
+      date        | weekday   | business day?
+      2026-03-12  | Thursday  | yes
+      2026-03-13  | Friday    | yes
+      2026-03-14  | Saturday  | no
+      2026-03-15  | Sunday    | no
+      2026-03-16  | Monday    | yes
+      2026-03-27  | Friday    | yes
+      2026-03-28  | Saturday  | no
+      2026-03-29  | Sunday    | no
+      2026-03-30  | Monday    | yes
+      2026-03-31  | Tuesday   | yes
+      2026-04-01  | Wednesday | yes
+      2026-04-02  | Thursday  | yes
+      Compute the close window from C1 using this calendar. EU change-control staffing (O3) is the same
+      08:00-21:00 UTC on every business day shown.
+  - id: residency-token
+    type: config
+    label: Data-residency review token
+    content: |
+      token_id: eu-res-2231
+      scope: eu-west (data-residency review for regulated financial data)
+      issued_by: data-governance-office
+      approved_by: dpo-review-board
+      valid_from: 2026-03-01 00:00 UTC
+      valid_until: 2026-03-31 23:59 UTC
+      status: approved
+      check_point: evaluated at the deploy start instant (the 5% start); must be within [valid_from,
+      valid_until] at that instant.
+      conditions: none beyond the validity window.
+  - id: proposed-exception
+    type: note
+    label: Proposed emergency compression
+    content: |
+      Proposal from the release team, attached to R51:
+        "To hit the 17:30 UTC start, invoke S4 and deploy R51 as a single 10% step held 30 minutes,
+        then go to 100%. This lets us start earlier and finish faster, and it satisfies security
+        because 10% is still a canary."
+      The team argues the release is 'urgent enough' to count as an emergency. However, no emergency-
+      hotfix classification has been requested from or granted by the on-call security lead, and R51 is
+      a scheduled feature release, not a hotfix. The team also floated 'just start the eu-west portion
+      after 21:00 to buy time' and 'skip the residency token since it is basically always approved' as
+      fallbacks. Evaluate the emergency-compression proposal on its merits against [security-controls]
+      and [compliance-controls].
+tags: [policy, deployment, precedence, scheduling, compliance, canary]

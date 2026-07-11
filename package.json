@@ -1,47 +1,51 @@
 {
   "name": "bridgebench",
-  "version": "3.0.0-alpha.0",
-  "description": "The world's #1 vibe coding benchmark — real workflows, direct from every provider's API, rebuilt every 90 days.",
-  "license": "MIT",
+  "version": "3.1.0-alpha.0",
+  "description": "BridgeBench V3 — autonomous pairwise arenas: reasoning and hallucination",
   "type": "module",
+  "private": true,
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/bridge-mind/bridgebench.git"
   },
+  "homepage": "https://bridgebench.ai",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "ui": "tsx src/cli.ts ui",
-    "providers": "tsx src/cli.ts providers",
-    "models": "tsx src/cli.ts models",
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && vite build --config ui/vite.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:ui": "playwright test --config playwright.config.ts",
     "test:watch": "vitest",
-    "vendor:three": "node scripts/vendor-three.mjs",
-    "sync:ui": "node scripts/sync-to-ui.mjs",
-    "publish:artifacts": "node scripts/publish-artifacts.mjs"
+    "models": "node --env-file-if-exists=.env --import tsx src/cli.ts models",
+    "tasks": "node --env-file-if-exists=.env --import tsx src/cli.ts tasks",
+    "arena": "node --env-file-if-exists=.env --import tsx src/cli.ts arena",
+    "triage": "node --import tsx src/cli.ts arena triage",
+    "report": "node --import tsx src/cli.ts report",
+    "dashboard": "node --env-file-if-exists=.env --import tsx src/dashboard/server.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "chalk": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "commander": "^12.1.0",
-    "dotenv": "^16.4.7",
+    "lucide-react": "^0.468.0",
     "openai": "^4.76.0",
-    "pixelmatch": "^6.0.0",
-    "playwright-core": "^1.58.2",
-    "pngjs": "^7.0.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
     "yaml": "^2.6.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.2",
-    "@types/pixelmatch": "^5.2.6",
-    "@types/pngjs": "^6.0.5",
-    "three": "^0.182.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vite": "^7.2.4",
+    "vitest": "^4.1.10"
   }
 }

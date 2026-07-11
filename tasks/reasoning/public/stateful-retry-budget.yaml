@@ -1,0 +1,222 @@
+id: stateful-retry-budget
+version: 2.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Shared Retry Budget Across Five Concurrent Requests With Cancellation
+summary: >-
+  Trace five concurrent requests through a retry state machine that share one token-bucket retry
+  budget, with deterministic backoff and jitter, per-request deadlines, cancellation, and three
+  distinct failure modes, then evaluate a proposed increase to the per-request attempt cap.
+prompt: |
+  A client library runs five requests (R1..R5) concurrently against one upstream. They share a single
+  retry budget. The state machine and its transition precedence are in [retry-state-machine]; the
+  dispatcher that implements it is [dispatcher-code]; numeric parameters are in [retry-config]; status
+  codes are classified by [status-classification]; retry start times use the deterministic offsets in
+  [jitter-table]; the raw global-ordered event stream is [event-log]. [ops-note] is an engineer's
+  post-incident summary. [proposed-change] is a config edit under review.
+
+  All times are milliseconds from an origin. The budget is shared: every request's retries draw from
+  and credit the same bucket, so you must process budget-affecting events in strict time order. Answer
+  every deliverable; the log alone does not state outcomes — you must apply the state machine.
+
+  1. Terminal state. For each of R1..R5 give the terminal state. Where a request FAILED, give the
+     specific reason (max-attempts, budget-exhausted, deadline, or non-retryable).
+  2. Call accounting. Give the total number of upstream calls, the per-request call count, and the
+     exact start time (ms) of R2's third attempt.
+  3. Budget. Give the exact final value of the shared retry budget after all events.
+  4. Failure modes. Exactly three requests do not end in SUCCESS. Identify which one ends by
+     max-attempts, which by budget-exhaustion, and which by cancellation — and justify each against
+     the precedence order in [retry-state-machine].
+  5. Cancellation and the stale timer. For R4: does attempt 3 begin? State what happens when the timer
+     scheduled for R4 fires at t=610. Then, using [event-log], identify every claim in [ops-note] that
+     is false and give the correct fact for each.
+  6. Proposed change. Under [proposed-change] (max_attempts_per_request 3 -> 5), state which requests'
+     terminal outcomes change, which requests' failure reason changes, whether the total upstream call
+     count changes, and explain why the change does or does not improve the success rate.
+artifacts:
+  - id: retry-state-machine
+    type: spec
+    label: Retry state machine and precedence
+    content: |
+      DEFINITIONS
+        - attempt: one call issued to the upstream. attempts_started counts attempts issued so far for
+          a request; when the response for attempt N arrives, attempts_started == N.
+        - RETRY_WAIT: the request is idle, holding a scheduled timer for its next attempt.
+        - budget: the shared token bucket in [retry-config]; there is exactly one, common to all
+          requests.
+
+      States: PENDING -> IN_FLIGHT -> one of { SUCCESS, RETRY_WAIT, FAILED, CANCELLED,
+      DEADLINE_EXCEEDED }. attempt 1 starts at admission (PENDING -> IN_FLIGHT).
+
+      On a response classified retryable (see [status-classification]), evaluate IN THIS ORDER and act
+      on the FIRST matching rule (later rules are not consulted once one fires):
+        (1) if attempts_started >= max_attempts_per_request -> terminal FAILED, reason max-attempts.
+        (2) else if now >= (admission_time + per_request_deadline_ms) -> terminal DEADLINE_EXCEEDED.
+        (3) else if budget < min_to_retry -> terminal FAILED, reason budget-exhausted.
+        (4) else schedule attempt N+1 at time (response_time + backoff_gap(N) + jitter); set
+            budget := budget - retry_cost; state RETRY_WAIT.
+      backoff_gap(N) = backoff_base_ms * backoff_multiplier^(N-1): after attempt 1 = 100 ms, after
+      attempt 2 = 200 ms. jitter is taken from [jitter-table] for (request, N).
+
+      On a response classified success -> terminal SUCCESS; budget := min(max, budget + success_credit).
+      On a response classified terminal-fail (non-retryable) -> terminal FAILED, reason non-retryable.
+
+      Cancellation (caller-initiated) is immediately terminal CANCELLED. It cancels any scheduled retry
+      timer. A timer that fires for an already-terminal request is IGNORED and starts no attempt. A
+      response that arrives for an attempt after the request is terminal is IGNORED. retry_cost spent
+      on a scheduled-but-not-yet-started retry is NOT refunded on cancellation.
+
+      Deadline reached while RETRY_WAIT or IN_FLIGHT -> terminal DEADLINE_EXCEEDED. Terminal states are
+      final and never re-enter the machine.
+
+      ILLUSTRATIVE ONLY (not one of R1..R5): a request admitted at t=1000 (deadline 1500) whose attempt
+      1 returns 500 at t=1040, with budget 4.0 at that instant: rule (1) no (1 < 3), rule (2) no
+      (1040 < 1500), rule (3) no (4.0 >= 1.0), so rule (4) fires — schedule attempt 2 at
+      1040 + 100 + jitter and set budget := 3.0. This example uses invented numbers to show the
+      precedence; do not fold it into the R1..R5 accounting.
+  - id: dispatcher-code
+    type: code
+    label: Shared dispatcher pseudocode
+    content: |
+      // One dispatcher serves all requests. `budget` is a single shared variable (the token bucket).
+      // Events are delivered in nondecreasing time order (see [event-log]).
+
+      budget = config.retry_budget.initial          // 8.0, cap config.retry_budget.max (8.0)
+
+      function onResponse(req, attemptN, status, nowMs):
+        if req.terminal: return                      // late response for a finished request: ignore
+        cls = classify(status)                       // see [status-classification]
+        if cls == "success":
+          req.finish(SUCCESS)
+          budget = min(config.max, budget + config.success_credit)   // +0.5
+          return
+        if cls == "terminal-fail":
+          req.finish(FAILED, reason = "non-retryable"); return
+        // cls == "retryable" -> precedence order:
+        if attemptN >= config.max_attempts_per_request:
+          req.finish(FAILED, reason = "max-attempts"); return        // rule (1)
+        if nowMs >= req.admittedAt + config.per_request_deadline_ms:
+          req.finish(DEADLINE_EXCEEDED); return                      // rule (2)
+        if budget < config.min_to_retry:
+          req.finish(FAILED, reason = "budget-exhausted"); return    // rule (3)
+        gap = config.backoff_base_ms * (config.backoff_multiplier ** (attemptN - 1))
+        startAt = nowMs + gap + jitter(req, attemptN)                // [jitter-table]
+        budget = budget - config.retry_cost                          // rule (4): -1.0, not refunded
+        req.scheduleAttempt(attemptN + 1, startAt)
+
+      function onCancel(req, nowMs):
+        if req.terminal: return
+        req.cancelTimer(); req.finish(CANCELLED)
+
+      function onTimer(req, attemptN):
+        if req.terminal: return                      // stale timer for a finished request: ignore
+        req.startAttempt(attemptN)
+  - id: retry-config
+    type: config
+    label: Retry parameters
+    content: |
+      max_attempts_per_request: 3
+      backoff_base_ms: 100
+      backoff_multiplier: 2                # gap after attempt N = base * multiplier^(N-1)
+      per_request_deadline_ms: 500         # absolute deadline = admission_time + 500
+      timer_resolution_ms: 1               # timers fire at their scheduled ms
+      upstream: "quote-svc"                # single upstream shared by all requests
+      retry_budget:
+        initial: 8.0                       # bucket starts full
+        max: 8.0                           # credits are capped here
+        retry_cost: 1.0                    # subtracted when a retry is scheduled (rule 4)
+        success_credit: 0.5                # added on SUCCESS, capped at max
+        min_to_retry: 1.0                  # a retry requires budget >= this value
+  - id: status-classification
+    type: table
+    label: Response classification
+    content: |
+      status        | class
+      200, 201, 204 | success
+      400, 401, 403, 404, 422 | terminal-fail (non-retryable)
+      429, 500, 502, 503 | retryable
+      TIMEOUT       | retryable
+      note: only the statuses that actually occur in [event-log] matter for the answer; the rest are
+      listed so the classification is unambiguous. TIMEOUT is a transport timeout of a single attempt,
+      not the per-request deadline.
+  - id: jitter-table
+    type: table
+    label: Deterministic retry jitter
+    content: |
+      request | attempt N | jitter_ms
+      R1      | 1         | 12
+      R1      | 2         | 0
+      R2      | 1         | 20
+      R2      | 2         | 15
+      R3      | 1         | 8
+      R3      | 2         | 25
+      R4      | 1         | 5
+      R4      | 2         | 10
+      R5      | 1         | 18
+      R5      | 2         | 0
+      note: jitter for (request, N) is added to attempt N+1's start. No entry is needed for attempt 3's
+      successor because max attempts is 3.
+  - id: event-log
+    type: log
+    label: Global-ordered event stream (raw; outcomes not annotated)
+    content: |
+      t_ms | request | phase                | status/detail | latency_ms | endpoint
+      0    | R1      | admitted             | deadline 500  | -          | -
+      0    | R1      | attempt 1 start      | -             | -          | quote-svc
+      30   | R1      | attempt 1 response   | 503           | 30         | quote-svc
+      50   | R2      | admitted             | deadline 550  | -          | -
+      50   | R2      | attempt 1 start      | -             | -          | quote-svc
+      90   | R2      | attempt 1 response   | TIMEOUT       | 40         | quote-svc
+      100  | R3      | admitted             | deadline 600  | -          | -
+      100  | R3      | attempt 1 start      | -             | -          | quote-svc
+      142  | R1      | attempt 2 start      | -             | -          | quote-svc
+      150  | R3      | attempt 1 response   | 503           | 50         | quote-svc
+      175  | R1      | attempt 2 response   | 200           | 33         | quote-svc
+      200  | R4      | admitted             | deadline 700  | -          | -
+      200  | R4      | attempt 1 start      | -             | -          | quote-svc
+      210  | R2      | attempt 2 start      | -             | -          | quote-svc
+      250  | R4      | attempt 1 response   | 500           | 50         | quote-svc
+      258  | R3      | attempt 2 start      | -             | -          | quote-svc
+      260  | R2      | attempt 2 response   | 429           | 50         | quote-svc
+      300  | R3      | attempt 2 response   | TIMEOUT       | 42         | quote-svc
+      310  | R5      | admitted             | deadline 810  | -          | -
+      310  | R5      | attempt 1 start      | -             | -          | quote-svc
+      340  | R5      | attempt 1 response   | 429           | 30         | quote-svc
+      355  | R4      | attempt 2 start      | -             | -          | quote-svc
+      400  | R4      | attempt 2 response   | 503           | 45         | quote-svc
+      458  | R5      | attempt 2 start      | -             | -          | quote-svc
+      475  | R2      | attempt 3 start      | -             | -          | quote-svc
+      480  | R4      | caller cancel        | -             | -          | -
+      500  | R5      | attempt 2 response   | TIMEOUT       | 42         | quote-svc
+      520  | R2      | attempt 3 response   | 503           | 45         | quote-svc
+      525  | R3      | attempt 3 start      | -             | -          | quote-svc
+      560  | R3      | attempt 3 response   | 200           | 35         | quote-svc
+      610  | R4      | retry timer fires    | for attempt 3 | -          | -
+  - id: ops-note
+    type: note
+    label: Post-incident summary (unverified)
+    content: |
+      On-call notes, filed after the incident (NOT independently verified):
+        - R2 exceeded its request deadline and timed out.
+        - R5 failed after using all 3 of its attempts.
+        - R4 completed its third attempt at t=610.
+        - Raising max_attempts_per_request to 5 will recover both R2 and R5, so the fix is a one-line
+          config bump.
+      Proposed remediation attached to the note: "Bump max attempts to 5; keep everything else the
+      same." Treat every line above as a claim to be checked against [event-log], not as fact.
+  - id: proposed-change
+    type: diff
+    label: Proposed configuration change
+    content: |
+      --- retry-config (current)
+      +++ retry-config (proposed)
+      - max_attempts_per_request: 3
+      + max_attempts_per_request: 5      # "let struggling requests try harder to succeed"
+        backoff_base_ms: 100             # unchanged
+        retry_budget:
+          initial: 8.0                   # unchanged
+          success_credit: 0.5            # unchanged
+          min_to_retry: 1.0              # unchanged
+      Only max_attempts_per_request changes; the shared budget parameters are untouched.
+tags: [state-machine, retries, token-bucket, backoff, cancellation, concurrency]

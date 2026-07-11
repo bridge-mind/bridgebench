@@ -1,0 +1,214 @@
+id: synthesis-api-contract
+version: 2.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Legacy API Clients Lose Exactly Their Renamed Fields After a Uniform Projection Allowlist
+summary: A shared profile handler serves both a frozen v4 contract and a current v5 contract through a per-route gateway pipeline. After a security ticket added a response-field allowlist to every route, v4 clients silently lose three fields while keeping two, all with HTTP 200. Reconcile the contracts, pipeline, handler, logs, and field observations to find the one misconfiguration, reject the decoys, and specify the minimal fix scoped to the affected route.
+prompt: |
+  v4 clients (mobile and a partner batch job) started getting HTTP 200 profile responses that are
+  missing required fields, while v5 clients are fine. Using only the artifacts, produce:
+
+  1. FAILURE SURFACE. State exactly which fields are missing, on which route, for which clients, and
+     which fields still arrive. Cite client-logs and the field-observation-table.
+  2. ROOT CAUSE. Explain the single misconfiguration that drops those fields and why it drops exactly
+     those and not the others. Cite gateway-pipeline, both contracts, and change-ticket.
+  3. AVATAR DECOY. Explain why the recent avatar-object rollout (PROJ-799 in change-ticket) is not the
+     cause, even though avatar_url is among the missing fields.
+  4. UPGRADE DECOY. Explain why "ship a mobile/partner client update" is not an acceptable resolution,
+     reconciling the dates in deprecation-policy.
+  5. MINIMAL FIX. Give the smallest correction, scoped to a single route, that restores the v4 fields
+     without changing v5 behavior and without discarding the security intent of the allowlist.
+  6. VERIFICATION. State the exact field set and value formats a correct v4 profile response must
+     contain, and confirm the v5 response must remain unchanged. Cite v4-contract and v5-contract.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: v5-contract
+    type: spec
+    label: v5 profile response contract (current)
+    content: |
+      GET /api/v5/profile -> 200 application/json
+      Required fields:
+        id           string (uuid)
+        display_name string                     # renamed from v4 user_name
+        avatar       object { url: string, blurhash: string }   # replaced v4 avatar_url string
+        created_at   string (ISO-8601 UTC)      # replaced v4 integer "created"
+        plan         enum "pro" | "ultra"       # renamed values from v4 "plus" | "max"
+      The handler emits this shape natively; the v5 route performs no field renaming.
+
+      Canonical example (what a conforming v5 response looks like):
+        {
+          "id": "7b3f...e21",
+          "display_name": "Dana Okoro",
+          "avatar": { "url": "https://cdn.example/av/7b3f.png", "blurhash": "L6Pj0^" },
+          "created_at": "2025-02-11T09:30:00Z",
+          "plan": "pro"
+        }
+      Consumers: web-v5 (current web app) and any client that migrated to v5. These read the object
+      avatar and the ISO created_at directly. No v5 client depends on the legacy names.
+      Field notes:
+        - display_name is always present (never null); the handler falls back to the account handle.
+        - avatar.url is always a fully-qualified https URL; blurhash is a short placeholder string.
+  - id: v4-contract
+    type: spec
+    label: v4 profile response contract (frozen, deprecation window)
+    content: |
+      GET /api/v4/profile -> 200 application/json
+      Required fields (byte-stable; clients hard-fail if any are absent):
+        id         string (uuid)                # identical to v5
+        user_name  string                       # v5 display_name
+        avatar_url string (url)                 # v5 avatar.url
+        created    integer (epoch seconds)      # v5 created_at
+        plan       enum "plus" | "max"          # v5 "pro" -> "plus", "ultra" -> "max"
+      Note: only user_name, avatar_url, and created require a NAME change from the v5 shape.
+      id keeps its name; plan keeps its name (only its enum values are remapped).
+
+      Canonical example (what a conforming v4 response MUST look like for the same user):
+        {
+          "id": "7b3f...e21",
+          "user_name": "Dana Okoro",
+          "avatar_url": "https://cdn.example/av/7b3f.png",
+          "created": 1739266200,
+          "plan": "plus"
+        }
+      Consumers: mobile-v4 (shipped app binaries in the field) and partner-batch (a nightly partner
+      integration job). Both hard-validate the response against this schema and abort on any missing
+      required field, surfacing a user-visible error rather than degrading gracefully.
+      Field notes:
+        - created is the integer epoch-seconds form of the same instant v5 encodes as created_at ISO.
+        - "plus"/"max" are the ONLY plan values v4 clients accept; "pro"/"ultra" would be rejected too.
+  - id: deprecation-policy
+    type: note
+    label: API deprecation policy
+    content: |
+      Incident date: 2026-07-10.
+      Policy: v4 is deprecated but SUPPORTED through 2026-12-31. Until that date the server MUST keep
+      v4 responses byte-compatible with the frozen v4-contract above. Rules:
+        - Server-side compatibility is mandatory, not best-effort.
+        - Clients on v4 cannot be compelled to upgrade before the window closes.
+        - A change that makes a v4 response non-conforming is a Sev-2 regression, not an accepted cost
+          of shipping v5.
+      Forcing a client release inside the window (mobile store update, partner redeploy, etc.) is a
+      policy violation and is not an accepted remediation. As of 2026-07-10 the window is OPEN
+      (roughly six months remain).
+  - id: gateway-pipeline
+    type: config
+    label: gateway per-route response pipeline
+    content: |
+      # gateway/response-pipeline.yaml
+      # Each route runs an ORDERED list of steps, top to bottom, over the handler's JSON output.
+      # Step reference:
+      #   rename    { from_field: to_field }         renames keys
+      #   mapValues { field: { from_value: to } }    remaps enum values in place
+      #   coerce    { field: type }                  converts a value's type/shape
+      #   project   { allow: [fields...] }           DROPS any field not listed in `allow`
+      routes:
+        /api/v5/profile:
+          enabled: true
+          pipeline:
+            - project: { allow: [id, display_name, avatar, created_at, plan] }
+
+        /api/v4/profile:
+          enabled: true
+          pipeline:
+            - rename: { display_name: user_name, avatar: avatar_url, created_at: created }
+            - mapValues: { plan: { pro: plus, ultra: max } }
+            - coerce: { avatar_url: url_string, created: epoch_seconds }
+            - project: { allow: [id, display_name, avatar, created_at, plan] }
+      # NOTE: `project` filters on the field names present AT THAT POINT in the pipeline.
+      # Order matters: steps run top to bottom. A field dropped by `project` is absent from the
+      # response body entirely (not null); the client sees a shorter object.
+  - id: profile-handler
+    type: code
+    label: shared profile handler
+    content: |
+      // profile/handler.ts  — ONE implementation serves BOTH /api/v4/profile and /api/v5/profile.
+      // Per-route gateway pipelines (see gateway-pipeline) adapt this output to each contract.
+      export async function getProfile(userId: string) {
+        const u = await db.users.findById(userId);
+        return {
+          id: u.id,
+          display_name: u.displayName,                      // v5-native field names
+          avatar: { url: u.avatarUrl, blurhash: u.blurhash },
+          created_at: u.createdAt.toISOString(),            // ISO-8601 string
+          plan: normalizePlan(u.plan),                      // returns "pro" | "ultra"
+        };
+      }
+
+      function normalizePlan(raw: string): 'pro' | 'ultra' {
+        // Legacy stored values are normalized up to the v5 enum.
+        if (raw === 'plus' || raw === 'pro') return 'pro';
+        if (raw === 'max' || raw === 'ultra') return 'ultra';
+        return 'pro';
+      }
+      // The handler ALWAYS emits the v5 shape. It has no per-version branching.
+  - id: change-ticket
+    type: note
+    label: recent change tickets
+    content: |
+      PROJ-812 (merged 2 days before the incident): "Add a response-field allowlist (project step) to
+      ALL profile routes to prevent accidental field leakage." Implementation notes on the ticket:
+        - A single allowlist was written using the v5 field names.
+        - It was appended as the LAST step of every route's pipeline, including /api/v4/profile.
+        - No route-specific field names were used; the reviewer asked "does v4 rename before this?"
+          and the thread was never resolved before merge.
+      This is the only change to the v4 pipeline in the last 30 days.
+
+      PROJ-799 (merged 3 weeks before the incident): "Roll out v5 avatar as an object { url, blurhash }."
+      This changed the handler's avatar from a string to an object. v5 clients read avatar.url; the v4
+      route already had a `coerce` step to flatten avatar back to a url string. No client complaints
+      were filed when PROJ-799 shipped, and v4 traffic was healthy for the following two weeks.
+
+      Timeline:
+        - day -21: PROJ-799 merged and deployed. v4 and v5 both healthy afterward.
+        - day -14 to day -2: no profile-pipeline changes; v4 error rate ~0.
+        - day -2: PROJ-812 merged and deployed. v4 error rate begins climbing on the next deploy.
+        - day  0: incident opened; mobile-v4 and partner-batch failing on missing required fields.
+      The v4 failures start immediately after PROJ-812, not after PROJ-799.
+  - id: client-logs
+    type: log
+    label: client request outcomes and a captured v4 body
+    content: |
+      web-v5        GET /api/v5/profile   200  keys=[id, display_name, avatar, created_at, plan]  parsed OK
+      mobile-v4     GET /api/v4/profile   200  keys=[id, plan]  ERROR missing required: user_name, avatar_url, created
+      mobile-v4     GET /api/v4/profile   200  keys=[id, plan]  ERROR missing required: user_name, avatar_url, created
+      partner-batch GET /api/v4/profile   200  keys=[id, plan]  ERROR missing required: user_name, avatar_url, created
+      web-v5        GET /api/v5/profile   200  keys=[id, display_name, avatar, created_at, plan]  parsed OK
+      partner-batch GET /api/v4/profile   200  keys=[id, plan]  ERROR missing required: user_name, avatar_url, created
+
+      # Captured /api/v4/profile response body during the incident (same user as the contract examples):
+      #   { "id": "7b3f...e21", "plan": "plus" }
+      # Observations: the body is HTTP 200; `plan` is present AND correctly remapped to "plus"
+      # (so the mapValues step ran); id is present; the three renamed fields are gone.
+
+      # Captured /api/v5/profile response body during the same window (for contrast):
+      #   { "id": "7b3f...e21", "display_name": "Dana Okoro",
+      #     "avatar": { "url": "https://cdn.example/av/7b3f.png", "blurhash": "L6Pj0^" },
+      #     "created_at": "2025-02-11T09:30:00Z", "plan": "pro" }
+      # The v5 body is complete and conforming; only the v4 route sheds fields.
+  - id: field-observation-table
+    type: table
+    label: observed field presence by route
+    content: |
+      v4 response field  maps from (v5)  requires rename?  required by v4?  present for v4 clients?
+      id                 id              no                yes              yes
+      user_name          display_name    yes               yes              NO
+      avatar_url         avatar.url      yes               yes              NO
+      created            created_at      yes               yes              NO
+      plan               plan            no (value remap)  yes              yes (value = "plus")
+
+      value-format check on the fields that DID arrive for v4 clients:
+        id    -> uuid string, correct
+        plan  -> "plus", correctly remapped from "pro" (mapValues ran successfully)
+
+      counts:
+        v4 required fields:            5  (id, user_name, avatar_url, created, plan)
+        v4 fields present in response: 2  (id, plan)
+        v4 fields missing:            3  (user_name, avatar_url, created)
+        of the 3 missing, all 3 are the fields that require a name change from v5
+        of the 2 present, neither requires a name change from v5
+      # Fingerprint: every field that needs a NAME change is absent; the two fields whose name is
+      # unchanged across versions (id, plan) are present. v5 clients receive the full v5 shape.
+      # (All rows describe /api/v4/profile responses observed during the incident.)
+tags: [api, compatibility, versioning, gateway, multi-artifact-synthesis]

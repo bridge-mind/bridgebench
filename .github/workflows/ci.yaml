@@ -7,25 +7,25 @@ on:
 
 jobs:
   contamination-guard:
-    name: No hidden tests in the public repo
+    name: No hidden references in the public repo
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Active-season task files must not contain probes
+      - name: Fail if private task halves are tracked
         run: |
-          set -euo pipefail
-          if grep -rln '^probes:' tasks/current/ 2>/dev/null; then
-            echo '::error::probes found in tasks/current/ — hidden tests belong in bridgebench-private'
+          if git ls-files | grep -E '^tasks/[^/]+/private/'; then
+            echo '::error::Private task halves must never be committed to the public repo.'
             exit 1
           fi
-          if find . -path ./node_modules -prune -o -name '*.probes.yaml' -print | grep -v '^./tasks/retired/' | grep .; then
-            echo '::error::*.probes.yaml outside tasks/retired/ — hidden tests belong in bridgebench-private'
+      - name: Fail if hidden-reference fields appear under tasks/
+        run: |
+          if grep -rlE '^(expectedResolution|disqualifyingErrors|rubric):' tasks/; then
+            echo '::error::A tracked task file contains hidden-reference fields.'
             exit 1
           fi
-          echo 'clean'
 
   test:
-    name: Typecheck + tests
+    name: Typecheck and offline tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +35,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      # ubuntu-latest ships Google Chrome; the browser integration tests run
-      # against it (SwiftShader software WebGL) and auto-skip if absent.
       - run: npm test

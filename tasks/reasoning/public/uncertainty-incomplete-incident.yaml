@@ -1,0 +1,223 @@
+id: uncertainty-incomplete-incident
+version: 2.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Webhook Signature Failures That Look Like an Attack
+summary: About 40 percent of inbound webhooks began failing signature verification, all seemingly from one IP, and on-call suspects a breach. Several signals are unreliable for concrete reasons, but the evidence still points to one best-supported, non-adversarial cause. Rank the hypotheses, identify the untrustworthy signals, commit to the conclusion, rule out tampering and the decoys, and give a proportionate remediation plan plus the decisive measurement.
+prompt: |
+  Inbound webhooks from a partner payment gateway started failing signature verification at ~09:15.
+  Roughly 40 percent are now rejected as signature_mismatch, and an access log appears to show every
+  failure coming from a single IP, so on-call opened a SEV-2 suspecting a forged-webhook attack.
+  Some of the evidence is measured in ways that make it misleading, but the artifacts still support
+  one best-supported, non-adversarial conclusion.
+
+  This is not a "cannot be determined" task and it is not a security incident by default: weigh the
+  evidence and commit to the mechanism the artifacts most support, then respond proportionately.
+
+  Deliverables (answer every one, and show the reasoning that supports it):
+
+  1. Rank these hypotheses from best-supported to least-supported, weighing specific evidence for and
+     against each: (a) an attacker forging or tampering with webhooks, (b) a signing-secret rotation
+     race, (c) proxy reserialization changing the signed bytes, (d) a clock or replay-window problem.
+
+  2. Identify which signals are unreliable and give the concrete artifact-grounded reason for each
+     (for example sampled logs, a source-IP column that is really the proxy, or a truncated pod log).
+     Say what each unreliable signal can and cannot support.
+
+  3. State the single best-supported conclusion and explain specifically why the reject rate is about
+     40 percent rather than 0 or 100 percent.
+
+  4. Explain why an attacker is not the cause, and why proxy reserialization and a clock/replay
+     problem are also ruled out. Cite the single strongest piece of evidence that discriminates
+     among these.
+
+  5. Give proportionate remediation priorities and state explicitly what NOT to do. Your plan must
+     not expose the signing secret or full sensitive payloads, and must not take breach-response
+     actions without breach evidence.
+
+  6. Give the one additional measurement that would make the conclusion decisive, and state which
+     result confirms it and which refutes it.
+artifacts:
+  - id: incident-summary
+    type: note
+    label: Incident summary and initial theory
+    content: |
+      At ~09:15 the receiver service began rejecting inbound webhooks from partner payment-gateway
+      as signature_mismatch. About 40% of deliveries are now rejected; the rest succeed. The service
+      accepts webhooks behind an ingress proxy and verifies an HMAC signature carried in request
+      headers. Deliveries are load-balanced roughly evenly across eight receiver pods.
+
+      On-call's initial theory and proposed actions: "The access log shows every rejected request
+      coming from source IP 10.0.0.7. A single origin flooding us with bad signatures looks like an
+      attacker forging webhooks. We should (1) treat this as a breach, (2) rotate the signing secret
+      immediately, and (3) block 10.0.0.7 at the edge." Before any of those actions is taken, decide
+      from the artifacts whether the breach theory is actually supported, and whether each proposed
+      action would help or hurt.
+
+      One observation the on-call bridge kept returning to: the failures are not uniform. The same
+      partner traffic succeeds against some receiver pods and fails against others at the same
+      instant, which does not match "our shared secret was compromised" (that would fail everywhere)
+      and does not match a payload-mangling proxy (that would also fail everywhere). Whatever the
+      cause, it is something that differs pod to pod.
+  - id: rejection-metric
+    type: table
+    label: Receiver rejection counter (unsampled, receiver clock, NTP healthy)
+    content: |
+      Authoritative unsampled counter of every delivery outcome (all pods combined).
+
+      minute | delivered | accepted | rej_signature_mismatch | rej_timestamp_expired
+      09:11  | 1190      | 1190     | 0                      | 0
+      09:12  | 1200      | 1200     | 0                      | 0
+      09:13  | 1180      | 1179     | 1                      | 0
+      09:14  | 1210      | 1208     | 2                      | 0
+      09:15  | 1230      | 742      | 488                    | 0
+      09:16  | 1250      | 760      | 490                    | 0
+      09:17  | 1220      | 748      | 472                    | 0
+      09:18  | 1240      | 769      | 471                    | 0
+      09:19  | 1215      | 742      | 473                    | 0
+      09:20  | 1225      | 761      | 464                    | 0
+
+      Before 09:15 the reject rate is ~0. From 09:15 onward ~38-40% are rejected, ALL counted as
+      signature_mismatch. rej_timestamp_expired stays at exactly 0 the entire time. The reject rate
+      is stable, not growing, which is not the shape of an escalating attack.
+  - id: access-log-sample
+    type: log
+    label: Receiver access log (SAMPLED 1-in-10; see caveats)
+    content: |
+      Caveats: this access log is head-sampled at 1-in-10, so raw line counts understate true
+      volume roughly tenfold; use rejection-metric for volume. Also, pod recv-7 rotated its local
+      log file at 09:16 and the pre-rotation segment was lost, so recv-7's own reject count in this
+      file is undercounted. The `src` column is the connection source address; the real client is in
+      the `xff` (X-Forwarded-For) field.
+
+      09:15:04 pod=recv-7 src=10.0.0.7 xff=198.51.100.20 key_id=v2 result=REJECT err=signature_mismatch
+      09:15:09 pod=recv-2 src=10.0.0.7 xff=198.51.100.21 key_id=v2 result=ACCEPT
+      09:15:15 pod=recv-5 src=10.0.0.7 xff=198.51.100.20 key_id=v2 result=REJECT err=signature_mismatch
+      09:15:31 pod=recv-4 src=10.0.0.7 xff=198.51.100.22 key_id=v2 result=ACCEPT
+      09:15:47 pod=recv-3 src=10.0.0.7 xff=198.51.100.24 key_id=v2 result=REJECT err=signature_mismatch
+      09:16:02 pod=recv-7 src=10.0.0.7 xff=198.51.100.20 key_id=v2 result=REJECT err=signature_mismatch
+      09:16:19 pod=recv-1 src=10.0.0.7 xff=198.51.100.25 key_id=v2 result=ACCEPT
+      09:16:48 pod=recv-2 src=10.0.0.7 xff=198.51.100.23 key_id=v2 result=ACCEPT
+
+      Every line carries key_id=v2 and an xff inside 198.51.100.0/24. The SAME key_id=v2 traffic is
+      REJECTED on some pods (recv-3, recv-5, recv-7) and ACCEPTED on others (recv-1, recv-2, recv-4).
+      No line shows a client address outside 198.51.100.0/24.
+  - id: verify-code
+    type: code
+    label: receiver/verify.ts and the webhook handler
+    content: |
+      // receiver/secrets.ts
+      // Loads signing secrets from this pod's environment. A pod holds { v1 } or { v1, v2 }
+      // depending on how far the current secret rollout has reached it. The loader never logs
+      // secret material.
+      export function loadSecretsFromEnv(): Record<string, Buffer> {
+        const map: Record<string, Buffer> = {};
+        for (const version of (process.env.SIG_KEY_VERSIONS ?? '').split(',').filter(Boolean)) {
+          map[version] = readSecret(version); // reads SIG_SECRET_<version> from the pod env
+        }
+        return map;
+      }
+
+      // receiver/verify.ts
+      import { createHmac, timingSafeEqual } from 'node:crypto';
+      import { loadSecretsFromEnv } from './secrets';
+
+      const SECRETS: Record<string, Buffer> = loadSecretsFromEnv();
+      const REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
+      export function verify(rawBody: Buffer, headers: Headers): { ok: boolean; code?: string } {
+        const keyId = headers.get('x-sig-key-id') ?? '';   // 'v1' or 'v2'
+        const sigHex = headers.get('x-sig') ?? '';
+        const tsMs = Number(headers.get('x-sig-ts') ?? '0');
+
+        if (Math.abs(Date.now() - tsMs) > REPLAY_WINDOW_MS) {
+          return { ok: false, code: 'timestamp_expired' };   // distinct code for clock/replay
+        }
+        const secret = SECRETS[keyId];
+        if (!secret) {
+          return { ok: false, code: 'signature_mismatch' };  // unknown key version, masked as mismatch
+        }
+        // Signs the RAW received bytes, before any JSON parse or re-serialize.
+        const expected = createHmac('sha256', secret).update(rawBody).digest();
+        const given = Buffer.from(sigHex, 'hex');
+        const ok = expected.length === given.length && timingSafeEqual(expected, given);
+        return ok ? { ok: true } : { ok: false, code: 'signature_mismatch' };
+      }
+
+      // receiver/handler.ts
+      import { verify } from './verify';
+      import { metrics } from './metrics';
+
+      export async function handleWebhook(req: Request): Promise<Response> {
+        const rawBody = Buffer.from(await req.arrayBuffer()); // exact received bytes, no parse first
+        const result = verify(rawBody, req.headers);
+        if (!result.ok) {
+          metrics.increment(`webhook.reject.${result.code}`); // feeds rejection-metric
+          return new Response('rejected', { status: 401 });
+        }
+        metrics.increment('webhook.accept');
+        return new Response('ok', { status: 200 });
+      }
+  - id: rotation-timeline
+    type: table
+    label: Signing-secret rotation and rollout timeline (NTP healthy on both sides)
+    content: |
+      time      | actor            | event
+      08:00:00  | payment-gateway  | signing key_id=v1 active (steady state before today)
+      09:10:00  | secrets-ops      | v2 secret generated and staged for rollout to both sides
+      09:14:50  | payment-gateway  | activated signing key_id=v2; all outbound webhooks now signed with v2 (was v1)
+      09:15:00  | receiver-deploy  | config push started, rolling SIG_KEY_VERSIONS=v1,v2 to receiver pods
+      09:16:00  | receiver-deploy  | rollout at 4 of 8 pods (v2 present)
+      09:17:00  | receiver-deploy  | rollout at 5 of 8 pods (v2 present); 3 pods still hold only v1
+      09:40:00  | receiver-deploy  | rollout expected to complete (all pods hold v1 and v2)
+
+      Sender and receiver clocks are NTP-synced (offsets < 30 ms). The sender activated v2 first; the
+      receiver fleet is being updated behind it via a rolling config push and is not yet fully rolled
+      out. The intended sequence was to roll the receivers first, then flip the sender; that order
+      was reversed today.
+  - id: pod-config
+    type: table
+    label: Receiver pod secret versions and per-pod outcomes since 09:15
+    content: |
+      pod    | SIG_KEY_VERSIONS | delivered | accepted | rejected | reject_rate
+      recv-1 | v1,v2            | 152       | 152      | 0        | 0%
+      recv-2 | v1,v2            | 149       | 149      | 0        | 0%
+      recv-3 | v1               | 151       | 0        | 151      | 100%
+      recv-4 | v1,v2            | 150       | 150      | 0        | 0%
+      recv-5 | v1               | 148       | 0        | 148      | 100%
+      recv-6 | v1,v2            | 153       | 153      | 0        | 0%
+      recv-7 | v1               | 150       | 0        | 150      | 100%
+      recv-8 | v1,v2            | 147       | 147      | 0        | 0%
+
+      Exactly the 3 pods holding only v1 (recv-3, recv-5, recv-7) reject 100% of the v2-signed
+      traffic they receive; the 5 pods holding v2 accept 100%. Deliveries are load-balanced roughly
+      evenly, so ~3/8 of all deliveries land on a v1-only pod. (recv-7's local log undercounts due to
+      the 09:16 rotation, but this counter is authoritative.)
+  - id: sender-egress
+    type: note
+    label: Partner sender egress and payload shape
+    content: |
+      The partner payment-gateway sends from an allowlisted NAT egress pool, CIDR 198.51.100.0/24.
+      Every rejected delivery's X-Forwarded-For is within that range; no addresses outside the
+      allowlist appear in the sampled log or in any per-pod counter. The rejected requests are
+      well-formed webhooks: they carry an x-sig-key-id header of v2, an x-sig of the expected length,
+      and an x-sig-ts within the replay window. Critically, the identical requests that a v1-only pod
+      rejects are ACCEPTED when they happen to be routed to a pod that holds v2, so the bytes and the
+      signature are intact and valid under the v2 secret.
+  - id: proxy-note
+    type: note
+    label: Ingress proxy behavior
+    content: |
+      The ingress proxy terminates TLS and opens a new connection to the receiver pods from its own
+      address, 10.0.0.7. Every request therefore arrives at a pod with src=10.0.0.7 regardless of the
+      true client; the real client address is preserved only in X-Forwarded-For. The receiver access
+      log's `src` column is thus always the proxy, so "all failures from 10.0.0.7" is an artifact of
+      reading `src` instead of `xff`. Blocking 10.0.0.7 would drop ALL inbound webhook traffic, not
+      an attacker.
+
+      The proxy forwards the request body unchanged (byte-for-byte pass-through); it does not parse
+      or re-serialize the payload. The receiver handler additionally reads rawBody (the exact
+      received bytes) before any JSON parsing, so the bytes the HMAC is computed over are the bytes
+      the sender signed.
+tags: [uncertainty, webhooks, security, hmac, secret-rotation, calibration]

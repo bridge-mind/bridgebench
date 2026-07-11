@@ -1,0 +1,324 @@
+id: conflict-dependency-versions
+version: 1.0.0
+category: hallucination
+cluster: conflicting-sources
+difficulty: expert
+title: Pre-Release Dependency Version Audit
+summary: Audit a TypeScript service's dependencies before a release, reconciling package.json, the committed lockfile, a CI install log, an internal registry mirror, a weekly dashboard, and a dated security advisory that disagree on resolved versions and vulnerability counts.
+prompt: |
+  You are running the pre-release dependency audit for the "orders-api" service. The
+  facts you need are spread across seven artifacts: package-json, package-lock,
+  registry-mirror, ci-install-log, security-advisory, dep-dashboard, and eng-note.
+  Answer the six questions below and cite the artifact id(s) behind every claim.
+
+  When two or more artifacts give different values for the same fact, name each source
+  and its value. Resolve the disagreement ONLY when an artifact provides a dated or
+  authoritative tie-breaker (the eng-note states which source wins for which kind of
+  fact); where no such rule exists, say the value cannot be stated as a single answer
+  rather than averaging, blending, or silently picking one source. If a question names
+  a package or figure that no artifact defines, say so and do not reconstruct it.
+
+  1. What version of @acme/http-kit will this release ship, according to the resolved
+     lockfile?
+
+  2. How many direct production dependencies does the service declare in package.json?
+
+  3. The dependency dashboard and the lockfile disagree on the installed version of
+     @acme/json-schema. Which version is current, and why?
+
+  4. Does the @acme/crypto-box version in the lockfile satisfy the security advisory,
+     and what version must the release ship?
+
+  5. What version of @acme/retry will this release actually ship?
+
+  6. How many known vulnerabilities affect the service's production dependencies?
+artifacts:
+  - id: package-json
+    type: config
+    label: Dependency manifest (package.json)
+    content: |
+      {
+        "name": "orders-api",
+        "version": "7.3.0",
+        "private": true,
+        "engines": { "node": ">=20" },
+        "scripts": {
+          "build": "acme-build",
+          "test": "acme-test-runner",
+          "audit:ci": "npm install && npm audit --production"
+        },
+        "dependencies": {
+          "@acme/http-kit": "^4.2.0",
+          "@acme/json-schema": "^3.4.0",
+          "@acme/crypto-box": "^1.8.0",
+          "@acme/retry": "^2.0.1",
+          "@acme/logger": "~2.7.0",
+          "@acme/config-loader": "^5.1.0",
+          "@acme/metrics": "^0.9.0",
+          "@acme/queue-client": "^3.0.0"
+        },
+        "devDependencies": {
+          "@acme/tsconfig": "^2.0.0",
+          "@acme/test-runner": "^4.1.0",
+          "@acme/lint-config": "^3.2.0",
+          "@acme/build-tool": "^1.5.0"
+        }
+      }
+
+      Note: only the eight entries under "dependencies" ship to production. The four
+      entries under "devDependencies" are build/test tooling and are not installed in a
+      production build. The semver ranges above declare what is ACCEPTABLE; they do not
+      by themselves say which exact version was resolved. For the resolved versions read
+      the committed package-lock.json.
+  - id: package-lock
+    type: code
+    label: Resolved lockfile excerpt (package-lock.json)
+    content: |
+      package-lock.json (excerpt) — committed 2026-07-02 — "lockfileVersion": 3
+      This is the exact-version pin. Only the eight direct production dependencies plus
+      two transitive packages are shown; the real file also pins the transitive tree.
+
+      {
+        "name": "orders-api",
+        "lockfileVersion": 3,
+        "packages": {
+          "node_modules/@acme/http-kit": {
+            "version": "4.2.11",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/http-kit/-/http-kit-4.2.11.tgz",
+            "integrity": "sha512-Kf9xQ2m1t7v0Zc3rN8pL5wYb4Hd6Js1Aa2Bb3Cc4Dd5Ee6Ff7Gg8Hh9Ii0Jj=="
+          },
+          "node_modules/@acme/json-schema": {
+            "version": "3.4.9",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/json-schema/-/json-schema-3.4.9.tgz",
+            "integrity": "sha512-Zx8yWp2Lq7Rm4Tn6Vk1Bd3Fg5Hj9Kc0Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj=="
+          },
+          "node_modules/@acme/crypto-box": {
+            "version": "1.8.2",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/crypto-box/-/crypto-box-1.8.2.tgz",
+            "integrity": "sha512-Pl3mQr9Xs4Vt7Wy0Zb2Cd5Fg8Hj1Kn6Aa3Bb4Cc5Dd6Ee7Ff8Gg9Hh0Ii1Jj=="
+          },
+          "node_modules/@acme/retry": {
+            "version": "2.0.1",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/retry/-/retry-2.0.1.tgz",
+            "integrity": "sha512-Rt6nMx8Ka2Vd4Yb7Zc0Ee3Gg6Hj9Lp1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk=="
+          },
+          "node_modules/@acme/logger": {
+            "version": "2.7.3",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/logger/-/logger-2.7.3.tgz",
+            "integrity": "sha512-Lg2vTn7Ba5Cd8Ef1Gh4Ij7Km0Np3Qr6Aa7Bb8Cc9Dd0Ee1Ff2Gg3Hh4Ii5Jj=="
+          },
+          "node_modules/@acme/config-loader": {
+            "version": "5.1.4",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/config-loader/-/config-loader-5.1.4.tgz",
+            "integrity": "sha512-Cf5wRm9Yb3De6Fg9Hi2Jk5Lm8No1Pq4Aa5Bb6Cc7Dd8Ee9Ff0Gg1Hh2Ii3Jj=="
+          },
+          "node_modules/@acme/metrics": {
+            "version": "0.9.7",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/metrics/-/metrics-0.9.7.tgz",
+            "integrity": "sha512-Mt7xSn1Cb4Ef7Gh0Ij3Kl6Mn9Op2Qr5Aa6Bb7Cc8Dd9Ee0Ff1Gg2Hh3Ii4Jj=="
+          },
+          "node_modules/@acme/queue-client": {
+            "version": "3.0.6",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/queue-client/-/queue-client-3.0.6.tgz",
+            "integrity": "sha512-Qc8yTn2Db5Fg8Hi1Jk4Lm7No0Pq3Rs6Aa7Bb8Cc9Dd0Ee1Ff2Gg3Hh4Ii5Jj=="
+          },
+          "node_modules/@acme/internal-uri": {
+            "version": "1.2.0",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/internal-uri/-/internal-uri-1.2.0.tgz",
+            "integrity": "sha512-Iu1vRn3Eb6Gh9Ij2Kl5Mn8Op1Qr4St7Aa8Bb9Cc0Dd1Ee2Ff3Gg4Hh5Ii6Jj=="
+          },
+          "node_modules/@acme/schema-core": {
+            "version": "3.4.9",
+            "resolved": "https://mirror.internal.acme.example/npm/@acme/schema-core/-/schema-core-3.4.9.tgz",
+            "integrity": "sha512-Sc3wUn4Fb7Hi0Jk3Lm6No9Pq2Rs5Tu8Aa9Bb0Cc1Dd2Ee3Ff4Gg5Hh6Ii7Jj=="
+          }
+        }
+      }
+
+      This lockfile is the exact set of versions a release SHIPS when the build installs
+      with `npm ci`. It records @acme/retry at 2.0.1. It was committed 2026-07-02.
+  - id: registry-mirror
+    type: table
+    label: Internal registry mirror manifest
+    content: |
+      INTERNAL REGISTRY MIRROR — manifest export — mirror.internal.acme.example/npm
+      Snapshot taken 2026-07-09T14:00Z.
+      Columns:
+        served    = version the mirror returns as latest matching the declared range
+        upstream  = latest version on the public registry at this package's last sync
+        last_sync = when this package was last synced from upstream into the mirror
+
+      package              | served  | upstream | last_sync
+      ---------------------|---------|----------|------------
+      @acme/http-kit       | 4.2.11  | 4.2.11   | 2026-07-09
+      @acme/json-schema    | 3.4.9   | 3.4.9    | 2026-07-02
+      @acme/crypto-box     | 1.8.2   | 1.8.5    | 2026-06-30
+      @acme/retry          | 2.0.4   | 2.0.4    | 2026-07-08
+      @acme/logger         | 2.7.3   | 2.7.3    | 2026-07-05
+      @acme/config-loader  | 5.1.4   | 5.1.4    | 2026-07-05
+      @acme/metrics        | 0.9.7   | 0.9.7    | 2026-07-05
+      @acme/queue-client   | 3.0.6   | 3.0.6    | 2026-07-05
+
+      Notes:
+        - @acme/crypto-box: the mirror is BEHIND upstream. Upstream already has 1.8.5
+          (the version the 2026-07-08 advisory requires), but this package last synced
+          2026-06-30 and the mirror still serves 1.8.2. Until the mirror re-syncs
+          crypto-box, an install pointed at this mirror cannot obtain 1.8.5.
+        - @acme/retry: the mirror synced 2.0.4 on 2026-07-08. That is why a fresh
+          `npm install` against this mirror now resolves the ^2.0.1 range to 2.0.4 even
+          though the committed lockfile pins 2.0.1.
+        - This manifest reports what the mirror SERVES. It does not decide which version
+          the release "should" ship; the engineering note holds the authority rules.
+  - id: ci-install-log
+    type: log
+    label: CI install log (release-audit stage)
+    content: |
+      # CI job: release-audit — pipeline stage "install" — 2026-07-09T14:22:06Z
+      # runner: ci-runner-07 — node v20.14.0 — npm v10.8.1
+      # WARNING: this stage runs `npm install`, NOT `npm ci`. `npm install` re-resolves
+      #          the semver ranges in package.json against the internal mirror and can
+      #          land on a different version than the committed lockfile pins.
+      $ npm config get registry
+      https://mirror.internal.acme.example/npm/
+      $ npm install --loglevel verbose
+      npm verbose cli /usr/local/bin/node /usr/local/bin/npm
+      npm info using npm@10.8.1
+      npm info using node@v20.14.0
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fhttp-kit 214ms
+      npm verbose reify resolved @acme/http-kit@4.2.11
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fjson-schema 188ms
+      npm verbose reify resolved @acme/json-schema@3.4.9
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fcrypto-box 197ms
+      npm verbose reify resolved @acme/crypto-box@1.8.2
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fretry 176ms
+      npm verbose reify resolved @acme/retry@2.0.4
+      npm warn reify @acme/retry: committed lockfile pins 2.0.1, but range ^2.0.1 re-resolved to 2.0.4 from the mirror
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2flogger 165ms
+      npm verbose reify resolved @acme/logger@2.7.3
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fconfig-loader 172ms
+      npm verbose reify resolved @acme/config-loader@5.1.4
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fmetrics 158ms
+      npm verbose reify resolved @acme/metrics@0.9.7
+      npm http fetch GET 200 https://mirror.internal.acme.example/npm/@acme%2fqueue-client 169ms
+      npm verbose reify resolved @acme/queue-client@3.0.6
+      npm verbose reify resolved @acme/internal-uri@1.2.0
+      npm verbose reify resolved @acme/schema-core@3.4.9
+      npm verbose reify resolved @acme/backoff@1.1.0
+      added 14 packages in 6s
+      $ npm audit --production
+      # npm audit report (advisory feed: mirror-audit, refreshed 2026-07-09)
+      @acme/crypto-box  <1.8.5
+      Severity: high
+      Prototype pollution in parseColl() — advisory ACME-ADV-2026-0071
+      fix available via `npm install @acme/crypto-box@1.8.5`
+      @acme/logger  >=2.7.0 <2.7.4
+      Severity: moderate
+      Inefficient regular expression in redact() — advisory ACME-ADV-2026-0069
+      @acme/queue-client  <3.0.7
+      Severity: moderate
+      Unbounded retry buffer — advisory ACME-ADV-2026-0064
+      @acme/http-kit  <4.2.12
+      Severity: high
+      Header injection in buildRequest() — advisory ACME-ADV-2026-0058
+      @acme/config-loader  <5.1.5
+      Severity: high
+      Insecure defaults for remote config fetch — advisory ACME-ADV-2026-0052
+      5 vulnerabilities (2 moderate, 3 high)
+      Run `npm audit fix` to address issues that have fixes.
+  - id: security-advisory
+    type: note
+    label: Security advisory ACME-ADV-2026-0071
+    content: |
+      SECURITY ADVISORY — ACME-ADV-2026-0071 — published 2026-07-08
+
+      Package: @acme/crypto-box
+      Affected versions: < 1.8.5
+      Patched version: 1.8.5
+      Severity: High (CVSS 7.5)
+
+      Summary: A prototype-pollution flaw in parseColl() lets a crafted payload set
+      properties on Object.prototype. Any service that parses untrusted input with
+      @acme/crypto-box below 1.8.5 is affected.
+
+      Action required: upgrade @acme/crypto-box to 1.8.5 or higher before the next
+      production release. This minimum-version floor OVERRIDES any lower version pinned
+      in a lockfile that was generated before this advisory's publication date.
+
+      Scope: this advisory concerns ONE package (@acme/crypto-box). It is NOT a full
+      dependency vulnerability sweep and does not state a total vulnerability count for
+      the service. Do not read a service-wide vulnerability total out of this notice.
+  - id: dep-dashboard
+    type: table
+    label: Dependency health dashboard export
+    content: |
+      DEPENDENCY HEALTH DASHBOARD — service "orders-api" — export
+      Produced by DepBoard. As-of snapshot: 2026-07-01T00:00Z.
+      Refresh cadence: weekly (next scheduled refresh 2026-07-08).
+
+      NOTE FROM DEPBOARD: this dashboard is a convenience aggregate. The versions below
+      are what the last weekly crawl observed; between crawls the repository lockfile may
+      have moved on. For the authoritative shipped version, read the committed
+      package-lock.json rather than this board.
+
+      Direct dependencies (as last crawled 2026-07-01):
+        @acme/http-kit         4.2.11
+        @acme/json-schema      3.4.0
+        @acme/crypto-box       1.8.2
+        @acme/retry            2.0.1
+        @acme/logger           2.7.3
+        @acme/config-loader    5.1.4
+        @acme/metrics          0.9.7
+        @acme/queue-client     3.0.6
+
+      Security summary:
+        Scanner: DepBoard-Scan
+        Advisory database snapshot: 2026-06-28
+        As-of: 2026-07-01
+        Known vulnerabilities in production dependencies: 3  (1 high, 2 moderate)
+        Highest severity present: high
+
+      This security summary counts what DepBoard-Scan's 2026-06-28 advisory database knew
+      about as of the 2026-07-01 crawl. A different scanner with a different advisory
+      database may return a different total.
+  - id: eng-note
+    type: note
+    label: Engineering note (dependency-audit authority rules)
+    content: |
+      ENGINEERING NOTE — dependency-audit authority rules — orders-api release
+      Author: Release Engineering. Last updated 2026-07-09.
+
+      Use these rules to adjudicate when sources disagree. Cite the rule you applied.
+
+      1. The committed package-lock.json is authoritative for the exact versions a
+         release SHIPS — but only for a build that installs with `npm ci`, which
+         installs exactly what the lockfile pins. A build that runs `npm install`
+         re-resolves the ranges in package.json against the internal mirror and can
+         land on a different version than the lockfile records.
+
+      2. If a CI install log shows a resolved version that DIFFERS from the committed
+         lockfile for the same package, that is an unreconciled DRIFT. This note does
+         NOT declare either value the winner: the shipped version cannot be stated as a
+         single value until the drift is fixed (pin the release stage to `npm ci`) and
+         re-verified. Report both values and flag it; do not silently prefer the
+         lockfile or the newer install.
+
+      3. The dependency dashboard (DepBoard export) is a convenience aggregate refreshed
+         weekly; its as-of timestamp lags the repository. When the dashboard and the
+         lockfile disagree on a dependency VERSION, the lockfile is correct and the
+         dashboard is stale. This rule covers dependency versions ONLY.
+
+      4. A security advisory published AFTER the lockfile's commit date sets a MINIMUM
+         version floor for the NAMED package that overrides the lockfile; the release
+         must bump that package to satisfy the floor before shipping. The lockfile's
+         commit date for this release is 2026-07-02.
+
+      5. Vulnerability COUNTS are not covered by rule 3. No source here is designated the
+         authoritative total vulnerability count for the service. The dashboard scanner
+         and the CI `npm audit` step query different advisory databases and are known to
+         return different totals; do not treat either as canonical and do not simply
+         pick the newer one. Report each count with its as-of date.
+
+      6. The registry mirror manifest records what the internal mirror served and when
+         it last synced. It is EVIDENCE of what an install would pull; it is not an
+         authority on which version is "correct."
+tags: [dependencies, supply-chain, conflicting-sources, hallucination]

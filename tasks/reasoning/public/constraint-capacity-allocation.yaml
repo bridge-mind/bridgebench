@@ -1,0 +1,196 @@
+id: constraint-capacity-allocation
+version: 2.1.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Three-Pool Two-Class CI Job Allocation Under Org-Wide and Per-Pool Caps
+summary: >-
+  Maximize total admitted CI jobs across three runner pools and two job classes subject to per-pool
+  burst reserve, per-pool e2e concurrency caps, an exact unit-to-e2e ratio, integrality, and two
+  org-wide caps, then evaluate three proposed schedules and two proposed cap changes.
+prompt: |
+  A CI scheduler admits build jobs across runner pools pool-large, pool-standard, and pool-arm, each
+  split into unit-test and e2e-suite classes. Maximize total admitted CI jobs/hour subject to
+  [capacity-model], the per-pool limits in [region-caps], the [global-limits], and the tie-breaking
+  [allocation-policy]. Class semantics are in [sla-definitions]. [planner-proposals] lists three
+  candidate schedules. [proposed-change] describes two cap changes. [demand-forecast] is the raw
+  queued demand.
+
+  Every admitted amount is CI jobs/hour. Answer each deliverable with exact integers; every
+  deliverable requires reconciling at least the model, both cap artifacts, and the policy.
+
+  1. Optimal allocation. Give the maximum total admitted jobs, the admitted amount per pool, and
+     each pool's unit-test/e2e split.
+  2. Binding constraints. State which constraint(s) bind at the ORG-WIDE level at the optimum, and for
+     EACH pool state which single constraint determines its admitted amount.
+  3. Proposal review. For each of Proposal Alpha, Beta, and Gamma in [planner-proposals], state
+     feasible or infeasible, and for each infeasible one name each specific constraint it
+     violates (and by how much); a proposal may violate more than one.
+  4. Change S1. Under [proposed-change] scenario S1 (org-wide e2e cap 300 -> 340, runner-slot cap
+     unchanged), give the new maximum total, the new split, and which org-wide constraint now binds.
+  5. Change S2. Under scenario S2 (org-wide runner-slot cap 1200 -> 1260 AND org-wide e2e cap 300 -> 340),
+     give the new maximum total and split, state which constraints bind, and identify the single
+     minimal further change that would raise total throughput beyond that maximum.
+artifacts:
+  - id: capacity-model
+    type: spec
+    label: Allocation model
+    content: |
+      DECISION VARIABLES (CI jobs/hour, all non-negative integers):
+        For each pool p in {large, standard, arm}: u_p (unit-test admitted), e_p (e2e-suite admitted).
+        admitted_p = u_p + e_p. total = sum over p of admitted_p.
+
+      OBJECTIVE: maximize total.
+
+      CONSTRAINTS:
+        (a) Ratio: in every pool, u_p : e_p = 3 : 1 exactly (so u_p = 3 * e_p and admitted_p is a
+            multiple of 4). This also makes the org-wide unit:e2e ratio exactly 3:1.
+        (b) Per-pool burst reserve: admitted_p <= usable_p, where usable_p is pool physical minus
+            burst reserve from [region-caps].
+        (c) Per-pool e2e cap: e_p <= e2e_cap_p from [region-caps].
+        (d) Per-pool unit-test floor: u_p >= unit_floor_p from [region-caps].
+        (e) Org-wide runner-slot cap: total <= org_runner_slot_cap in [global-limits].
+        (f) Org-wide e2e cap: (e_large + e_standard + e_arm) <= org_e2e_cap in [global-limits].
+        (g) Org-wide unit cap: (u_large + u_standard + u_arm) <= org_unit_cap in [global-limits].
+        (h) Integrality: all variables are integers; admitted_p is a multiple of 4 by (a).
+
+      SOLUTION METHOD (intended):
+        1. Compute each pool's LOCAL MAXIMUM = the largest multiple of 4 satisfying BOTH its
+           burst-reserve ceiling (admitted_p <= usable_p) and its e2e cap (admitted_p <= 4 * e2e_cap_p);
+           because u_p = 3 * e_p, the e2e cap converts directly into an admitted ceiling of 4 * e2e_cap_p.
+        2. Sum the local maxima. If that sum satisfies every org-wide cap, it is optimal.
+        3. If an org-wide cap is exceeded, the sum is infeasible as written; reduce total per
+           [allocation-policy] until every org-wide cap holds. The reduced allocation is the optimum.
+        4. Verify the unit-test floors (d) and the multiple-of-4 rule after any reduction. When
+           several allocations tie at the maximum total, [allocation-policy] selects the unique one.
+
+      WHY BOTH ORG-WIDE CAPS CAN BIND AT ONCE: the org-wide runner-slot cap limits total admitted, while
+      the org-wide e2e cap limits total e2e = total/4 under the ratio. If the sum of local maxima exceeds
+      the runner-slot cap by X admitted, it simultaneously exceeds the e2e cap by X/4 e2e whenever the
+      e2e cap is set to (runner-slot cap)/4. When both caps are tight against the same reduction, both
+      bind — the single reduction that fixes one fixes the other. Do not assume only one org-wide cap can
+      be binding; check both against the sum of local maxima.
+
+      COMMON MISTAKES (each is a distinct wrong answer):
+        - Reporting the sum of the per-pool local maxima as the optimum without applying the org-wide
+          caps at all.
+        - Assuming the numerically larger org-wide cap is the binding one; the binding cap depends on how
+          each cap compares to the sum of local maxima, not on which number is bigger.
+        - Treating a per-pool burst-reserve ceiling as the binding limit for a pool whose e2e cap is
+          actually lower (the e2e cap converts to a tighter admitted ceiling of 4 * e2e_cap).
+        - Matching the unit-test/e2e split to the demand ratio in [demand-forecast] instead of
+          holding the exact 3:1 ratio.
+        - Taking the org-wide reduction from a higher-priority pool instead of the lowest-priority one.
+  - id: sla-definitions
+    type: spec
+    label: Class and cap semantics
+    content: |
+      UNIT-TEST jobs are latency-sensitive PR-feedback jobs; E2E-SUITE jobs are deferrable bulk
+      verification runs. The exact 3:1 unit:e2e ratio is a hard downstream fan-out invariant: each
+      admitted e2e suite triggers exactly three unit-shard verification jobs downstream, so any deviation
+      breaks a contract with the downstream system — a pool MUST admit unit-test and e2e jobs in a 3:1
+      ratio, never merely "at least" 3:1.
+      BURST RESERVE is the fraction of a pool's physical slots that must stay unused as headroom for
+      urgent hotfix pipelines; it caps admitted_p but says nothing about the class split.
+      A per-pool E2E CAP is a ceiling on that pool's e2e concurrency imposed by a pool-local
+      browser/device-emulator fleet; it caps e_p only. Because admitted_p = 4 * e_p under the ratio, an
+      e2e cap of K limits admitted_p to 4K.
+      The ORG-WIDE E2E CAP is a separate shared downstream limit on total e2e across all pools; the
+      ORG-WIDE RUNNER-SLOT CAP is the shared fleet ceiling on total admitted. These are independent:
+      either can bind first depending on the numbers.
+      The UNIT-TEST FLOOR guarantees a minimum unit-test presence per pool for bounded PR feedback; it
+      is a lower bound on u_p.
+      CONSEQUENCE OF A RATIO VIOLATION: because each admitted e2e suite fans out to exactly three
+      unit-shard jobs downstream, admitting, say, 250 unit-test and 70 e2e (a 25:7 ratio) leaves
+      downstream work provisioned for 3*70 = 210 unit-shard jobs against 250 admitted — a contract
+      breach in both directions. A proposal is therefore infeasible the moment any pool's split is not
+      exactly 3:1, regardless of whether its totals fit the caps. Likewise a pool's admitted amount
+      must be a multiple of 4, since admitted = 4 * e2e under the ratio; an admitted amount that is
+      not a multiple of 4 cannot hold an exact 3:1 split at integer granularity.
+  - id: region-caps
+    type: table
+    label: Per-pool limits
+    content: |
+      pool          | physical slots (jobs/hour) | burst reserve % (must stay unused) | usable_p = physical*(1-reserve) | e2e_cap_p (max e_p) | unit_floor_p (min u_p) | queue backlog % | p95 queue-wait target ms | cost per slot-hour
+      pool-large    | 800                        | 5                                  | 760                             | 120                 | 100                    | 88              | 120                      | 1.0
+      pool-standard | 600                        | 5                                  | 570                             | 100                 | 100                    | 91              | 140                      | 1.1
+      pool-arm      | 500                        | 5                                  | 475                             | 90                  | 100                    | 79              | 160                      | 1.3
+      note: usable_p is a ceiling on admitted_p; e2e_cap_p is a ceiling on e_p only. The last three
+      columns (queue backlog, p95 queue-wait target, cost per slot-hour) are operational context and do
+      NOT enter the constraints; they are provided to tempt over-fitting and should not affect the
+      allocation.
+  - id: global-limits
+    type: config
+    label: Org-wide caps
+    content: |
+      org_runner_slot_cap: 1200          # jobs/hour, total admitted across all pools
+      org_e2e_cap: 300                   # jobs/hour, sum of e2e admitted across all pools
+      org_unit_cap: 1000                 # jobs/hour, sum of unit-test admitted across all pools
+      org_ratio_unit_to_e2e: "3:1"       # implied by per-pool 3:1
+      admitted_multiple_of: 4            # each pool's admitted_p must be a multiple of 4
+      note: the org-wide unit cap (1000) is provided for completeness; the admitted unit-test
+      total is well under it in every scenario in this task, so it never binds. Determine for yourself
+      which of the runner-slot and e2e caps actually bind.
+  - id: allocation-policy
+    type: spec
+    label: Optimization and tie-break policy
+    content: |
+      1. First maximize total admitted subject to all constraints in [capacity-model].
+      2. Pool priority for retaining jobs, highest to lowest: pool-large, then pool-standard, then
+         pool-arm.
+      3. If satisfying the org-wide caps requires reducing total below the sum of per-pool maxima,
+         remove admitted jobs from the LOWEST-priority pool first, in multiples of 4 (to keep
+         that pool's 3:1 ratio), moving up the priority order only if a pool reaches zero, until
+         every org-wide cap holds. Remove the smallest number of multiples of 4 that makes all org-wide
+         caps hold.
+      4. The per-pool maximum (before org-wide reduction) is the largest multiple of 4 that satisfies
+         that pool's burst reserve and e2e cap simultaneously.
+      ILLUSTRATIVE tie-break (invented numbers, not this task's caps): if the local maxima were
+      200 / 160 / 120 (sum 480) and the org-wide runner-slot cap were 448, the excess is 32; remove 32
+      (a multiple of 4) from the lowest-priority pool, 120 -> 88, giving 200 / 160 / 88 = 448. Only
+      the lowest pool is touched because the higher pools have priority to retain their jobs.
+      EDGE RULES:
+        - A reduction never changes a pool's 3:1 ratio: removing a multiple of 4 removes 3 unit-test
+          and 1 e2e per unit, preserving the split.
+        - A reduction may not push a pool below its unit-test floor; if the lowest-priority pool
+          would be reduced past its floor, continue the reduction in the next pool up the priority
+          order. (Not triggered in this task, but part of the policy.)
+        - When one reduction satisfies both org-wide caps at once, apply it once; do not double-count the
+          runner-slot and e2e excess as two separate reductions.
+        - The chosen allocation is the unique maximum-total allocation reachable by this procedure;
+          there is exactly one correct answer per scenario.
+  - id: planner-proposals
+    type: table
+    label: Candidate schedules
+    content: |
+      proposal | pool-large (u/e) | pool-standard (u/e) | pool-arm (u/e) | total | author's rationale
+      Alpha    | 360 / 120        | 300 / 100           | 270 / 90       | 1240  | "fill every pool to its own local maximum"
+      Beta     | 360 / 120        | 300 / 100           | 250 / 70       | 1200  | "trim pool-arm to hit 1200 total"
+      Gamma    | 375 / 125        | 300 / 100           | 225 / 75       | 1200  | "shift a little extra e2e into pool-large, the cheapest pool"
+  - id: proposed-change
+    type: diff
+    label: Proposed cap changes
+    content: |
+      Scenario S1 (evaluate independently of S2):
+        - org_runner_slot_cap: 1200   (unchanged)
+        - org_e2e_cap:         300 -> 340
+        rationale: "the browser-grid vendor raised our shared contract, so we can admit more e2e."
+      Scenario S2 (evaluate independently of S1):
+        - org_runner_slot_cap: 1200 -> 1260
+        - org_e2e_cap:         300 -> 340
+        rationale: "we also added runner fleet capacity, so raise the runner-slot cap too."
+      Per-pool limits in [region-caps] are unchanged in both scenarios; only the named org-wide caps
+      move.
+  - id: demand-forecast
+    type: table
+    label: Queued demand forecast
+    content: |
+      pool          | unit-test demand | e2e demand | total demand | week-over-week trend
+      pool-large    | 700              | 260        | 960          | +4%
+      pool-standard | 520              | 180        | 700          | +2%
+      pool-arm      | 430              | 150        | 580          | +9%
+      note: queued demand in every pool and class exceeds what the caps allow, so demand is NOT the
+      binding limit anywhere, and the trend column is context only. Demand ratios are not 3:1 (e.g.
+      pool-large is 700:260), but admitted jobs must still satisfy the exact 3:1 ratio regardless of
+      demand shape. Do not allocate to demand; allocate to the caps and the ratio.
+tags: [optimization, capacity, integer-programming, constraints, ratios]

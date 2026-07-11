@@ -1,0 +1,290 @@
+id: counterexample-scheduler-starvation
+version: 2.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: FairShare Scheduler Aging Invariant and the Reindex Wait-Clock Reset
+summary: A scheduler team claims its priority-aging design is starvation-free with a concrete wait bound. The aging code is present, the unit suite is green, yet a low-priority job never runs in production. Decide whether the shipped scheduler satisfies the claimed invariant, and if not produce the shortest concrete starvation trace, isolate the diverging spec clause and code line, and judge whether a proposed force-run patch fixes it.
+prompt: |
+  FairShare Scheduler v2 is a single-core tick scheduler. Its design uses priority aging so that a
+  low-priority job cannot be starved forever by a stream of higher-priority arrivals. The team
+  claims a starvation-free invariant with a concrete wait bound (see claim). The aging code is
+  present and the unit suite is green, but in production one low-priority job never runs while
+  higher-priority jobs keep cycling.
+
+  You are given the authoritative semantics (spec), the shipped implementation across two modules
+  (queue.ts, scheduler.ts), the green unit fixtures, a recorded production run (observed-run), a
+  finer-grained debug log (scheduler-debug), the claimed invariant with two on-call theories, and a
+  proposed patch. The authoritative behavior is defined by the spec, not by the code.
+
+  Deliverables (answer every one, with the derivation that supports it):
+
+  1. Does the shipped scheduler satisfy the claimed starvation-free invariant and its wait bound?
+     Answer yes or no.
+
+  2. If not, give the shortest concrete counterexample: an explicit arrival sequence (which jobs,
+     with which base priorities, arrive at which ticks), then a step-by-step trace of enough ticks
+     to prove that one specific job's wait never ends. At each tick show the ready-queue contents,
+     each job's enqueuedAt and effective priority, and which job is selected.
+
+  3. Contrast: run the SAME arrival sequence under the intended aging semantics from the spec. State
+     the exact tick at which the starved job would run, and the wait bound the spec guarantees.
+
+  4. Name the exact spec clause and the exact code line that diverge.
+
+  5. Give the weakest precondition on the ready queue under which the shipped reindex step changes
+     no scheduling decision, and state the minimal code change that restores the invariant for all
+     inputs.
+
+  6. Does the patch in proposed-patch fix the starvation? If not, run the same arrival sequence
+     under the patched code far enough to show the job still starves, and name the offending line.
+artifacts:
+  - id: spec
+    type: spec
+    label: FairShare Scheduler v2 semantics and the aging rule
+    content: |
+      FairShare Scheduler v2. Discrete ticks t = 0, 1, 2, ... A single ready queue holds jobs.
+      Each job j has an integer base priority basePriority(j) (higher is more urgent) and a field
+      enqueuedAt(j).
+
+      Arrivals. Zero or more new jobs may arrive at every tick, before selection. There is no upper
+      bound on arrivals; a saturating stream (a new job every tick, forever) is a legal input.
+
+      Enqueue and the wait clock. When a job enters the ready queue, enqueuedAt(j) is set once to
+      the current tick and is NOT modified while the job remains ready. The job's wait is
+      wait(j, t) = t - enqueuedAt(j); because enqueuedAt is never changed while the job is queued,
+      wait is monotonically non-decreasing until the job is selected.
+
+      Aging and effective priority. With aging step AGE_STEP (a positive integer, configured to 4):
+        effective(j, t) = basePriority(j) + floor( wait(j, t) / AGE_STEP )
+      A job's effective priority rises by one for every AGE_STEP ticks it has waited.
+
+      Selection. At each tick, after arrivals are inserted, run exactly one job: the ready job with
+      the greatest effective priority. Ties are broken FIFO, by the smallest enqueuedAt. The
+      selected job runs to completion within that tick and leaves the queue. Unselected jobs remain
+      ready and keep their enqueuedAt.
+
+      Claimed consequence. Let P_MAX be the maximum base priority ever present. A ready job with
+      base priority p has effective priority at least p + floor(wait / AGE_STEP), which exceeds
+      P_MAX once wait >= (P_MAX - p + 1) * AGE_STEP, and reaches P_MAX (winning FIFO ties against
+      newer jobs) at wait = (P_MAX - p) * AGE_STEP. Hence no ready job waits more than
+      (P_MAX - p) * AGE_STEP ticks. This bound depends on the wait clock being monotonic.
+
+      Worked example of the bound. With AGE_STEP=4, base priority p=1, and a stream whose maximum
+      base priority is P_MAX=2, the bound gives (2 - 1) * 4 = 4 ticks: a job of base priority 1
+      that arrived at tick 0 should reach effective priority 2 at tick 4 (floor(4/4)=1, so 1+1=2)
+      and win the FIFO tie against a same-effective newer job, running no later than tick 4.
+  - id: queue
+    type: code
+    label: scheduler/queue.ts (shipped)
+    content: |
+      // scheduler/queue.ts
+      export interface Job {
+        id: string;
+        basePriority: number;   // higher runs first
+        enqueuedAt: number;     // tick at which the job entered the ready queue
+      }
+
+      export class ReadyQueue {
+        private jobs: Job[] = [];
+
+        enqueue(job: Job, now: number): void {
+          job.enqueuedAt = now;
+          this.jobs.push(job);
+        }
+
+        // Called once per tick after arrivals are inserted, to keep ordering consistent.
+        reindex(now: number): void {
+          for (const j of this.jobs) j.enqueuedAt = now;   // align every wait clock to "now"
+          this.jobs.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+        }
+
+        effective(job: Job, now: number, ageStep: number): number {
+          return job.basePriority + Math.floor((now - job.enqueuedAt) / ageStep);
+        }
+
+        selectMax(now: number, ageStep: number): Job | null {
+          let best: Job | null = null;
+          for (const j of this.jobs) {
+            if (best === null) { best = j; continue; }
+            const je = this.effective(j, now, ageStep);
+            const be = this.effective(best, now, ageStep);
+            if (je > be || (je === be && j.enqueuedAt < best.enqueuedAt)) best = j;
+          }
+          return best;
+        }
+
+        remove(job: Job): void {
+          this.jobs = this.jobs.filter((j) => j.id !== job.id);
+        }
+
+        get size(): number { return this.jobs.length; }
+      }
+  - id: scheduler
+    type: code
+    label: scheduler/scheduler.ts (shipped)
+    content: |
+      // scheduler/scheduler.ts
+      import { ReadyQueue, type Job } from './queue';
+
+      export const AGE_STEP = 4;
+
+      // Advance one tick: insert arrivals, reindex, then run the highest-effective job.
+      export function step(now: number, arrivals: Job[], q: ReadyQueue): string | null {
+        for (const job of arrivals) q.enqueue(job, now);
+        q.reindex(now);                          // called unconditionally every tick
+        const chosen = q.selectMax(now, AGE_STEP);
+        if (chosen) q.remove(chosen);
+        return chosen ? chosen.id : null;
+      }
+  - id: fixtures
+    type: code
+    label: scheduler/scheduler.test.ts (green suite)
+    content: |
+      // scheduler/scheduler.test.ts  -- all passing
+      import { ReadyQueue, type Job } from './queue';
+      import { step } from './scheduler';
+
+      const job = (id: string, p: number): Job => ({ id, basePriority: p, enqueuedAt: 0 });
+
+      test('drains a static batch in base-priority order', () => {
+        const q = new ReadyQueue();
+        const order: (string | null)[] = [];
+        const arrivals = [job('a', 3), job('b', 2), job('c', 1)];   // all arrive at t=0
+        order.push(step(0, arrivals, q));   // 'a'
+        order.push(step(1, [], q));         // 'b'
+        order.push(step(2, [], q));         // 'c'
+        expect(order).toEqual(['a', 'b', 'c']);
+      });
+
+      test('a low-priority job in a batch still eventually runs', () => {
+        const q = new ReadyQueue();
+        step(0, [job('lo', 1), job('hi', 2)], q);   // 'hi' at t=0
+        const ran = step(1, [], q);                 // 'lo' runs, it is now alone
+        expect(ran).toBe('lo');
+      });
+
+      test('aging lets an older low job overtake within a small static set', () => {
+        const q = new ReadyQueue();
+        // three high jobs then one low, all at t=0; drains high-first then low, queue empties.
+        step(0, [job('h1', 2), job('h2', 2), job('lo', 1)], q); // h1
+        step(1, [], q);                                          // h2
+        const ran = step(2, [], q);                              // lo (now alone)
+        expect(ran).toBe('lo');
+      });
+
+      // NOTE: no test sustains arrivals across ticks. Every case above drains to an empty queue,
+      // so a carried-over job never competes with a fresh arrival for more than the tick it runs.
+      // The aging path is never actually exercised under sustained contention, and reindex is only
+      // ever called on queues that are about to empty, where resetting enqueuedAt is harmless.
+  - id: observed-run
+    type: table
+    label: Recorded production run under a saturating stream (AGE_STEP = 4)
+    content: |
+      Input stream: at t=0 two jobs arrive, L (base 1) and H0 (base 2). At every tick t >= 1 one
+      new job Ht (base 2) arrives. P_MAX = 2 throughout. Columns show L's enqueuedAt AFTER reindex,
+      and the effective priorities used for selection.
+
+      tick | arrived | ran | L.enqueuedAt | eff(L) | eff(Ht) | queue after
+      0    | L, H0   | H0  | 0            | 1      | 2       | {L}
+      1    | H1      | H1  | 1            | 1      | 2       | {L}
+      2    | H2      | H2  | 2            | 1      | 2       | {L}
+      3    | H3      | H3  | 3            | 1      | 2       | {L}
+      4    | H4      | H4  | 4            | 1      | 2       | {L}
+      5    | H5      | H5  | 5            | 1      | 2       | {L}
+      6    | H6      | H6  | 6            | 1      | 2       | {L}
+      7    | H7      | H7  | 7            | 1      | 2       | {L}
+      8    | H8      | H8  | 8            | 1      | 2       | {L}
+      9    | H9      | H9  | 9            | 1      | 2       | {L}
+      10   | H10     | H10 | 10           | 1      | 2       | {L}
+
+      L is still queued after tick 10 with effective priority 1. It has run zero times. Note that
+      L.enqueuedAt tracks the tick number exactly, never the constant 0 it was enqueued with; its
+      recorded wait is 0 every tick.
+  - id: scheduler-debug
+    type: log
+    label: Shipped scheduler debug log (first ticks of the production run)
+    content: |
+      Verbose per-tick output from the shipped scheduler on the observed-run stream. "reindex:"
+      lines print each job's enqueuedAt as old->new.
+
+      [t=0] arrivals: L(base=1), H0(base=2)
+      [t=0] reindex: L 0->0, H0 0->0
+      [t=0] effective: L=1, H0=2
+      [t=0] select -> H0 ; queue={L}
+      [t=1] arrivals: H1(base=2)
+      [t=1] reindex: L 0->1, H1 1->1        # L wait clock moved from 0 to 1
+      [t=1] effective: L=1, H1=2
+      [t=1] select -> H1 ; queue={L}
+      [t=2] arrivals: H2(base=2)
+      [t=2] reindex: L 1->2, H2 2->2        # L wait clock moved from 1 to 2
+      [t=2] effective: L=1, H2=2
+      [t=2] select -> H2 ; queue={L}
+      [t=3] arrivals: H3(base=2)
+      [t=3] reindex: L 2->3, H3 3->3        # L wait clock moved from 2 to 3
+      [t=3] effective: L=1, H3=2
+      [t=3] select -> H3 ; queue={L}
+      [t=4] arrivals: H4(base=2)
+      [t=4] reindex: L 3->4, H4 4->4        # L wait clock moved from 3 to 4
+      [t=4] effective: L=1, H4=2            # under monotonic wait, eff(L) would be 2 here
+      [t=4] select -> H4 ; queue={L}
+  - id: claim
+    type: note
+    label: Claimed invariant and on-call theories
+    content: |
+      Claimed invariant (starvation-freedom with bound): under FairShare Scheduler v2, every ready
+      job eventually runs; specifically a ready job with base priority p is selected within
+      (P_MAX - p) * AGE_STEP ticks of continuous waiting, where P_MAX is the maximum base priority
+      present. The team asserts the shipped code implements this because effective() adds the aging
+      term.
+
+      Two on-call theories were proposed and are NOT necessarily correct:
+        T1: "AGE_STEP = 4 is too coarse; the aging term grows too slowly. Lower AGE_STEP to 1 and
+            the low-priority job will catch up." (Consider: with AGE_STEP=1, what is floor(0/1)?)
+        T2: "The scheduler is really just strict-priority FIFO and the aging code is dead. The fix
+            is to add a force-run counter that runs any job passed over K times." A patch built on
+            T2 is attached as proposed-patch.
+
+      A third suggestion, quickly dismissed, was that the counterexample requires forbidding new
+      arrivals; but the spec explicitly permits a new job every tick, so any valid counterexample
+      may use a saturating stream.
+
+      Do not assume any theory is right. Decide the invariant on the semantics, and only then judge
+      the theories and the patch.
+  - id: proposed-patch
+    type: diff
+    label: Proposed force-run patch (built on theory T2)
+    content: |
+      Adds a skip counter and force-runs any job skipped FORCE_AFTER times. FORCE_AFTER = 3.
+      scheduler.step() is also updated to increment skips on every ready job that was not selected
+      this tick (one increment per tick per unselected job).
+
+       export interface Job {
+         id: string;
+         basePriority: number;
+         enqueuedAt: number;
+      +  skips: number;          // number of ticks this job has been passed over
+       }
+
+       enqueue(job: Job, now: number): void {
+         job.enqueuedAt = now;
+      +  job.skips = 0;
+         this.jobs.push(job);
+       }
+
+       reindex(now: number): void {
+         for (const j of this.jobs) j.enqueuedAt = now;
+      +  for (const j of this.jobs) j.skips = 0;      // keep counters aligned with the wait clock
+         this.jobs.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+       }
+
+       selectMax(now: number, ageStep: number): Job | null {
+      +  const forced = this.jobs.find((j) => j.skips >= 3);   // FORCE_AFTER = 3
+      +  if (forced) return forced;
+         let best: Job | null = null;
+         // ... unchanged effective-priority selection ...
+       }
+
+      Author's note: "Any job skipped three times gets force-run. Starvation is now impossible. I
+      left reindex() as-is and just aligned the new counter with it for consistency."
+tags: [scheduling, fairness, starvation, aging, formal-reasoning, counterexample]
