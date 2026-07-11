@@ -1,0 +1,45 @@
+name: Ladder audit report
+description: Report a journal verification or reproducibility failure.
+title: '[Audit]: '
+labels: ['audit']
+body:
+  - type: markdown
+    attributes:
+      value: Include public journal evidence only. Redact credentials and private filesystem paths.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Arena
+      options:
+        - Reasoning
+        - Hallucination
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Journal source
+      description: Link to the published journal or identify the release.
+    validations:
+      required: true
+  - type: input
+    id: line
+    attributes:
+      label: First failing line
+      placeholder: '42'
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Verifier output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction command
+      render: shell
+    validations:
+      required: true

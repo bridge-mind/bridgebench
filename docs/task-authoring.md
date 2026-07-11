@@ -11,33 +11,37 @@ Every task is split into a **public half** (what competitors and everyone else s
 - Exactly **12 tasks per category**, **2 per cluster**, unique IDs.
 - Public and private halves must agree on `id` and `version`.
 - Every `requiredEvidence` entry in the private half must name an existing public artifact ID.
+- Public artifact IDs must be unique and the YAML filename must match the task ID.
+- Rendered competitor and worst-case judge payloads must fit the engine's prompt budget.
 - A task's `category` must match its pack directory and its `cluster` must belong to that category.
+
+Use `npm run tasks -- validate --file <path>` to validate one proposed public task without enforcing full-pack balance.
 
 ## Public half schema (`tasks/<category>/public/<id>.yaml`)
 
-| Field | Constraints |
-|---|---|
-| `id` | kebab-case, regex-validated |
-| `version` | semver; bump on any content change (hashes are journaled) |
-| `category` | `reasoning` \| `hallucination` |
-| `cluster` | one of the category's six clusters (below) |
-| `difficulty` | `hard` \| `expert` (current packs are all `expert`) |
-| `title`, `summary` | summary ≤ 500 chars |
-| `prompt` | ≤ 10k chars — the numbered deliverables live here |
-| `artifacts[]` | 1–20 of `{id, type, label, content ≤ 40k}`; `type` ∈ code, log, config, spec, diff, table, note |
-| `tags[]` | optional, ≤ 60 chars each |
+| Field              | Constraints                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------- |
+| `id`               | kebab-case, regex-validated                                                                     |
+| `version`          | semver; bump on any content change (hashes are journaled)                                       |
+| `category`         | `reasoning` \| `hallucination`                                                                  |
+| `cluster`          | one of the category's six clusters (below)                                                      |
+| `difficulty`       | `hard` \| `expert` (current packs are all `expert`)                                             |
+| `title`, `summary` | summary ≤ 500 chars                                                                             |
+| `prompt`           | ≤ 10k chars — the numbered deliverables live here                                               |
+| `artifacts[]`      | 1–20 of `{id, type, label, content ≤ 40k}`; `type` ∈ code, log, config, spec, diff, table, note |
+| `tags[]`           | optional, ≤ 60 chars each                                                                       |
 
 Tasks are deliberately heavyweight: five to eight interlocking artifacts (~9–18k characters) and four to ten numbered deliverables, so a match exercises real deliberation budget instead of a one-screen skim.
 
 ## Private half schema (overlay: `tasks/<category>/private/<id>.yaml`)
 
-| Field | Purpose |
-|---|---|
-| `id`, `version` | must match the public half |
-| `expectedResolution` | ≤ 10k prose — the defensible resolution for every deliverable |
-| `requiredEvidence[]` | public artifact IDs a strong answer must ground itself in |
-| `disqualifyingErrors[]` | the planted decoy conclusions, named explicitly |
-| `rubric` | `{correctness, evidenceGrounding, constraintHandling, completeness}` |
+| Field                   | Purpose                                                              |
+| ----------------------- | -------------------------------------------------------------------- |
+| `id`, `version`         | must match the public half                                           |
+| `expectedResolution`    | ≤ 10k prose — the defensible resolution for every deliverable        |
+| `requiredEvidence[]`    | public artifact IDs a strong answer must ground itself in            |
+| `disqualifyingErrors[]` | the planted decoy conclusions, named explicitly                      |
+| `rubric`                | `{correctness, evidenceGrounding, constraintHandling, completeness}` |
 
 ## Reasoning clusters
 
@@ -63,11 +67,14 @@ Traps are internal to the artifacts, so ground truth stays verifiable; every tas
 - **conflicting-sources** — artifacts disagree; silent blending or unacknowledged picking is the failure;
 - **citation-fidelity** — exact values, quotes, and attributions under dense near-duplicate detail.
 
-**Authoring rule:** the private half classifies every deliverable as *supported*, *false-premise*, or *not-determinable*, with the full trap inventory. Where a task tests absence (entity fabrication, missing evidence), an artifact should self-declare exhaustiveness (e.g. a spec that states it lists the complete API surface), so "doesn't exist" is provable from the material.
+**Authoring rule:** the private half classifies every deliverable as _supported_, _false-premise_, or _not-determinable_, with the full trap inventory. Where a task tests absence (entity fabrication, missing evidence), an artifact should self-declare exhaustiveness (e.g. a spec that states it lists the complete API surface), so "doesn't exist" is provable from the material.
 
 ## Process
 
 1. Author both halves locally (public in your fork, private in the overlay checkout).
 2. `npm run tasks -- validate` until clean — with the overlay present it validates pairing and evidence; without it, the public schema and pack balance.
 3. Bump `version` on any edit to either half; the journal hashes both, so silent drift is detectable.
-4. External contributors: propose the public half in an issue/PR; hidden references go through a private channel so they stay out of training data. Private halves are published when their pack retires (see [private-packs.md](private-packs.md)).
+4. External contributors: validate and propose the public half through the task-proposal issue form. Do not include a hidden reference.
+5. After a public task is accepted, a maintainer starts a private handoff through the GitHub account attached to the issue. The private half never appears in the public issue or pull request.
+6. Replacing a live task requires a pack-rotation plan that preserves the 12-task, two-per-cluster invariant.
+7. Private halves are published when their pack retires (see [private-packs.md](private-packs.md)).

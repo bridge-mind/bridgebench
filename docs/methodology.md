@@ -4,9 +4,10 @@ Every ranking BridgeBench publishes is the fold of an append-only match journal.
 
 ## Run identity and scheduling
 
-A **run** is deterministic given `(category, seed, matches)` and the task packs:
+A **run** is deterministic from a versioned manifest:
 
-- The run ID is a SHA-256 prefix over the category, seed, match count, and the hashes of every task in the pack. Same inputs → same `run-<hash>` → same schedule.
+- The manifest binds the category, seed, match count, engine and methodology versions, sorted competitor and judge slugs, request policies, task hashes, and competitor/judge prompt-policy hashes.
+- The run ID is a SHA-256 prefix of the canonical manifest. Every journal line records the full manifest hash.
 - The scheduler builds all `(competitorA, competitorB, task)` combinations and greedily picks the next match by lowest exposure, ordered by: max per-model exposure → summed model exposure → task exposure → pair exposure. Ties break by a seeded mulberry32 PRNG, so balance is reproducible, not incidental (`src/scheduler.ts`).
 - Which competitor sits on side A is randomized per match from the same seeded stream.
 - Match IDs are stable hashes; re-running a schedule with `--resume` skips journaled match IDs exactly. Repeating a completed schedule without `--resume` is rejected.
@@ -25,7 +26,7 @@ Judged matches go to a fixed, cross-vendor panel of three model judges. Independ
 2. **Per-judge order permutation.** Whether A/B are swapped for a given judge is a deterministic hash of `matchId|judgeId`, so position bias can't systematically favor one side and the permutation is replayable.
 3. **Isolation.** A judge receives the task, the hidden reference (expected resolution, required evidence, disqualifying errors, rubric), and the two anonymous answers — never identities, ratings, costs, or the other judges' votes.
 4. **Forced choice, structured output.** Verdicts are JSON-schema enforced (`MODEL_A` or `MODEL_B`, confidence, rationale, four-criteria commentary, violations). A malformed verdict gets one retry, then the judge **abstains**.
-5. **Majority.** Two valid votes for the same side decide the match. Agreement is recorded as `unanimous` (3–0), `split` (2–1), or `insufficient` (no majority → no-contest).
+5. **Majority.** Two valid votes for the same side decide the match. Agreement is recorded as `unanimous` (three winner votes), `split` (exactly two winner votes, including a 2–0 panel with one abstention), or `insufficient` (no majority → no-contest).
 
 Judge prompts are category-specific: the reasoning panel treats hedging on a determinable deliverable as an error and disqualifying errors as near-decisive; the hallucination panel weighs fabrication heaviest and also penalizes refusing deliverables the artifacts do support.
 
@@ -39,11 +40,11 @@ The hidden reference is **judging context, not an oracle** — no deterministic 
 ## The journal is the source of truth
 
 - Every completed match is appended to `results/<category>/journal.jsonl` **before** any report is rebuilt. Snapshots and leaderboards are derived atomically and may be deleted and rebuilt at any time.
-- Every line records: methodology version, run ID, seed, schedule index, the task's ID/version/cluster and the SHA-256 of **both** task halves (`publicHash`, `privateHash`), both full competitor responses with token/cost/latency accounting, the panel's votes and rationales, `eloBefore`/`eloAfter` for both models, and the match cost.
+- Every line records: methodology version, run ID and manifest hash, seed, schedule index, the task's ID/version/cluster and the SHA-256 of **both** task halves (`publicHash`, `privateHash`), both full competitor responses with token/cost/latency accounting, the panel's votes and rationales, `eloBefore`/`eloAfter` for both models, and the match cost.
 - The task hashes make drift externally detectable: if a task file changes after a match ran, the recorded hash no longer matches the file. When a retired pack's private halves are published, `privateHash` proves they are byte-identical to what the judges actually used.
 - OpenRouter generation IDs are journaled per response; `npm run arena -- generation <id>` fetches the provider's own token/cost record for independent cross-checking.
 
-See [replay-elo.md](replay-elo.md) for the verification recipe.
+`npm run arena -- verify` schema-validates every line, checks outcome and panel invariants, replays points and Elo, and validates referenced run manifests. Reports and resume state use the same verified fold. See [replay-elo.md](replay-elo.md) for the complete workflow.
 
 ## Adversarial-input posture
 
