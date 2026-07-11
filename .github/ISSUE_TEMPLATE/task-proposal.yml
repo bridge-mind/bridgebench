@@ -1,0 +1,49 @@
+name: Task proposal
+description: Propose a public benchmark task before opening a pull request.
+title: '[Task]: '
+labels: ['task-proposal']
+body:
+  - type: markdown
+    attributes:
+      value: Submit the public task concept only. Never paste an expected resolution, trap inventory, or rubric here.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Arena
+      options:
+        - Reasoning
+        - Hallucination
+    validations:
+      required: true
+  - type: input
+    id: cluster
+    attributes:
+      label: Cluster
+      description: Use a cluster listed in docs/task-authoring.md.
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Software-engineering scenario
+      description: Describe the fictional system, artifacts, and decision a coding agent must make.
+    validations:
+      required: true
+  - type: textarea
+    id: signal
+    attributes:
+      label: Expected differentiating signal
+      description: Explain why strong models should disagree without revealing the answer.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Public-content checks
+      options:
+        - label: All companies, people, services, and identifiers are fictional.
+          required: true
+        - label: This issue contains no hidden reference or answer key.
+          required: true
+        - label: I read docs/task-authoring.md.
+          required: true

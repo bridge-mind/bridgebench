@@ -35,22 +35,51 @@ V3 is **arena-first**: models compete head-to-head on the same task, three indep
 
 It's built by [BridgeMind](https://bridgemind.ai), the agentic organization behind BridgeSpace, BridgeVoice, and BridgeAgent. We benchmark models because we ship with them daily — the leaderboard is the same data we use to pick our own teammates.
 
-> **Where did the season engine go?** This repo previously hosted the Season 1 *season-engine* alpha (UI Bench: 10 Three.js tasks scored in a real browser, ranked by community A/B voting). That work is preserved intact on the [`season-engine-alpha`](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha) branch — its model registry, provider layer, and browser-determinism harness will return as future arenas. The autonomous arena you're looking at replaces it as BridgeBench's core mechanism: same transparency principles, but every ranking now traces to pairwise matches instead of suite scores. Season framing resets with this pivot; nothing measured by the old engine mixes with arena Elo.
+## Architecture
+
+```text
+public task pack ─┐
+                  ├─> arena runner ─> blind judge panel ─> append-only journal
+private overlay ──┘                                          │
+                                                             ├─> verifier ─> reports
+                                                             └─> publisher ─> bridgebench.ai
+```
+
+The local journal is the execution record. Snapshots, leaderboards, and the bridgebench.ai API are derived views. `arena verify` validates every journal line and replays Elo before a report or publish operation trusts it.
+
+Public task prompts live in this repository. Active hidden references live in a separate private overlay. They are sent to the configured model judges during a match and may be synced to the private API store by maintainers. Withholding them reduces benchmark contamination risk; it does not make third-party processing impossible. The complete boundary is documented in [Private packs](docs/private-packs.md).
+
+## Public-clone quickstart
+
+Requirements: Node.js 20.19 or newer and npm 10 or newer.
+
+```bash
+git clone https://github.com/bridge-mind/bridgebench.git
+cd bridgebench
+npm ci
+npx playwright install chromium
+
+npm run tasks -- validate
+npm run check
+npm run arena -- verify --category reasoning --journal test/fixtures/journals/valid.jsonl
+```
+
+These commands need no API key and no private overlay. They validate the public packs, run offline checks, and replay a synthetic journal.
 
 ## The arenas
 
 Two independent arenas ship today, each with its own task pack, journal, Elo ladder, and leaderboard:
 
-| Arena | What it measures | What a winning answer looks like |
-|---|---|---|
-| **Reasoning** | Inference depth. Every task is fully determinable from its artifacts — interlocking specs, logs, code, and configs with planted decoy paths. | Derives the one defensible resolution for every numbered deliverable, with the inference chain and artifact citations. |
+| Arena             | What it measures                                                                                                                                                                      | What a winning answer looks like                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Reasoning**     | Inference depth. Every task is fully determinable from its artifacts — interlocking specs, logs, code, and configs with planted decoy paths.                                          | Derives the one defensible resolution for every numbered deliverable, with the inference chain and artifact citations.                                                                                 |
 | **Hallucination** | Epistemic discipline. Tasks are seeded with false premises, missing evidence, fabrication bait (plausible entities that don't exist), conflicting sources, and near-duplicate values. | Answers the supported deliverables exactly, corrects false premises with the contradicting evidence, names precisely what is missing — and never invents entities, values, quotes, or blended figures. |
 
 The two arenas share the arena contract (pairing, blind three-judge panel, Elo) but never share ratings: a model's reasoning Elo says nothing about its hallucination Elo. Judges receive category-specific instructions — the reasoning panel punishes hedging on determinable questions, the hallucination panel weighs fabrication heaviest and treats blanket refusal as an error too.
 
 The same contract expands to security, debugging, and refactoring arenas next.
 
-## Autonomous match lifecycle
+## Match lifecycle
 
 1. A seeded scheduler selects one task and two distinct competitors while balancing exposure. The same seed always produces the same schedule.
 2. Both competitors receive identical task context and run concurrently. They don't know they're in a match.
@@ -70,29 +99,24 @@ The full protocol — scheduling math, anonymization rules, vote resolution, dri
 
 All requests go through [OpenRouter](https://openrouter.ai) using exact, pinned model slugs. `latest` aliases are prohibited. Before a paid run, the CLI verifies each ID and canonical slug against OpenRouter and confirms that judges still support structured output.
 
-We say this plainly: the arena measures models *through one aggregator's routing*, not direct provider APIs. In exchange, every competitor and judge runs over the identical transport, and OpenRouter's per-generation records (`arena generation <id>`) give independently checkable token and cost accounting for every journal line.
+The arena measures models _through one aggregator's routing_, not direct provider APIs. Every competitor and judge uses the same transport. OpenRouter's per-generation records (`arena generation <id>`) provide an independent accounting source for tokens, cost, and provider routing.
 
-Competitors: GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, Claude Fable 5, Claude Opus 4.8, MiniMax M3, MiniMax M2.7, and Kimi K2.7 Code.
-Judges: Gemini 3.1 Pro Preview, Grok 4.5, and GLM 5.2. Judges are not eligible competitors.
+The current roster and request policies are defined once in [`src/models.ts`](src/models.ts). Judges are never eligible competitors.
 
-## Setup
+## Maintainer/operator setup
 
-Requirements: Node.js 20+ and an OpenRouter API key with an account-level spending limit.
+Paid runs require both:
 
-```bash
-git clone https://github.com/bridge-mind/bridgebench.git
-cd bridgebench && npm install
-export OPENROUTER_API_KEY='set-this-in-your-shell'
+1. `OPENROUTER_API_KEY` in the process environment;
+2. `BRIDGEBENCH_PRIVATE_DIR` pointing to the private-pack checkout.
 
-npm run tasks -- validate     # validates the public packs — no key or private overlay needed
-npm run models -- validate    # verifies every pinned slug against OpenRouter
-```
+Set an account-level spending limit before running matches. Never commit either value.
 
 ## Run an arena
 
 ```bash
-# Default: 12 reasoning matches, reproducible seed, $25 stop boundary
-npm run arena -- run
+# Reasoning: 12 matches, reproducible seed, $25 stop boundary
+npm run arena -- run --category reasoning
 
 # The hallucination arena — same contract, its own tasks, journal, and Elo
 npm run arena -- run --category hallucination
@@ -101,27 +125,32 @@ npm run arena -- run --category hallucination
 npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40
 
 # Resume the exact deterministic schedule after interruption or budget stop
-npm run arena -- run --matches 24 --seed july-calibration --max-cost-usd 40 --resume
+npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40 --resume
 
 # Rebuild reports for both arenas without API calls (or one: --category reasoning)
 npm run report
 
-# Maintainers: sync outputs to the bridgebench.ai API (admin key required; idempotent)
-npm run tasks -- publish
+# Verify before publishing
+npm run arena -- verify --category hallucination
+
+# Maintainers: an explicit API target and category are required
+# Set BRIDGEBENCH_API_URL and BRIDGEBENCH_ADMIN_KEY privately first.
+npm run tasks -- publish --category hallucination
 npm run arena -- publish --category reasoning
 ```
 
-**Judged runs need the hidden references.** Task prompts are public in this repo; the expected resolutions and comparative rubrics that judges use are not, so they can't be trained against. Runs require `BRIDGEBENCH_PRIVATE_DIR` to point at a private-pack checkout — see [docs/private-packs.md](docs/private-packs.md) for the layout, the contamination guard, and the publish-at-retirement policy. Everything else — validation, report rebuilds, triage, the dashboard's read views — works from the public halves alone.
+Category, seed, match count, model roster, task hashes, prompt policy, methodology, and engine version define the run manifest. `--resume` continues only the matching deterministic schedule.
 
 Results are local, ignored by Git, and kept per arena:
 
 ```text
-results/<category>/journal.jsonl      # append-only source of truth (category = reasoning | hallucination)
-results/<category>/snapshot.json      # derived atomically; delete and rebuild any time
+results/<category>/journal.jsonl      # append-only execution record
+results/<category>/runs/<run-id>.json # versioned run manifest
+results/<category>/snapshot.json      # verified, derived view
 results/<category>/leaderboard.md
 ```
 
-A repeated schedule is rejected unless `--resume` is explicit. To verify any published ladder yourself, see [docs/replay-elo.md](docs/replay-elo.md).
+A repeated schedule is rejected unless `--resume` is explicit. See [Replay Elo](docs/replay-elo.md) to audit a published ladder.
 
 ## Local dashboard
 
@@ -159,27 +188,27 @@ The loop: run → read the auto-printed health report → chase flags with the r
 ```
 bridgebench/
 ├── src/
-│   ├── cli.ts             # models · tasks · arena run/publish/triage/generation · report
+│   ├── cli.ts             # thin executable entrypoint
+│   ├── commands.ts        # injectable CLI construction and command handlers
 │   ├── arena.ts           # match loop: forfeits, health stop, budget stop
 │   ├── scheduler.ts       # seeded, exposure-balanced deterministic scheduling
 │   ├── judges.ts          # anonymization, per-judge A/B permutation, majority vote
 │   ├── tasks.ts           # pack loader + public/private overlay resolution
+│   ├── verification.ts    # schema validation + deterministic journal replay
 │   ├── elo.ts / store.ts / report.ts / triage.ts
 │   └── dashboard/         # localhost-only control plane (SSE)
 ├── tasks/
 │   ├── reasoning/public/       # 12 public task prompts
 │   └── hallucination/public/   # 12 public task prompts
 ├── ui/                    # local dashboard SPA (React + Vite)
-├── test/                  # offline vitest suites (mock gateway, no credits spent)
-└── docs/                  # methodology · task authoring · private packs · replay Elo
+├── test/                  # deterministic offline tests and fixtures
+└── docs/                  # indexed protocol and contributor references
 ```
 
 ## Development
 
 ```bash
-npm run typecheck
-npm test
-npm run build
+npm run check
 ```
 
 Tests use a mock OpenRouter gateway and never spend credits — they pass from a fresh public clone with no API key and no private overlay. Live catalog validation and arena runs are operator-invoked only.
@@ -188,9 +217,15 @@ Tests use a mock OpenRouter gateway and never spend credits — they pass from a
 
 BridgeBench is open source and open to builders:
 
-- **Propose tasks.** Public halves are authored in the open; hidden references go through a private channel so they stay uncontaminated. Start from [docs/task-authoring.md](docs/task-authoring.md) and open an issue.
-- **Audit a ladder.** Every published ranking replays from its journal — [docs/replay-elo.md](docs/replay-elo.md). If a number doesn't reproduce, open an issue.
+- **Propose tasks.** Validate one public task with `npm run tasks -- validate --file <path>`, then open a task proposal.
+- **Audit a ladder.** Run `arena verify` against the published journal. File an audit report if it fails.
 - **Extend the contract.** New arenas (security, debugging, refactoring) reuse the same match lifecycle; the season-engine branch holds a provider layer and browser harness earmarked for future suites.
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [docs index](docs/README.md).
+
+## Project history
+
+This repository previously hosted the Season 1 _season-engine_ alpha: ten Three.js tasks scored in a browser and ranked by community A/B voting. That code remains on the [`season-engine-alpha`](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha) branch. Its results never mix with arena Elo.
 
 ## License
 

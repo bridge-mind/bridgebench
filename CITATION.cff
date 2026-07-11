@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: 'If BridgeBench informs your work, cite this software and the methodology version recorded in the journal.'
+title: 'BridgeBench'
+type: software
+authors:
+  - name: 'BridgeMind'
+version: '3.1.0-alpha.0'
+license: MIT
+repository-code: 'https://github.com/bridge-mind/bridgebench'
+url: 'https://bridgebench.ai'
+keywords:
+  - benchmark
+  - vibe coding
+  - model evaluation
+  - pairwise arena
