@@ -4,6 +4,10 @@
   "description": "BridgeBench V3 — autonomous pairwise arenas: reasoning and hallucination",
   "type": "module",
   "private": true,
+  "packageManager": "npm@10.9.8",
+  "bin": {
+    "bridgebench": "./dist/src/cli.js"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -11,20 +15,27 @@
   },
   "homepage": "https://bridgebench.ai",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0",
+    "npm": ">=10"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && vite build --config ui/vite.config.ts",
+    "check": "npm run contamination:check && npm run tasks -- validate && npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run test:ui",
+    "contamination:check": "node --import tsx src/contamination-check.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:ui": "playwright test --config playwright.config.ts",
     "test:watch": "vitest",
-    "models": "node --env-file-if-exists=.env --import tsx src/cli.ts models",
-    "tasks": "node --env-file-if-exists=.env --import tsx src/cli.ts tasks",
-    "arena": "node --env-file-if-exists=.env --import tsx src/cli.ts arena",
+    "models": "node --import tsx src/cli.ts models",
+    "tasks": "node --import tsx src/cli.ts tasks",
+    "arena": "node --import tsx src/cli.ts arena",
     "triage": "node --import tsx src/cli.ts arena triage",
     "report": "node --import tsx src/cli.ts report",
-    "dashboard": "node --env-file-if-exists=.env --import tsx src/dashboard/server.ts"
+    "dashboard": "node --import tsx src/dashboard/server.ts"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
@@ -38,13 +49,19 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.5",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.63.0",
     "vite": "^7.2.4",
     "vitest": "^4.1.10"
   }

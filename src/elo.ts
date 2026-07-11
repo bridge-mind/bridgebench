@@ -14,6 +14,6 @@ export function applyEloWin(
   const scoreA = winner === 'a' ? 1 : 0;
   return {
     ratingA: ratingA + ELO_K * (scoreA - expectedA),
-    ratingB: ratingB + ELO_K * ((1 - scoreA) - (1 - expectedA)),
+    ratingB: ratingB + ELO_K * (1 - scoreA - (1 - expectedA)),
   };
 }

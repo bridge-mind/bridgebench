@@ -1,0 +1,12 @@
+assets/
+docs/
+dist/
+dist-ui/
+node_modules/
+package-lock.json
+playwright-report/
+*.md
+results/
+tasks/
+test-results/
+test/fixtures/**/*.jsonl

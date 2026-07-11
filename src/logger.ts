@@ -10,7 +10,8 @@ const KEY_PATTERNS: Array<[RegExp, string]> = [
 
 export function redactSecrets(value: string): string {
   let redacted = value;
-  for (const [pattern, replacement] of KEY_PATTERNS) redacted = redacted.replace(pattern, replacement);
+  for (const [pattern, replacement] of KEY_PATTERNS)
+    redacted = redacted.replace(pattern, replacement);
   return redacted;
 }
 
@@ -81,9 +82,12 @@ export class FileArenaLogger implements ArenaLogger {
   }
 }
 
-function formatConsoleLine(entry: { level: LogLevel; event: string } & Record<string, unknown>): string {
+function formatConsoleLine(
+  entry: { level: LogLevel; event: string } & Record<string, unknown>,
+): string {
   const { ts, level, event, ...rest } = entry;
   const detail = JSON.stringify(rest);
-  const suffix = detail === '{}' ? '' : ` ${detail.length > 400 ? `${detail.slice(0, 400)}…` : detail}`;
+  const suffix =
+    detail === '{}' ? '' : ` ${detail.length > 400 ? `${detail.slice(0, 400)}…` : detail}`;
   return `[bridgebench ${String(ts).slice(11, 19)}] ${level.toUpperCase().padEnd(5)} ${event}${suffix}`;
 }
