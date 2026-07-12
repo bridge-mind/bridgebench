@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { judgePromptPolicyHash } from './judges.js';
-import { listModels } from './models.js';
+import { listModels, resolveCompetitorRoster } from './models.js';
 import { competitorPromptPolicyHash } from './tasks.js';
 import {
   BenchmarkCategorySchema,
@@ -29,6 +29,13 @@ const ManifestModelSchema = z.object({
   }),
 });
 
+const ManifestCompetitorSchema = ManifestModelSchema.extend({
+  role: z.literal('competitor'),
+});
+const ManifestJudgeSchema = ManifestModelSchema.extend({
+  role: z.literal('judge'),
+});
+
 export const RunManifestSchema = z.object({
   version: z.literal(RUN_MANIFEST_VERSION),
   methodologyVersion: z.string().min(1),
@@ -36,8 +43,28 @@ export const RunManifestSchema = z.object({
   category: BenchmarkCategorySchema,
   seed: z.string(),
   matches: z.number().int().positive(),
-  competitors: z.array(ManifestModelSchema),
-  judges: z.array(ManifestModelSchema),
+  competitors: z
+    .array(ManifestCompetitorSchema)
+    .min(2)
+    .superRefine((models, context) => {
+      if (new Set(models.map((model) => model.id)).size !== models.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Competitor manifest entries must be unique',
+        });
+      }
+    }),
+  judges: z
+    .array(ManifestJudgeSchema)
+    .length(3)
+    .superRefine((models, context) => {
+      if (new Set(models.map((model) => model.id)).size !== models.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Judge manifest entries must be unique',
+        });
+      }
+    }),
   tasks: z.array(
     z.object({
       id: z.string().min(1),
@@ -88,14 +115,20 @@ export function runIdFromManifest(manifest: RunManifest): string {
 }
 
 export function createRunManifest(
-  config: Pick<ArenaRunConfig, 'category' | 'seed' | 'matches'>,
+  config: Pick<ArenaRunConfig, 'category' | 'seed' | 'matches' | 'competitorIds'>,
   tasks: CompleteArenaTask[],
+  resolvedCompetitors: readonly ModelRegistryEntry[] = resolveCompetitorRoster(
+    config.competitorIds,
+  ),
 ): RunManifest {
-  const competitors = listModels('competitor')
-    .map(manifestModel)
+  const canonicalCompetitors = resolveCompetitorRoster(
+    resolvedCompetitors.map((model) => model.id),
+  );
+  const competitors = canonicalCompetitors
+    .map((model) => ({ ...manifestModel(model), role: 'competitor' as const }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const judges = listModels('judge')
-    .map(manifestModel)
+    .map((model) => ({ ...manifestModel(model), role: 'judge' as const }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const manifest: RunManifest = {
     version: RUN_MANIFEST_VERSION,

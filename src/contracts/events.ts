@@ -15,6 +15,7 @@ export interface ArenaEventDataMap {
     seed: string;
     matches: number;
     maxCostUsd: number;
+    competitorIds: string[];
   };
   'match.started': {
     matchId: string;
@@ -67,6 +68,16 @@ export interface ArenaEventDataMap {
     completed: number;
     costUsd: number;
     maxCostUsd: number;
+  };
+  'run.cancellation-requested': {
+    runId: string;
+    completed: number;
+    costUsd: number;
+  };
+  'run.cancelled': {
+    runId: string;
+    completed: number;
+    costUsd: number;
   };
   'run.completed': {
     runId: string;

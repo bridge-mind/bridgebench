@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Command } from 'commander';
 
-import { buildProgram } from '../src/commands.js';
+import {
+  arenaRunConfigFromOptions,
+  buildProgram,
+  type ArenaRunCliOptions,
+} from '../src/commands.js';
 import { publishTarget, resolveApiConfig } from '../src/publish.js';
+import { ENGINE_VERSION } from '../src/version.js';
 
 function overrideExits(command: Command): Command {
   command.exitOverride();
@@ -19,7 +24,7 @@ describe('CLI contract', () => {
       }),
     );
     expect(program.name()).toBe('bridgebench');
-    expect(program.version()).toBe('3.1.0-alpha.0');
+    expect(program.version()).toBe(ENGINE_VERSION);
     expect(program.helpInformation()).toContain('Autonomous BridgeBench arenas');
   });
 
@@ -54,6 +59,47 @@ describe('CLI contract', () => {
         'zero',
       ]),
     ).rejects.toMatchObject({ code: 'commander.invalidArgument' });
+  });
+
+  it('collects repeatable competitor roster flags', () => {
+    const program = overrideExits(
+      buildProgram({
+        stdout() {},
+        stderr() {},
+      }),
+    );
+    const arena = program.commands.find((command) => command.name() === 'arena')!;
+    const run = arena.commands.find((command) => command.name() === 'run')!;
+    run.parseOptions([
+      '--category',
+      'reasoning',
+      '--competitor',
+      'openai/gpt-5.6-sol',
+      '--competitor',
+      'anthropic/claude-fable-5',
+    ]);
+
+    expect(run.opts().competitor).toEqual(['openai/gpt-5.6-sol', 'anthropic/claude-fable-5']);
+    expect(arenaRunConfigFromOptions(run.opts() as ArenaRunCliOptions)).toMatchObject({
+      category: 'reasoning',
+      competitorIds: ['openai/gpt-5.6-sol', 'anthropic/claude-fable-5'],
+    });
+  });
+
+  it('keeps the full-roster default implicit in CLI config', () => {
+    const program = overrideExits(
+      buildProgram({
+        stdout() {},
+        stderr() {},
+      }),
+    );
+    const arena = program.commands.find((command) => command.name() === 'arena')!;
+    const run = arena.commands.find((command) => command.name() === 'run')!;
+    run.parseOptions(['--category', 'reasoning']);
+
+    expect(
+      arenaRunConfigFromOptions(run.opts() as ArenaRunCliOptions).competitorIds,
+    ).toBeUndefined();
   });
 });
 

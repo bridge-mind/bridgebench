@@ -1,7 +1,12 @@
 import { applyEloWin, ELO_INITIAL } from './elo.js';
 import { JudgePanel } from './judges.js';
 import { noopLogger, type ArenaLogger } from './logger.js';
-import { getModel, listModels } from './models.js';
+import {
+  ArenaCancellationError,
+  isArenaCancellationError,
+  throwIfCancelled,
+} from './cancellation.js';
+import { getModel, listModels, resolveCompetitorRoster } from './models.js';
 import { sanitizeError } from './openrouter.js';
 import { writeReports } from './report.js';
 import { createRunManifest, runIdFromManifest, runManifestHash } from './run-manifest.js';
@@ -14,13 +19,16 @@ import {
   competitorCost,
   competitorOutputTokens,
   competitorReasoningTokens,
+  type ArenaExecutionOptions,
   type ArenaEventInput,
   type ArenaEventSink,
   type ArenaRunConfig,
+  type ArenaRunResult,
   type CompleteArenaTask,
   type CompetitorFailure,
   type CompetitorResponse,
   type MatchResult,
+  type ModelRegistryEntry,
   type OpenRouterGateway,
   type ScheduledMatch,
 } from './types.js';
@@ -39,6 +47,7 @@ interface RunProgress {
 interface PreparedRun {
   runId: string;
   manifestHash: string;
+  competitors: ModelRegistryEntry[];
   schedule: ScheduledMatch[];
   tasksById: Map<string, CompleteArenaTask>;
   completedIds: Set<string>;
@@ -72,10 +81,71 @@ export class ArenaRunner {
     this.onEvent?.({ ...event, timestamp: new Date().toISOString() });
   }
 
+  private observeCancellation(
+    runId: string,
+    progress: RunProgress,
+    signal?: AbortSignal,
+  ): { requested: () => void; dispose: () => void } {
+    let emitted = false;
+    const requested = (): void => {
+      if (emitted) return;
+      emitted = true;
+      this.logger.info('run.cancellation-requested', {
+        runId,
+        completed: progress.completed,
+        costUsd: progress.costUsd,
+      });
+      this.emit({
+        id: `${runId}-cancellation-requested`,
+        type: 'run.cancellation-requested',
+        data: {
+          runId,
+          completed: progress.completed,
+          costUsd: progress.costUsd,
+        },
+      });
+    };
+
+    if (signal?.aborted) requested();
+    else signal?.addEventListener('abort', requested, { once: true });
+
+    return {
+      requested,
+      dispose: () => signal?.removeEventListener('abort', requested),
+    };
+  }
+
+  private cancelRun(runId: string, progress: RunProgress): ArenaRunResult {
+    this.logger.info('run.cancelled', {
+      runId,
+      completed: progress.completed,
+      costUsd: progress.costUsd,
+    });
+    this.emit({
+      id: `${runId}-cancelled`,
+      type: 'run.cancelled',
+      data: {
+        runId,
+        completed: progress.completed,
+        costUsd: progress.costUsd,
+      },
+    });
+    return {
+      runId,
+      completed: progress.completed,
+      costUsd: progress.costUsd,
+      stoppedForBudget: progress.stoppedForBudget,
+      cancelled: true,
+    };
+  }
+
   private async prepareRun(
     config: ArenaRunConfig,
     tasks: CompleteArenaTask[],
+    signal?: AbortSignal,
   ): Promise<PreparedRun> {
+    const competitors = resolveCompetitorRoster(config.competitorIds);
+    const competitorIds = competitors.map((model) => model.id);
     const mismatched = tasks.filter((task) => task.public.category !== config.category);
     if (mismatched.length > 0) {
       throw new Error(
@@ -91,28 +161,24 @@ export class ArenaRunner {
       );
     }
     // Fail before model validation or paid work if any existing line is invalid.
-    this.store.rebuildEloState();
+    this.store.rebuildEloState(competitorIds);
 
-    const competitors = listModels('competitor');
-    await Promise.all(
-      [...competitors, ...listModels('judge')].map((model) => this.gateway.validateModel(model)),
-    );
-    const manifest = createRunManifest(config, tasks);
+    const manifest = createRunManifest(config, tasks, competitors);
     const manifestHash = runManifestHash(manifest);
     const runId = runIdFromManifest(manifest);
-    this.store.writeRunManifest(runId, manifest);
     const schedule = scheduleMatches({
       category: config.category,
       seed: config.seed,
       count: config.matches,
-      modelIds: competitors.map((model) => model.id),
+      modelIds: competitorIds,
       tasks,
       runId,
     });
     const existing = journal.filter((result) => result.runId === runId);
-    return {
+    const prepared: PreparedRun = {
       runId,
       manifestHash,
+      competitors,
       schedule,
       tasksById: new Map(tasks.map((task) => [task.public.id, task])),
       completedIds: new Set(journal.map((result) => result.matchId)),
@@ -123,152 +189,199 @@ export class ArenaRunner {
         stoppedForBudget: false,
       },
     };
+
+    if (signal?.aborted) return prepared;
+    try {
+      await Promise.all(
+        [...competitors, ...listModels('judge')].map((model) =>
+          this.gateway.validateModel(model, signal),
+        ),
+      );
+    } catch (error) {
+      if (signal?.aborted) return prepared;
+      throw error;
+    }
+    if (signal?.aborted) return prepared;
+    this.store.writeRunManifest(runId, manifest);
+    return prepared;
   }
 
   async run(
     config: ArenaRunConfig,
     tasks: CompleteArenaTask[],
-  ): Promise<{ runId: string; completed: number; costUsd: number; stoppedForBudget: boolean }> {
-    const { runId, manifestHash, schedule, tasksById, completedIds, progress } =
-      await this.prepareRun(config, tasks);
+    execution: ArenaExecutionOptions = {},
+  ): Promise<ArenaRunResult> {
+    const { signal, onMatchResult } = execution;
+    const { runId, manifestHash, competitors, schedule, tasksById, completedIds, progress } =
+      await this.prepareRun(config, tasks, signal);
+    const competitorIds = competitors.map((model) => model.id);
+    const cancellation = this.observeCancellation(runId, progress, signal);
 
-    this.logger.info('run.started', {
-      runId,
-      category: config.category,
-      seed: config.seed,
-      matches: config.matches,
-      maxCostUsd: config.maxCostUsd,
-      resume: config.resume,
-      healthStop: config.healthStop !== false,
-    });
-    this.emit({
-      id: `${runId}-started`,
-      type: 'run.started',
-      data: {
+    try {
+      if (signal?.aborted) return this.cancelRun(runId, progress);
+
+      this.logger.info('run.started', {
         runId,
         category: config.category,
         seed: config.seed,
         matches: config.matches,
         maxCostUsd: config.maxCostUsd,
-      },
-    });
+        resume: config.resume,
+        healthStop: config.healthStop !== false,
+        competitorIds,
+      });
+      this.emit({
+        id: `${runId}-started`,
+        type: 'run.started',
+        data: {
+          runId,
+          category: config.category,
+          seed: config.seed,
+          matches: config.matches,
+          maxCostUsd: config.maxCostUsd,
+          competitorIds,
+        },
+      });
 
-    for (const match of schedule) {
-      if (completedIds.has(match.id)) {
-        if (config.resume) continue;
-        throw new Error(
-          `Match ${match.id} is already journaled; rerun with --resume or choose a new seed`,
-        );
-      }
-      if (progress.costUsd >= config.maxCostUsd) {
-        progress.stoppedForBudget = true;
+      for (const match of schedule) {
+        if (signal?.aborted) return this.cancelRun(runId, progress);
+        if (completedIds.has(match.id)) {
+          if (config.resume) continue;
+          throw new Error(
+            `Match ${match.id} is already journaled; rerun with --resume or choose a new seed`,
+          );
+        }
+        if (progress.costUsd >= config.maxCostUsd) {
+          progress.stoppedForBudget = true;
+          this.emit({
+            id: `${match.runId}-budget-stopped`,
+            type: 'run.budget-stopped',
+            data: {
+              runId: match.runId,
+              completed: progress.completed,
+              costUsd: progress.costUsd,
+              maxCostUsd: config.maxCostUsd,
+            },
+          });
+          break;
+        }
+        const task = tasksById.get(match.taskId);
+        if (!task) throw new Error(`Scheduled task not found: ${match.taskId}`);
         this.emit({
-          id: `${match.runId}-budget-stopped`,
-          type: 'run.budget-stopped',
+          id: `${match.id}-started`,
+          type: 'match.started',
           data: {
-            runId: match.runId,
-            completed: progress.completed,
-            costUsd: progress.costUsd,
-            maxCostUsd: config.maxCostUsd,
+            matchId: match.id,
+            index: match.index,
+            total: schedule.length,
+            category: match.category,
+            taskId: match.taskId,
+            taskTitle: task.public.title,
+            modelA: match.modelA,
+            modelB: match.modelB,
           },
         });
-        break;
+        let result: MatchResult;
+        try {
+          result = await this.runMatch(match, task, manifestHash, competitorIds, signal);
+        } catch (error) {
+          if (signal?.aborted || isArenaCancellationError(error)) {
+            cancellation.requested();
+            return this.cancelRun(runId, progress);
+          }
+          throw error;
+        }
+        if (signal?.aborted) return this.cancelRun(runId, progress);
+        this.store.append(result);
+        writeReports(this.store, { competitorIds });
+        progress.costUsd += result.matchCostUsd;
+        progress.completed += 1;
+        if (!result.competitors.responseA.success || !result.competitors.responseB.success) {
+          progress.matchesWithFailures += 1;
+        }
+        this.emit({
+          id: `${match.id}-completed`,
+          type: 'match.completed',
+          data: {
+            matchId: match.id,
+            taskId: match.taskId,
+            winnerModelId: result.winnerModelId,
+            outcome: result.outcome,
+            costUsd: result.matchCostUsd,
+            eloAfter: result.eloAfter,
+            completed: progress.completed,
+            total: schedule.length,
+          },
+        });
+        if (onMatchResult) await onMatchResult(result);
+        if (signal?.aborted) return this.cancelRun(runId, progress);
+        if (
+          config.healthStop !== false &&
+          progress.completed >= HEALTH_STOP_MIN_MATCHES &&
+          progress.matchesWithFailures / progress.completed >= HEALTH_STOP_FAILURE_RATE
+        ) {
+          this.logger.error('run.health-stopped', {
+            runId,
+            completed: progress.completed,
+            matchesWithFailures: progress.matchesWithFailures,
+            failureRate: progress.matchesWithFailures / progress.completed,
+          });
+          throw new Error(
+            `Run halted after ${progress.completed} matches: ${progress.matchesWithFailures} had failed competitor responses. ` +
+              `The provider path is unhealthy, so continuing would journal junk matches. ` +
+              `Inspect the run log${this.logger.filePath ? ` at ${this.logger.filePath}` : ''}, fix the cause, ` +
+              `then rerun with --resume (or pass --no-health-stop to override).`,
+          );
+        }
       }
-      const task = tasksById.get(match.taskId);
-      if (!task) throw new Error(`Scheduled task not found: ${match.taskId}`);
-      this.emit({
-        id: `${match.id}-started`,
-        type: 'match.started',
-        data: {
-          matchId: match.id,
-          index: match.index,
-          total: schedule.length,
-          category: match.category,
-          taskId: match.taskId,
-          taskTitle: task.public.title,
-          modelA: match.modelA,
-          modelB: match.modelB,
-        },
+
+      if (signal?.aborted) return this.cancelRun(runId, progress);
+      writeReports(this.store, { competitorIds });
+      this.logger.info('run.completed', {
+        runId,
+        completed: progress.completed,
+        matchesWithFailures: progress.matchesWithFailures,
+        costUsd: progress.costUsd,
+        stoppedForBudget: progress.stoppedForBudget,
+        cancelled: false,
       });
-      const result = await this.runMatch(match, task, manifestHash);
-      this.store.append(result);
-      writeReports(this.store);
-      progress.costUsd += result.matchCostUsd;
-      progress.completed += 1;
-      if (!result.competitors.responseA.success || !result.competitors.responseB.success) {
-        progress.matchesWithFailures += 1;
-      }
       this.emit({
-        id: `${match.id}-completed`,
-        type: 'match.completed',
+        id: `${runId}-completed`,
+        type: 'run.completed',
         data: {
-          matchId: match.id,
-          taskId: match.taskId,
-          winnerModelId: result.winnerModelId,
-          outcome: result.outcome,
-          costUsd: result.matchCostUsd,
-          eloAfter: result.eloAfter,
-          completed: progress.completed,
-          total: schedule.length,
-        },
-      });
-      if (
-        config.healthStop !== false &&
-        progress.completed >= HEALTH_STOP_MIN_MATCHES &&
-        progress.matchesWithFailures / progress.completed >= HEALTH_STOP_FAILURE_RATE
-      ) {
-        this.logger.error('run.health-stopped', {
           runId,
           completed: progress.completed,
-          matchesWithFailures: progress.matchesWithFailures,
-          failureRate: progress.matchesWithFailures / progress.completed,
-        });
-        throw new Error(
-          `Run halted after ${progress.completed} matches: ${progress.matchesWithFailures} had failed competitor responses. ` +
-            `The provider path is unhealthy, so continuing would journal junk matches. ` +
-            `Inspect the run log${this.logger.filePath ? ` at ${this.logger.filePath}` : ''}, fix the cause, ` +
-            `then rerun with --resume (or pass --no-health-stop to override).`,
-        );
-      }
-    }
-
-    writeReports(this.store);
-    this.logger.info('run.completed', {
-      runId,
-      completed: progress.completed,
-      matchesWithFailures: progress.matchesWithFailures,
-      costUsd: progress.costUsd,
-      stoppedForBudget: progress.stoppedForBudget,
-    });
-    this.emit({
-      id: `${runId}-completed`,
-      type: 'run.completed',
-      data: {
+          costUsd: progress.costUsd,
+          stoppedForBudget: progress.stoppedForBudget,
+        },
+      });
+      return {
         runId,
         completed: progress.completed,
         costUsd: progress.costUsd,
         stoppedForBudget: progress.stoppedForBudget,
-      },
-    });
-    return {
-      runId,
-      completed: progress.completed,
-      costUsd: progress.costUsd,
-      stoppedForBudget: progress.stoppedForBudget,
-    };
+        cancelled: false,
+      };
+    } finally {
+      cancellation.dispose();
+    }
   }
 
   private async runMatch(
     match: ScheduledMatch,
     task: CompleteArenaTask,
     manifestHash: string,
+    competitorIds: readonly string[],
+    signal?: AbortSignal,
   ): Promise<MatchResult> {
-    const state = this.store.rebuildEloState();
+    throwIfCancelled(signal);
+    const state = this.store.rebuildEloState(competitorIds);
     const prompt = buildCompetitorPrompt(task);
     const [responseA, responseB] = await Promise.all([
-      this.runCompetitor(match, 'A', prompt),
-      this.runCompetitor(match, 'B', prompt),
+      this.runCompetitor(match, 'A', prompt, signal),
+      this.runCompetitor(match, 'B', prompt, signal),
     ]);
+    throwIfCancelled(signal);
     this.inspectResponse(match, responseA);
     this.inspectResponse(match, responseB);
     this.emit({
@@ -292,6 +405,7 @@ export class ArenaRunner {
         },
       },
     });
+    throwIfCancelled(signal);
     const eloBefore = {
       [match.modelA]: state.ratings[match.modelA] ?? ELO_INITIAL,
       [match.modelB]: state.ratings[match.modelB] ?? ELO_INITIAL,
@@ -310,7 +424,8 @@ export class ArenaRunner {
         type: 'judging.started',
         data: { matchId: match.id, judges: listModels('judge').map((model) => model.id) },
       });
-      panel = await this.judges.judge({ match, task, responseA, responseB });
+      panel = await this.judges.judge({ match, task, responseA, responseB }, signal);
+      throwIfCancelled(signal);
       if (panel.winnerModelId) {
         outcome = 'judged';
         winnerModelId = panel.winnerModelId;
@@ -388,6 +503,7 @@ export class ArenaRunner {
     match: ScheduledMatch,
     side: 'A' | 'B',
     prompt: { system: string; user: string },
+    signal?: AbortSignal,
   ): Promise<CompetitorResponse> {
     const modelId = side === 'A' ? match.modelA : match.modelB;
     const startedAt = Date.now();
@@ -401,14 +517,20 @@ export class ArenaRunner {
       });
     };
     try {
+      throwIfCancelled(signal);
       const completion = await this.gateway.complete({
         model: getModel(modelId),
         ...prompt,
+        signal,
         onDelta: (text) => emitDelta(text, false),
       });
+      throwIfCancelled(signal);
       emitDelta(completion.content, true);
       return { modelId, success: true, ...completion };
     } catch (error) {
+      if (signal?.aborted || isArenaCancellationError(error)) {
+        throw new ArenaCancellationError();
+      }
       const failed = failedResponse(modelId, error, Date.now() - startedAt);
       emitDelta(failed.error, true, false);
       return failed;

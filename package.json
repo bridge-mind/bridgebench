@@ -1,12 +1,76 @@
 {
   "name": "bridgebench",
-  "version": "3.1.0-alpha.0",
+  "version": "3.1.0-alpha.1",
   "description": "BridgeBench V3 — autonomous pairwise arenas: reasoning and hallucination",
   "type": "module",
-  "private": true,
   "packageManager": "npm@10.9.8",
   "bin": {
-    "bridgebench": "./dist/src/cli.js"
+    "bridgebench": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "tasks/*/public/**",
+    "docs",
+    "CITATION.cff"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./contracts": {
+      "import": {
+        "types": "./dist/contracts/index.d.ts",
+        "default": "./dist/contracts/index.js"
+      },
+      "require": {
+        "types": "./dist/contracts/index.d.cts",
+        "default": "./dist/contracts/index.cjs"
+      }
+    },
+    "./tasks": {
+      "import": {
+        "types": "./dist/tasks.d.ts",
+        "default": "./dist/tasks.js"
+      },
+      "require": {
+        "types": "./dist/tasks.d.cts",
+        "default": "./dist/tasks.cjs"
+      }
+    },
+    "./client": {
+      "import": {
+        "types": "./dist/client.d.ts",
+        "default": "./dist/client.js"
+      },
+      "require": {
+        "types": "./dist/client.d.cts",
+        "default": "./dist/client.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "contracts": [
+        "./dist/contracts/index.d.cts"
+      ],
+      "tasks": [
+        "./dist/tasks.d.cts"
+      ],
+      "client": [
+        "./dist/client.d.cts"
+      ]
+    }
   },
   "license": "MIT",
   "repository": {
@@ -19,8 +83,10 @@
     "npm": ">=10"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && vite build --config ui/vite.config.ts",
-    "check": "npm run contamination:check && npm run tasks -- validate && npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run test:ui",
+    "build": "tsup",
+    "build:ui": "vite build --config ui/vite.config.ts",
+    "prepack": "npm run contamination:check && npm run build",
+    "check": "npm run contamination:check && npm run tasks -- validate && npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run build:ui && npm run test:pack && npm run test:ui",
     "contamination:check": "node --import tsx src/contamination-check.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -28,28 +94,27 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:pack": "node --import tsx scripts/pack-smoke.ts",
     "test:ui": "playwright test --config playwright.config.ts",
     "test:watch": "vitest",
     "models": "node --import tsx src/cli.ts models",
     "tasks": "node --import tsx src/cli.ts tasks",
+    "tasks:verify-reasoning": "node --import tsx scripts/verify-reasoning-pack.ts",
     "arena": "node --import tsx src/cli.ts arena",
     "triage": "node --import tsx src/cli.ts arena triage",
     "report": "node --import tsx src/cli.ts report",
     "dashboard": "node --import tsx src/dashboard/server.ts"
   },
   "dependencies": {
-    "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "commander": "^12.1.0",
-    "lucide-react": "^0.468.0",
     "openai": "^4.76.0",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
     "yaml": "^2.6.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.7",
@@ -58,7 +123,11 @@
     "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
+    "lucide-react": "^0.468.0",
     "prettier": "^3.9.5",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "tsup": "^8.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.63.0",

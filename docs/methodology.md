@@ -1,12 +1,12 @@
 # Methodology — the arena contract
 
-Every ranking BridgeBench publishes is the fold of an append-only match journal. This document specifies the full protocol that produces a journal line, so any published ladder can be audited or reproduced. The engine stamps every line with `methodologyVersion` (currently `arena-v0.3.0`, `src/types.ts`); results from different methodology versions never mix silently.
+Every ranking BridgeBench publishes is the fold of an append-only match journal. This document specifies the full protocol that produces a journal line, so any published ladder can be audited or reproduced. The engine stamps every line with `methodologyVersion` (currently `arena-v0.3.0`, `src/contracts/categories.ts`); results from different methodology versions never mix silently.
 
 ## Run identity and scheduling
 
 A **run** is deterministic from a versioned manifest:
 
-- The manifest binds the category, seed, match count, engine and methodology versions, sorted competitor and judge slugs, request policies, task hashes, and competitor/judge prompt-policy hashes.
+- The manifest binds the category, seed, match count, engine and methodology versions, sorted competitor and judge slugs, request policies, task hashes, and competitor/judge prompt-policy hashes. Runs may select an explicit roster of at least two unique, enabled competitors; omitting one selects every enabled competitor.
 - The run ID is a SHA-256 prefix of the canonical manifest. Every journal line records the full manifest hash.
 - The scheduler builds all `(competitorA, competitorB, task)` combinations and greedily picks the next match by lowest exposure, ordered by: max per-model exposure → summed model exposure → task exposure → pair exposure. Ties break by a seeded mulberry32 PRNG, so balance is reproducible, not incidental (`src/scheduler.ts`).
 - Which competitor sits on side A is randomized per match from the same seeded stream.
@@ -15,7 +15,7 @@ A **run** is deterministic from a versioned manifest:
 ## Competitor execution
 
 - Both competitors receive byte-identical context: a category-specific system prompt plus the task title, summary, prompt, and all public artifacts inline (`src/tasks.ts`). They are never told they are in a match, and the system prompt forbids revealing model identity.
-- Requests run concurrently over OpenRouter with pinned slugs (`latest` aliases prohibited). Before any paid run the CLI re-validates every competitor and judge ID against the live catalog and confirms judges still support structured output.
+- Requests run concurrently over OpenRouter with pinned slugs (`latest` aliases prohibited). Before any paid run the CLI re-validates the selected competitors and all three judges against the live catalog, and confirms judges still support structured output.
 - Transport is fail-closed: 3 attempts on retryable errors, per-request watchdog timeouts, and a hard prompt-size cap. A competitor that exhausts retries **forfeits** (the survivor wins); two failures make a **no-contest** (no point, no Elo movement).
 
 ## Blind three-judge panel
@@ -53,5 +53,6 @@ Candidate answers are treated as untrusted data end to end: judge prompts explic
 ## Operational guards
 
 - **Budget stop**: spend is checked before each match against `--max-cost-usd` (default $25); a stopped run resumes deterministically with `--resume`.
+- **Cancellation**: Ctrl-C or the dashboard cancel action aborts active competitor and judge requests, emits `run.cancellation-requested` followed by terminal `run.cancelled`, and stops before the next match. Completed journal lines remain resumable; a partial match is never appended.
 - **Health stop**: once ≥4 matches complete and ≥50% contain a failed competitor response, the run halts instead of journaling a batch of silent no-contests (`--no-health-stop` overrides).
 - **Triage**: every run auto-prints an anomaly report (failed requests, suspiciously fast responses, low output, truncation, unreported reasoning tokens, zero-cost accounting, judge abstentions) — `npm run triage` re-analyzes any journal.

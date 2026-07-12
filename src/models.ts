@@ -120,9 +120,49 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
   },
 };
 
+export const SOL_FABLE_PILOT_COMPETITOR_IDS = [
+  'openai/gpt-5.6-sol',
+  'anthropic/claude-fable-5',
+] as const;
+
 export function listModels(role?: ModelRegistryEntry['role']): ModelRegistryEntry[] {
   return Object.values(MODEL_REGISTRY).filter(
     (model) => model.enabled && (!role || model.role === role),
+  );
+}
+
+/**
+ * Resolve an optional run roster in registry order so repeated CLI flags are
+ * order-insensitive while the existing default schedule remains unchanged.
+ */
+export function resolveCompetitorRoster(
+  requestedCompetitorIds?: readonly string[],
+): ModelRegistryEntry[] {
+  const competitorIds = requestedCompetitorIds ?? listModels('competitor').map((model) => model.id);
+
+  const duplicateIds = [
+    ...new Set(competitorIds.filter((id, index) => competitorIds.indexOf(id) !== index)),
+  ];
+  if (duplicateIds.length > 0) {
+    throw new Error(`Competitor roster entries must be unique: ${duplicateIds.join(', ')}`);
+  }
+
+  for (const modelId of competitorIds) {
+    const model = MODEL_REGISTRY[modelId];
+    if (!model) throw new Error(`Unknown competitor model: ${modelId || '<empty>'}`);
+    if (!model.enabled) throw new Error(`Competitor model is disabled: ${modelId}`);
+    if (model.role !== 'competitor') {
+      throw new Error(`Model ${modelId} has role=${model.role}; competitor role required`);
+    }
+  }
+
+  if (competitorIds.length < 2) {
+    throw new Error('Competitor roster must contain at least two enabled competitor models');
+  }
+
+  const selected = new Set(competitorIds);
+  return Object.values(MODEL_REGISTRY).filter(
+    (model) => model.enabled && model.role === 'competitor' && selected.has(model.id),
   );
 }
 

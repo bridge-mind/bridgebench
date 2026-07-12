@@ -9,8 +9,29 @@ export interface ArenaRunConfig {
   matches: number;
   maxCostUsd: number;
   resume: boolean;
+  /** Omit to use every enabled competitor in the registry. */
+  competitorIds?: readonly string[];
   /** Abort early when most matches contain a failed response. */
   healthStop?: boolean;
+}
+
+export interface ArenaExecutionOptions {
+  /** Execution-only cancellation; deliberately excluded from the canonical manifest. */
+  signal?: AbortSignal;
+  /**
+   * Invoked after each match result is journaled, before the next match
+   * starts. Used to publish results incrementally instead of only at run end.
+   * Must not throw; handle and log failures internally.
+   */
+  onMatchResult?: (result: MatchResult) => Promise<void> | void;
+}
+
+export interface ArenaRunResult {
+  runId: string;
+  completed: number;
+  costUsd: number;
+  stoppedForBudget: boolean;
+  cancelled: boolean;
 }
 
 export interface ScheduledMatch {

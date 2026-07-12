@@ -124,6 +124,11 @@ npm run arena -- run --category hallucination
 # Custom batch
 npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40
 
+# Sol/Fable pilot — repeat --competitor to set an explicit roster
+npm run arena -- run --category reasoning \
+  --competitor openai/gpt-5.6-sol \
+  --competitor anthropic/claude-fable-5
+
 # Resume the exact deterministic schedule after interruption or budget stop
 npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40 --resume
 
@@ -140,6 +145,8 @@ npm run arena -- publish --category reasoning
 ```
 
 Category, seed, match count, model roster, task hashes, prompt policy, methodology, and engine version define the run manifest. `--resume` continues only the matching deterministic schedule.
+
+Without `--competitor`, runs use every enabled competitor. An explicit roster must contain at least two unique, enabled competitor models. Press Ctrl-C once to cancel: active model calls abort, completed matches stay journaled, and the same command resumes with `--resume`.
 
 Results are local, ignored by Git, and kept per arena:
 
@@ -210,6 +217,8 @@ bridgebench/
 ```bash
 npm run check
 ```
+
+`npm run build` also emits the versioned `bridgebench/contracts` subpath from `src/contracts/index.ts`. This is a local build entry point only; Phase 1 adds no package-publishing step.
 
 Tests use a mock OpenRouter gateway and never spend credits — they pass from a fresh public clone with no API key and no private overlay. Live catalog validation and arena runs are operator-invoked only.
 

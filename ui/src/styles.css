@@ -850,6 +850,10 @@ h3 {
 .run-panel .button-primary {
   margin-top: 18px;
 }
+.run-panel .button-cancel {
+  width: 100%;
+  margin-top: 8px;
+}
 .run-footnote {
   margin: 12px 0 0;
   text-align: center;
