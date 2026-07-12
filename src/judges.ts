@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 
+import {
+  ArenaCancellationError,
+  isArenaCancellationError,
+  throwIfCancelled,
+} from './cancellation.js';
 import { noopLogger, type ArenaLogger } from './logger.js';
 import { getModel, listModels } from './models.js';
 import { parseJudgeVerdict, sanitizeError } from './openrouter.js';
@@ -179,15 +184,19 @@ export class JudgePanel {
     this.logger = logger;
   }
 
-  async judge(input: {
-    match: ScheduledMatch;
-    task: CompleteArenaTask;
-    responseA: CompetitorSuccess;
-    responseB: CompetitorSuccess;
-  }): Promise<PanelDecision> {
+  async judge(
+    input: {
+      match: ScheduledMatch;
+      task: CompleteArenaTask;
+      responseA: CompetitorSuccess;
+      responseB: CompetitorSuccess;
+    },
+    signal?: AbortSignal,
+  ): Promise<PanelDecision> {
+    throwIfCancelled(signal);
     const votes = await Promise.all(
       listModels('judge').map(async (judge) => {
-        const vote = await this.runJudge(judge.id, input);
+        const vote = await this.runJudge(judge.id, input, signal);
         this.onEvent?.({
           id: `${input.match.id}-judge-${judge.id}`,
           type: 'judge.completed',
@@ -207,6 +216,7 @@ export class JudgePanel {
         return vote;
       }),
     );
+    throwIfCancelled(signal);
     const votesByModel: Record<string, number> = {
       [input.match.modelA]: 0,
       [input.match.modelB]: 0,
@@ -235,6 +245,7 @@ export class JudgePanel {
       responseA: CompetitorSuccess;
       responseB: CompetitorSuccess;
     },
+    signal?: AbortSignal,
   ): Promise<JudgeVote> {
     // These identity bindings stay local. Only the anonymous answer strings cross
     // the gateway boundary; the judge request never receives either model ID.
@@ -249,12 +260,15 @@ export class JudgePanel {
 
     try {
       for (let attempt = 1; attempt <= 2; attempt += 1) {
+        throwIfCancelled(signal);
         const completion = await this.gateway.complete({
           model: judge,
           system: JUDGE_SYSTEM_CATEGORY[input.task.public.category],
           user: buildJudgePayload(input.task, answerA, answerB),
           structured: true,
+          signal,
         });
+        throwIfCancelled(signal);
         accumulated = accumulated ? mergeCompletions(accumulated, completion) : completion;
         try {
           const verdict = parseJudgeVerdict(completion.content);
@@ -267,6 +281,9 @@ export class JudgePanel {
             completion: accumulated,
           };
         } catch (error) {
+          if (signal?.aborted || isArenaCancellationError(error)) {
+            throw new ArenaCancellationError();
+          }
           this.logger.warn('judge.verdict-parse-failed', {
             matchId: input.match.id,
             judgeModelId: judgeId,
@@ -278,6 +295,9 @@ export class JudgePanel {
         }
       }
     } catch (error) {
+      if (signal?.aborted || isArenaCancellationError(error)) {
+        throw new ArenaCancellationError();
+      }
       this.logger.warn('judge.abstained', {
         matchId: input.match.id,
         judgeModelId: judgeId,

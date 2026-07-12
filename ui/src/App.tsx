@@ -9,6 +9,7 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
+  Square,
   TriangleAlert,
   Trophy,
   Wifi,
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react';
 
 import {
+  cancelArenaRun,
   fetchState,
   startArenaRun,
   type ArenaEvent,
@@ -127,6 +129,10 @@ function eventLabel(event: ArenaEvent, models: DashboardModel[]): string {
         : `No contest on ${String(event.data.taskId)}`;
     case 'run.budget-stopped':
       return 'Run stopped at the budget cap';
+    case 'run.cancellation-requested':
+      return 'Cancellation requested — active calls stopping';
+    case 'run.cancelled':
+      return 'Run cancelled — completed matches kept';
     case 'run.completed':
       return 'Run complete — reports rebuilt';
     case 'run.failed':
@@ -175,6 +181,7 @@ function StatusPill({ status }: { status: DashboardState['run']['status'] }) {
     running: 'Live',
     completed: 'Complete',
     'budget-stopped': 'Budget stop',
+    cancelled: 'Cancelled',
     failed: 'Failed',
   };
   return (
@@ -211,8 +218,13 @@ function RunPanel({
   const [budget, setBudget] = useState(25);
   const [resume, setResume] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const running = data.run.status === 'running';
+
+  useEffect(() => {
+    if (!running) setCancelling(false);
+  }, [running]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -225,6 +237,17 @@ function RunPanel({
       setError(caught instanceof Error ? caught.message : 'Unable to start run');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function cancel() {
+    setCancelling(true);
+    setError(null);
+    try {
+      await cancelArenaRun();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to cancel run');
+      setCancelling(false);
     }
   }
 
@@ -320,6 +343,21 @@ function RunPanel({
           </>
         )}
       </button>
+      {running && (
+        <button
+          className="button button-ghost button-cancel"
+          type="button"
+          disabled={cancelling}
+          onClick={() => void cancel()}
+        >
+          {cancelling ? (
+            <RefreshCw className="spin" size={17} aria-hidden="true" />
+          ) : (
+            <Square size={15} fill="currentColor" aria-hidden="true" />
+          )}
+          {cancelling ? 'Cancelling' : 'Cancel run'}
+        </button>
+      )}
       <p className="run-footnote">Judges never see model names.</p>
     </form>
   );
@@ -634,14 +672,17 @@ function RunSummary({
 }) {
   const { status, completed, costUsd, error, config } = data.run;
   const failed = status === 'failed';
+  const cancelled = status === 'cancelled';
   return (
     <section className="card stage" aria-labelledby="summary-title">
       <h2 id="summary-title">
         {failed
           ? 'Run failed'
-          : status === 'budget-stopped'
-            ? 'Run stopped at the budget cap'
-            : 'Run complete'}
+          : cancelled
+            ? 'Run cancelled'
+            : status === 'budget-stopped'
+              ? 'Run stopped at the budget cap'
+              : 'Run complete'}
       </h2>
       {failed && error ? (
         <div className="note note-error" role="alert">
@@ -650,8 +691,9 @@ function RunSummary({
         </div>
       ) : (
         <p className="card-sub">
-          {completed} {config ? `${config.category} ` : ''}matches judged for {formatMoney(costUsd)}
-          . Ratings and reports are on disk.
+          {cancelled
+            ? `${completed} ${config ? `${config.category} ` : ''}matches remain journaled. Reports reflect completed matches only.`
+            : `${completed} ${config ? `${config.category} ` : ''}matches judged for ${formatMoney(costUsd)}. Ratings and reports are on disk.`}
         </p>
       )}
       <button className="button button-ghost" type="button" onClick={onViewLeaderboard}>
@@ -675,7 +717,9 @@ function ActivityFeed({ data }: { data: DashboardState }) {
               className={`activity-mark activity-${event.type.split('.')[0]}`}
               aria-hidden="true"
             >
-              {event.type === 'judge.completed' ? (
+              {event.type === 'run.cancellation-requested' || event.type === 'run.cancelled' ? (
+                <X size={13} />
+              ) : event.type === 'judge.completed' ? (
                 <Gavel size={13} />
               ) : event.type.includes('completed') ? (
                 <Check size={13} />

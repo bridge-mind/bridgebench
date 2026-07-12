@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { listModels } from '../src/models.js';
+import { listModels, SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
 import { scheduleMatches } from '../src/scheduler.js';
+import { TaskLoader } from '../src/tasks.js';
 import { makeTask } from './helpers.js';
 
 describe('seeded match scheduler', () => {
@@ -39,5 +40,32 @@ describe('seeded match scheduler', () => {
     expect(
       Math.max(...Object.values(exposure)) - Math.min(...Object.values(exposure)),
     ).toBeLessThanOrEqual(1);
+  });
+
+  it('uses every reasoning task exactly once for the Sol/Fable pilot', async () => {
+    const tasks = await new TaskLoader('reasoning').loadAll();
+    const schedule = scheduleMatches({
+      category: 'reasoning',
+      seed: 'sol-fable-pilot',
+      count: 12,
+      modelIds: [...SOL_FABLE_PILOT_COMPETITOR_IDS],
+      tasks,
+    });
+
+    expect(schedule).toHaveLength(12);
+    expect(new Set(schedule.map((match) => match.taskId))).toEqual(
+      new Set(tasks.map((task) => task.public.id)),
+    );
+    expect(
+      schedule.every(
+        (match) =>
+          new Set([match.modelA, match.modelB]).size === 2 &&
+          [match.modelA, match.modelB].every((modelId) =>
+            SOL_FABLE_PILOT_COMPETITOR_IDS.includes(
+              modelId as (typeof SOL_FABLE_PILOT_COMPETITOR_IDS)[number],
+            ),
+          ),
+      ),
+    ).toBe(true);
   });
 });

@@ -16,10 +16,13 @@ import {
   type ArenaTask,
   type BenchmarkCategory,
   type CompleteArenaTask,
+  type TaskPrivate,
 } from './types.js';
-import { findProjectRoot } from './paths.js';
+import { packageRoot } from './paths.js';
 
-const ROOT = findProjectRoot(import.meta.url);
+// Package-relative, not repo-relative: the task packs ship in the npm
+// tarball, so the default root must resolve inside the installed package.
+const ROOT = packageRoot(import.meta.url);
 export const TASKS_PER_CATEGORY = 12;
 export const TASKS_PER_CLUSTER = 2;
 const APPROXIMATE_CHARS_PER_TOKEN = 4;
@@ -243,6 +246,44 @@ export class TaskLoader {
     validatePackComposition(this.category, tasks);
     return tasks;
   }
+}
+
+export interface PrivateHalf {
+  value: TaskPrivate;
+  /** SHA-256 of the exact private YAML the judges receive — the journal's task identity. */
+  hash: string;
+}
+
+/**
+ * Completes public tasks with private halves supplied by an external store
+ * (e.g. the API's rubric table) instead of the on-disk overlay. Pairing
+ * rules match the disk loader: matching id/version and every
+ * requiredEvidence entry naming a real public artifact.
+ */
+export function mergePrivateHalves(
+  tasks: readonly ArenaTask[],
+  privateHalves: readonly PrivateHalf[],
+): CompleteArenaTask[] {
+  const byId = new Map(privateHalves.map((half) => [half.value.id, half]));
+  return tasks.map((task) => {
+    const half = byId.get(task.public.id);
+    if (!half) {
+      throw new Error(`Missing private half for task ${task.public.id}`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(half.hash)) {
+      throw new Error(`Private hash for task ${task.public.id} is not a sha256 digest`);
+    }
+    const privateTask = TaskPrivateSchema.parse(half.value);
+    validatePrivatePair(task.public.id, task.public, privateTask);
+    const complete: CompleteArenaTask = {
+      public: task.public,
+      private: privateTask,
+      publicHash: task.publicHash,
+      privateHash: half.hash,
+    };
+    validatePromptBudgets(complete);
+    return complete;
+  });
 }
 
 const SHARED_SYSTEM =

@@ -39,11 +39,13 @@ export interface ChatRequest {
   system: string;
   user: string;
   structured?: boolean;
+  /** Execution-only cancellation; never serialized into a run manifest or provider payload. */
+  signal?: AbortSignal;
   /** Called with the accumulated visible text as it streams in (throttled). */
   onDelta?: (text: string) => void;
 }
 
 export interface OpenRouterGateway {
   complete(request: ChatRequest): Promise<ModelCompletion>;
-  validateModel(model: ModelRegistryEntry): Promise<void>;
+  validateModel(model: ModelRegistryEntry, signal?: AbortSignal): Promise<void>;
 }

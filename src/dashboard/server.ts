@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { ArenaRunner } from '../arena.js';
 import { ENV_PATH, loadProjectEnv } from '../env.js';
 import { FileArenaLogger } from '../logger.js';
-import { listModels } from '../models.js';
+import { listModels, resolveCompetitorRoster } from '../models.js';
 import { OpenRouterClient, sanitizeError } from '../openrouter.js';
 import { findProjectRoot } from '../paths.js';
 import { buildSnapshot } from '../report.js';
@@ -40,20 +40,23 @@ const UI_ROOT = path.join(ROOT, 'ui');
 const UI_DIST = path.join(ROOT, 'dist-ui');
 const MAX_BODY_BYTES = 16_384;
 
-const RunRequestSchema = z.object({
-  category: BenchmarkCategorySchema.default('reasoning'),
-  seed: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100)
-    .regex(/^[a-zA-Z0-9._-]+$/),
-  matches: z.number().int().min(1).max(336),
-  maxCostUsd: z.number().finite().min(0.01).max(1_000),
-  resume: z.boolean().default(false),
-});
+const RunRequestSchema = z
+  .object({
+    category: BenchmarkCategorySchema.default('reasoning'),
+    seed: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/),
+    matches: z.number().int().min(1).max(336),
+    maxCostUsd: z.number().finite().min(0.01).max(1_000),
+    competitorIds: z.array(z.string().trim().min(1)).min(2).max(64).optional(),
+    resume: z.boolean().default(false),
+  })
+  .strict();
 
-type RunStatus = 'idle' | 'running' | 'completed' | 'budget-stopped' | 'failed';
+type RunStatus = 'idle' | 'running' | 'completed' | 'budget-stopped' | 'cancelled' | 'failed';
 
 interface DashboardRunState {
   status: RunStatus;
@@ -82,6 +85,7 @@ const state: DashboardRunState = {
 };
 const events: ArenaEvent[] = [];
 const clients = new Set<ServerResponse>();
+let activeRunController: AbortController | null = null;
 
 function createStore(category: BenchmarkCategory): ArenaStore {
   return new ArenaStore(categoryStoreConfig(category));
@@ -152,6 +156,10 @@ function publish(event: ArenaEvent): void {
     state.status = event.data.stoppedForBudget ? 'budget-stopped' : 'completed';
     state.finishedAt = event.timestamp;
     state.currentMatch = null;
+  } else if (event.type === 'run.cancelled') {
+    state.status = 'cancelled';
+    state.finishedAt = event.timestamp;
+    state.currentMatch = null;
   } else if (event.type === 'run.failed') {
     state.status = 'failed';
     state.finishedAt = event.timestamp;
@@ -163,6 +171,8 @@ function publish(event: ArenaEvent): void {
 }
 
 async function startRun(config: ArenaRunConfig): Promise<void> {
+  const cancellation = new AbortController();
+  activeRunController = cancellation;
   state.status = 'running';
   state.config = config;
   state.startedAt = new Date().toISOString();
@@ -186,7 +196,7 @@ async function startRun(config: ArenaRunConfig): Promise<void> {
       publish,
       logger,
     );
-    await runner.run(config, tasks);
+    await runner.run(config, tasks, { signal: cancellation.signal });
   } catch (error) {
     const message = sanitizeError(error);
     publish({
@@ -195,6 +205,8 @@ async function startRun(config: ArenaRunConfig): Promise<void> {
       timestamp: new Date().toISOString(),
       data: { error: message },
     });
+  } finally {
+    if (activeRunController === cancellation) activeRunController = null;
   }
 }
 
@@ -284,6 +296,7 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
     }
     try {
       const config = RunRequestSchema.parse(await readJson(request));
+      resolveCompetitorRoster(config.competitorIds);
       void startRun(config);
       json(response, 202, { accepted: true, config });
     } catch (error) {
@@ -291,6 +304,20 @@ async function apiHandler(request: IncomingMessage, response: ServerResponse): P
         error: error instanceof z.ZodError ? 'Invalid run configuration' : sanitizeError(error),
       });
     }
+    return true;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/runs/cancel') {
+    if (!isAllowedMutation(request)) {
+      json(response, 403, { error: 'Cancellation requires same-origin application/json' });
+      return true;
+    }
+    if (state.status !== 'running' || !activeRunController) {
+      json(response, 409, { error: 'No arena run is active' });
+      return true;
+    }
+    activeRunController.abort();
+    json(response, 202, { accepted: true });
     return true;
   }
 

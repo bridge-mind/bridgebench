@@ -10,7 +10,6 @@ import path from 'node:path';
 
 import { ELO_INITIAL } from './elo.js';
 import { listModels } from './models.js';
-import { findProjectRoot } from './paths.js';
 import { canonicalJson, RunManifestSchema, type RunManifest } from './run-manifest.js';
 import {
   MatchResultSchema,
@@ -36,10 +35,11 @@ export function categoryStoreConfig(
   category: BenchmarkCategory,
   resultsRoot = process.env.BRIDGEBENCH_RESULTS_DIR,
 ): ArenaStoreConfig {
-  const projectRoot = findProjectRoot(import.meta.url);
+  // Results are operator output, so they anchor to the working directory —
+  // never to the package root, which is node_modules/ when installed.
   const base = resultsRoot
-    ? path.resolve(projectRoot, resultsRoot)
-    : path.join(projectRoot, 'results');
+    ? path.resolve(process.cwd(), resultsRoot)
+    : path.join(process.cwd(), 'results');
   const root = path.join(base, category);
   return {
     category,
@@ -127,11 +127,11 @@ export class ArenaStore {
     return new Set(this.readAll().map((result) => result.matchId));
   }
 
-  rebuildEloState(): EloState {
-    const ratings = Object.fromEntries(
-      listModels('competitor').map((model) => [model.id, ELO_INITIAL]),
-    );
-    const points = Object.fromEntries(listModels('competitor').map((model) => [model.id, 0]));
+  rebuildEloState(
+    competitorIds: readonly string[] = listModels('competitor').map((model) => model.id),
+  ): EloState {
+    const ratings = Object.fromEntries(competitorIds.map((modelId) => [modelId, ELO_INITIAL]));
+    const points = Object.fromEntries(competitorIds.map((modelId) => [modelId, 0]));
     const verified = verifyJournal(this.readAll(), this.category, {
       manifestForRun: (runId) => this.readRunManifest(runId),
       requireManifests: true,

@@ -5,10 +5,10 @@ import { Command, InvalidArgumentError } from 'commander';
 import { ArenaRunner } from './arena.js';
 import { loadProjectEnv } from './env.js';
 import { FileArenaLogger, redactSecrets, type ArenaLogger } from './logger.js';
-import { listModels } from './models.js';
+import { listModels, resolveCompetitorRoster } from './models.js';
 import { OpenRouterClient } from './openrouter.js';
-import { findProjectRoot } from './paths.js';
 import { publishJournal, publishTarget, publishTasks, resolveApiConfig } from './publish.js';
+import { runRemoteArena } from './remote-arena.js';
 import { writeReports } from './report.js';
 import { ArenaStore, categoryStoreConfig } from './store.js';
 import { TaskLoader, validatePublicTaskFile } from './tasks.js';
@@ -17,16 +17,30 @@ import {
   BenchmarkCategorySchema,
   CATEGORIES,
   type ArenaEventSink,
+  type ArenaRunConfig,
   type BenchmarkCategory,
 } from './types.js';
 import { verifyJournal } from './verification.js';
 import { ENGINE_VERSION, PACKAGE_NAME } from './version.js';
 
-const ROOT = findProjectRoot(import.meta.url);
+// CLI logs and path display anchor to the operator's working directory,
+// matching where categoryStoreConfig writes results.
+const ROOT = process.cwd();
 
 interface CategorySelection {
   category?: BenchmarkCategory;
   all?: boolean;
+}
+
+export interface ArenaRunCliOptions {
+  category: BenchmarkCategory;
+  matches: number;
+  seed: string;
+  maxCostUsd: number;
+  competitor?: string[];
+  resume: boolean;
+  debug: boolean;
+  healthStop: boolean;
 }
 
 export interface CliDependencies {
@@ -77,6 +91,25 @@ function positiveNumber(value: string): number {
     throw new InvalidArgumentError(`expected a positive number, received ${value}`);
   }
   return parsed;
+}
+
+function collectOption(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+export function arenaRunConfigFromOptions(options: ArenaRunCliOptions): ArenaRunConfig {
+  const competitorIds = options.competitor?.length
+    ? resolveCompetitorRoster(options.competitor).map((model) => model.id)
+    : undefined;
+  return {
+    category: options.category,
+    seed: options.seed,
+    matches: options.matches,
+    maxCostUsd: options.maxCostUsd,
+    competitorIds,
+    resume: options.resume,
+    healthStop: options.healthStop,
+  };
 }
 
 function selectedCategories(options: CategorySelection, command: string): BenchmarkCategory[] {
@@ -201,27 +234,32 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
       positiveNumber,
       25,
     )
+    .option(
+      '--competitor <modelId>',
+      'limit the run roster; repeat for each competitor (minimum two)',
+      collectOption,
+    )
     .option('--resume', 'skip match IDs already present in the journal', false)
     .option('--debug', 'mirror structured log entries to the console', false)
     .option('--no-health-stop', 'do not halt when most matches have failed responses')
-    .action(
-      async (options: {
-        category: BenchmarkCategory;
-        matches: number;
-        seed: string;
-        maxCostUsd: number;
-        resume: boolean;
-        debug: boolean;
-        healthStop: boolean;
-      }) => {
-        const logger = new FileArenaLogger({
-          dir: logRoot(options.category),
-          verbose: options.debug,
-        });
+    .action(async (options: ArenaRunCliOptions) => {
+      const config = arenaRunConfigFromOptions(options);
+      const logger = new FileArenaLogger({
+        dir: logRoot(config.category),
+        verbose: options.debug,
+      });
+      const cancellation = new AbortController();
+      const requestCancellation = (): void => {
+        if (cancellation.signal.aborted) return;
+        dependencies.stderr('Cancellation requested; aborting active model calls.');
+        cancellation.abort();
+      };
+      process.once('SIGINT', requestCancellation);
+      try {
         dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
-        const store = dependencies.createStore(options.category);
+        const store = dependencies.createStore(config.category);
         const loaded = await dependencies
-          .createTaskLoader(options.category)
+          .createTaskLoader(config.category)
           .loadAll({ requirePrivate: true });
         const progressOutput: ArenaEventSink = (event) => {
           if (event.type !== 'match.completed') return;
@@ -235,35 +273,85 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
           progressOutput,
           logger,
         );
-        try {
-          const result = await runner.run(
-            {
-              category: options.category,
-              seed: options.seed,
-              matches: options.matches,
-              maxCostUsd: options.maxCostUsd,
-              resume: options.resume,
-              healthStop: options.healthStop,
-            },
-            loaded,
-          );
+        const result = await runner.run(config, loaded, { signal: cancellation.signal });
+        if (result.cancelled) {
           dependencies.stdout(
-            `Completed ${result.completed} new ${options.category} matches; run spend $${result.costUsd.toFixed(4)}.`,
+            `Cancelled after ${result.completed} new ${config.category} matches; journaled spend $${result.costUsd.toFixed(4)}. Completed matches remain journaled.`,
+          );
+          dependencies.setExitCode(130);
+        } else {
+          dependencies.stdout(
+            `Completed ${result.completed} new ${config.category} matches; run spend $${result.costUsd.toFixed(4)}.`,
           );
           if (result.stoppedForBudget) {
             dependencies.stdout(
               'Stopped at the cost boundary; rerun the same command with --resume.',
             );
           }
-          const triage = triageJournal(
-            store.readAll().filter((match) => match.runId === result.runId),
-          );
-          dependencies.stdout(`=== Run health ===\n${formatTriage(triage)}`);
-        } finally {
-          dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
         }
-      },
-    );
+        const runMatches = store.readAll().filter((match) => match.runId === result.runId);
+        if (runMatches.length > 0) {
+          const triage = triageJournal(runMatches);
+          dependencies.stdout(`=== Run health ===\n${formatTriage(triage)}`);
+        }
+      } finally {
+        process.removeListener('SIGINT', requestCancellation);
+        dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
+      }
+    });
+
+  arena
+    .command('remote-run')
+    .description('Run a match schedule against the configured API and stream live arena events')
+    .requiredOption(
+      '-c, --category <category>',
+      `arena to run (${CATEGORIES.join(', ')})`,
+      parseCategory,
+    )
+    .option('-n, --matches <count>', 'number of task-level matches', positiveInteger, 12)
+    .option('-s, --seed <seed>', 'reproducible scheduling seed', 'bridgebench-v3-mvp')
+    .option(
+      '--max-cost-usd <amount>',
+      'hard stop before the next match after this spend',
+      positiveNumber,
+      25,
+    )
+    .option(
+      '--competitor <modelId>',
+      'limit the run roster; repeat for each competitor (minimum two)',
+      collectOption,
+    )
+    .option('--resume', 'skip match IDs already present in the journal', false)
+    .option('--debug', 'mirror structured log entries to the console', false)
+    .option('--no-health-stop', 'do not halt when most matches have failed responses')
+    .option('--mock', 'use deterministic mock model completions instead of OpenRouter', false)
+    .option('--no-publish-matches', 'skip publishing match results to the API as they complete')
+    .action(async (options: ArenaRunCliOptions & { mock: boolean; publishMatches: boolean }) => {
+      const config = arenaRunConfigFromOptions(options);
+      const apiConfig = dependencies.resolveApiConfig();
+      const logger = new FileArenaLogger({
+        dir: logRoot(config.category),
+        verbose: options.debug,
+      });
+      dependencies.stdout(
+        `Remote ${config.category} run against ${publishTarget(apiConfig)} (${options.mock ? 'mock' : 'openrouter'})`,
+      );
+      dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
+      try {
+        const result = await runRemoteArena(apiConfig, {
+          config,
+          mock: options.mock,
+          publishMatches: options.publishMatches,
+          logger,
+        });
+        dependencies.stdout(
+          `Remote run ${result.runKey}: ${result.completed} matches, $${result.costUsd.toFixed(4)}`,
+        );
+        if (result.cancelled) dependencies.setExitCode(130);
+      } finally {
+        dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
+      }
+    });
 
   arena
     .command('verify')

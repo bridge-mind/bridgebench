@@ -11,6 +11,11 @@ import {
 } from './types.js';
 import { verifyJournal, type VerificationOptions } from './verification.js';
 
+export interface SnapshotOptions extends VerificationOptions {
+  /** Seed empty standings with this run roster; defaults to every enabled competitor. */
+  competitorIds?: readonly string[];
+}
+
 function round(value: number, digits = 2): number {
   return Number(value.toFixed(digits));
 }
@@ -52,12 +57,13 @@ function ensureEntry(
 export function buildSnapshot(
   matches: MatchResult[],
   category: BenchmarkCategory,
-  verificationOptions: VerificationOptions = {},
+  options: SnapshotOptions = {},
 ): ArenaSnapshot {
-  const verified = verifyJournal(matches, category, verificationOptions);
+  const verified = verifyJournal(matches, category, options);
   const entries = new Map<string, Omit<LeaderboardEntry, 'rank'>>();
-  for (const model of listModels('competitor')) {
-    entries.set(model.id, emptyEntry(model.id, model.displayName));
+  const competitorIds = options.competitorIds ?? listModels('competitor').map((model) => model.id);
+  for (const modelId of competitorIds) {
+    ensureEntry(entries, modelId);
   }
 
   for (const match of verified.matches) {
@@ -145,14 +151,18 @@ export function renderMarkdown(snapshot: ArenaSnapshot): string {
   );
 }
 
-export function writeReports(store: {
-  category: BenchmarkCategory;
-  readAll(): MatchResult[];
-  readRunManifest?(runId: string): import('./run-manifest.js').RunManifest | null;
-  writeSnapshot(s: ArenaSnapshot): void;
-  writeMarkdown(s: string): void;
-}): ArenaSnapshot {
+export function writeReports(
+  store: {
+    category: BenchmarkCategory;
+    readAll(): MatchResult[];
+    readRunManifest?(runId: string): import('./run-manifest.js').RunManifest | null;
+    writeSnapshot(s: ArenaSnapshot): void;
+    writeMarkdown(s: string): void;
+  },
+  options: SnapshotOptions = {},
+): ArenaSnapshot {
   const snapshot = buildSnapshot(store.readAll(), store.category, {
+    ...options,
     manifestForRun: store.readRunManifest ? (runId) => store.readRunManifest!(runId) : undefined,
     requireManifests: Boolean(store.readRunManifest),
   });

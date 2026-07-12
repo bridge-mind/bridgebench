@@ -1,4 +1,9 @@
-import type { ArenaEvent, ArenaEventDataMap, ArenaSnapshot, MatchResult } from '../../src/types';
+import type {
+  ArenaEvent,
+  ArenaEventDataMap,
+  ArenaSnapshot,
+  MatchResult,
+} from '../../src/contracts/index';
 
 export type BenchmarkCategory = 'reasoning' | 'hallucination';
 
@@ -32,12 +37,13 @@ export interface DashboardTask {
 }
 
 export interface DashboardRun {
-  status: 'idle' | 'running' | 'completed' | 'budget-stopped' | 'failed';
+  status: 'idle' | 'running' | 'completed' | 'budget-stopped' | 'cancelled' | 'failed';
   config: {
     category: BenchmarkCategory;
     seed: string;
     matches: number;
     maxCostUsd: number;
+    competitorIds?: string[];
     resume: boolean;
   } | null;
   runId: string | null;
@@ -77,6 +83,7 @@ export async function startArenaRun(config: {
   seed: string;
   matches: number;
   maxCostUsd: number;
+  competitorIds?: string[];
   resume: boolean;
 }): Promise<void> {
   const response = await fetch('/api/runs', {
@@ -86,6 +93,16 @@ export async function startArenaRun(config: {
   });
   const body = (await response.json()) as { error?: string };
   if (!response.ok) throw new Error(body.error ?? `Run request failed (${response.status})`);
+}
+
+export async function cancelArenaRun(): Promise<void> {
+  const response = await fetch('/api/runs/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  const body = (await response.json()) as { error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Cancellation failed (${response.status})`);
 }
 
 export type { ArenaEvent, MatchResult };

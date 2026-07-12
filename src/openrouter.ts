@@ -1,5 +1,10 @@
 import OpenAI from 'openai';
 
+import {
+  ArenaCancellationError,
+  isArenaCancellationError,
+  throwIfCancelled,
+} from './cancellation.js';
 import { noopLogger, redactSecrets, type ArenaLogger } from './logger.js';
 import { assertPromptSize, runOpenRouterAttempt } from './openrouter-transport.js';
 import {
@@ -23,8 +28,21 @@ export function sanitizeError(error: unknown): string {
   return redactSecrets(raw).slice(0, 1_000);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfCancelled(signal);
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => signal?.removeEventListener('abort', onAbort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new ArenaCancellationError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export class OpenRouterClient implements OpenRouterGateway {
@@ -52,10 +70,12 @@ export class OpenRouterClient implements OpenRouterGateway {
   }
 
   async complete(request: ChatRequest): Promise<ModelCompletion> {
+    throwIfCancelled(request.signal);
     assertPromptSize(request);
     const maxAttempts = 3;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      throwIfCancelled(request.signal);
       const startedAt = Date.now();
       const timeoutMs = request.model.request.timeoutMs;
       this.logger.debug('openrouter.request', {
@@ -73,18 +93,20 @@ export class OpenRouterClient implements OpenRouterGateway {
       // The SDK timeout option only bounds time-to-headers; a stream that goes
       // silent after headers would otherwise hang the run forever. This
       // watchdog aborts the whole attempt — connect and body — at the deadline.
-      const controller = new AbortController();
-      const watchdog = setTimeout(() => controller.abort(), timeoutMs);
+      const timeoutController = new AbortController();
+      const attemptSignal = request.signal
+        ? AbortSignal.any([request.signal, timeoutController.signal])
+        : timeoutController.signal;
+      const watchdog = setTimeout(
+        () =>
+          timeoutController.abort(new Error(`OpenRouter request timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
       try {
         // Stream so bytes flow while the model reasons; a non-streaming request
         // sits silent for minutes and OpenRouter's edge closes the idle
         // connection ("Premature close") before the body arrives.
-        const completion = await runOpenRouterAttempt(
-          this.client,
-          request,
-          attempt,
-          controller.signal,
-        );
+        const completion = await runOpenRouterAttempt(this.client, request, attempt, attemptSignal);
         this.logger.info('openrouter.completed', {
           model: request.model.id,
           role: request.model.role,
@@ -123,7 +145,17 @@ export class OpenRouterClient implements OpenRouterGateway {
         return completion;
       } catch (error) {
         const latencyMs = Date.now() - startedAt;
-        const message = controller.signal.aborted
+        if (request.signal?.aborted) {
+          this.logger.info('openrouter.cancelled', {
+            model: request.model.id,
+            role: request.model.role,
+            attempt,
+            latencyMs,
+          });
+          throw new ArenaCancellationError();
+        }
+        if (isArenaCancellationError(error)) throw error;
+        const message = timeoutController.signal.aborted
           ? `OpenRouter request timed out after ${timeoutMs}ms`
           : sanitizeError(error);
         if (attempt === maxAttempts || !RETRYABLE.test(message)) {
@@ -151,7 +183,7 @@ export class OpenRouterClient implements OpenRouterGateway {
           delayMs,
           error: message,
         });
-        await sleep(delayMs);
+        await sleep(delayMs, request.signal);
       } finally {
         clearTimeout(watchdog);
       }
@@ -177,28 +209,53 @@ export class OpenRouterClient implements OpenRouterGateway {
     return body.data;
   }
 
-  async validateModel(model: ModelRegistryEntry): Promise<void> {
-    const response = await fetch(`${BASE_URL}/model/${model.id}`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok)
-      throw new Error(`Model ${model.id} validation failed with HTTP ${response.status}`);
-    const body = (await response.json()) as {
-      data?: { id?: string; canonical_slug?: string; supported_parameters?: string[] };
-    };
-    if (body.data?.id !== model.id) {
-      throw new Error(
-        `Model ${model.id} resolved to unexpected id ${body.data?.id ?? '<missing>'}`,
-      );
-    }
-    if (body.data.canonical_slug !== model.canonicalSlug) {
-      throw new Error(
-        `Model ${model.id} canonical slug changed: expected ${model.canonicalSlug}, got ${body.data?.canonical_slug ?? '<missing>'}`,
-      );
-    }
-    if (model.role === 'judge' && !body.data.supported_parameters?.includes('structured_outputs')) {
-      throw new Error(`Judge ${model.id} no longer advertises structured_outputs`);
+  async validateModel(model: ModelRegistryEntry, signal?: AbortSignal): Promise<void> {
+    throwIfCancelled(signal);
+    const timeoutMs = 30_000;
+    const timeoutController = new AbortController();
+    const validationSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
+    const watchdog = setTimeout(
+      () => timeoutController.abort(new Error(`Model validation timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    try {
+      const response = await fetch(`${BASE_URL}/model/${model.id}`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal: validationSignal,
+      });
+      if (!response.ok)
+        throw new Error(`Model ${model.id} validation failed with HTTP ${response.status}`);
+      const body = (await response.json()) as {
+        data?: { id?: string; canonical_slug?: string; supported_parameters?: string[] };
+      };
+      if (body.data?.id !== model.id) {
+        throw new Error(
+          `Model ${model.id} resolved to unexpected id ${body.data?.id ?? '<missing>'}`,
+        );
+      }
+      if (body.data.canonical_slug !== model.canonicalSlug) {
+        throw new Error(
+          `Model ${model.id} canonical slug changed: expected ${model.canonicalSlug}, got ${body.data?.canonical_slug ?? '<missing>'}`,
+        );
+      }
+      if (
+        model.role === 'judge' &&
+        !body.data.supported_parameters?.includes('structured_outputs')
+      ) {
+        throw new Error(`Judge ${model.id} no longer advertises structured_outputs`);
+      }
+    } catch (error) {
+      if (signal?.aborted) throw new ArenaCancellationError();
+      if (timeoutController.signal.aborted) {
+        throw new Error(`Model ${model.id} validation timed out after ${timeoutMs}ms`, {
+          cause: error,
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(watchdog);
     }
   }
 }
