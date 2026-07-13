@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createRemoteRun, fetchExecutionPack } from '../src/remote-arena.js';
+import {
+  createRemoteRun,
+  fetchExecutionPack,
+  remoteResultsRoot,
+  shouldPublishRemoteMatches,
+} from '../src/remote-arena.js';
 import { SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
 import { CATEGORY_CLUSTERS, METHODOLOGY_VERSION, type ArenaRunConfig } from '../src/types.js';
 
@@ -116,5 +122,23 @@ describe('remote speed run', () => {
     // The whole point: a speed manifest carries no judges and no private hashes.
     expect(postedBody!.manifest.judges).toEqual([]);
     expect(postedBody!.manifest.tasks.every((task) => task.privateHash === null)).toBe(true);
+  });
+});
+
+describe('mock-run isolation', () => {
+  it('never publishes matches from a mock run, even when publishing is requested', () => {
+    expect(shouldPublishRemoteMatches(true)).toBe(false);
+    expect(shouldPublishRemoteMatches(true, true)).toBe(false);
+    expect(shouldPublishRemoteMatches(false, true)).toBe(true);
+    expect(shouldPublishRemoteMatches(false, false)).toBe(false);
+    expect(shouldPublishRemoteMatches(false)).toBe(true);
+  });
+
+  it('keeps mock journals in a subtree a live run never reads', () => {
+    const live = remoteResultsRoot('reasoning', false);
+    const mock = remoteResultsRoot('reasoning', true);
+    expect(live.split(path.sep)).toContain('remote');
+    expect(mock.split(path.sep)).toContain('remote-mock');
+    expect(mock).not.toBe(live);
   });
 });

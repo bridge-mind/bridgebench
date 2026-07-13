@@ -139,19 +139,37 @@ export async function createRemoteRun(
   return { runKey: response.run.runKey, created: response.created };
 }
 
+/**
+ * Mock verdicts never reach the public ladder, even when a caller forgets
+ * --no-publish-matches.
+ */
+export function shouldPublishRemoteMatches(mock: boolean, publishMatches = true): boolean {
+  return publishMatches && !mock;
+}
+
+/**
+ * Mock journals live in their own subtree. A shared journal would let the
+ * next live run read and publish deterministic fake verdicts wholesale —
+ * exactly what --no-publish-matches exists to prevent.
+ */
+export function remoteResultsRoot(category: BenchmarkCategory, mock: boolean): string {
+  return path.join(
+    process.env.BRIDGEBENCH_RESULTS_DIR?.trim() || path.join(process.cwd(), 'results'),
+    mock ? 'remote-mock' : 'remote',
+    category,
+  );
+}
+
 export async function runRemoteArena(
   apiConfig: ApiConfig,
   options: RemoteArenaRunOptions,
 ): Promise<RemoteArenaRunResult> {
-  const { config, mock = false, publishMatches = true, logger = noopLogger } = options;
+  const { config, mock = false, logger = noopLogger } = options;
+  const publishMatches = shouldPublishRemoteMatches(mock, options.publishMatches);
   const { tasks } = await fetchExecutionPack(apiConfig, config.category);
   const { runKey } = await createRemoteRun(apiConfig, config, tasks);
 
-  const resultsRoot = path.join(
-    process.env.BRIDGEBENCH_RESULTS_DIR?.trim() || path.join(process.cwd(), 'results'),
-    'remote',
-    config.category,
-  );
+  const resultsRoot = remoteResultsRoot(config.category, mock);
   const store = new ArenaStore(remoteStoreConfig(config.category, resultsRoot));
   const eventSink = new RemoteArenaEventSink(apiConfig, runKey);
   const gateway: OpenRouterGateway = mock
