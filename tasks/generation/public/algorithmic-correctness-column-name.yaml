@@ -1,0 +1,168 @@
+id: algorithmic-correctness-column-name
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: toColumnName — Which Candidates Map Every Column Number to Its Bijective Base-26 Name
+summary: A spec defines toColumnName(n) as bijective base-26 spreadsheet column naming — 1 is A, 26 is Z, 27 is AA, 703 is AAA — with a complete acceptance vector of exact expected strings. Five candidates are submitted; one carries an off-by-one that surfaces only at multiples of 26, one shifts the whole alphabet, one reverses multi-letter names, and two are correct. Classify each conforms/violates and name the input that disproves each violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector, candidate-a,
+  candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite the artifact id(s) for
+  every claim. Do not execute anything — trace each candidate by hand against the acceptance-vector,
+  which gives the exact expected string.
+
+  Verdict vocabulary: a candidate CONFORMS if, for every acceptance-vector row, it returns the string
+  equal to the expected name AND it honors the spec; otherwise it VIOLATES.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or violates. State the
+     verdict for all five.
+
+  2. For every candidate you mark VIOLATES, name ONE acceptance-vector row (by its input n) it fails,
+     and give the string it returns versus the expected string.
+
+  3. candidate-b differs from candidate-a only in one arithmetic detail: it subtracts 1 before taking
+     the remainder but NOT before the division. Name the SMALLEST acceptance-vector input on which
+     candidate-b's output first differs from the spec, and give the string candidate-b returns there.
+
+  4. candidate-e is recursive rather than iterative. State whether candidate-e is behaviorally
+     equivalent to `spec`, and justify your answer from the code (not from its resemblance to another
+     candidate).
+
+  5. State the complete set of conforming candidates.
+artifacts:
+  - id: spec
+    type: spec
+    label: toColumnName specification (complete contract)
+    content: |
+      FUNCTION toColumnName(n)
+
+      Input:
+        n  an integer >= 1 (a 1-indexed spreadsheet column number).
+
+      Return:
+        The column's NAME as an uppercase A..Z string, using bijective base-26 (also called
+        "spreadsheet" or "Excel" column naming). This numeral system has 26 digits (A..Z) and NO zero
+        digit, so it is 1-indexed: 1 -> "A", 26 -> "Z", 27 -> "AA", 28 -> "AB", 52 -> "AZ",
+        53 -> "BA", 702 -> "ZZ", 703 -> "AAA".
+
+      Declared properties (part of the contract, not examples):
+        Q1  The mapping is a bijection between the integers >= 1 and non-empty A..Z strings. Because
+            there is no zero digit, converting n to its letters requires subtracting 1 BEFORE each
+            digit is taken AND before dividing down to the next place: at each step
+              n := n - 1;  letter := chr(65 + (n mod 26));  n := floor(n / 26).
+            Applying the -1 to only one of the two uses (the remainder OR the division) is incorrect.
+        Q2  The letters are ordered most-significant first: the last digit computed is PREPENDED, so
+            the final string reads left to right from the highest place to the lowest.
+        Q3  'A' is character code 65 and 'Z' is 90; digit value d in 0..25 maps to chr(65 + d).
+
+      This is the complete contract.
+  - id: acceptance-vector
+    type: table
+    label: complete acceptance vector (exact expected names)
+    content: |
+      This table is the COMPLETE acceptance set. Each row is n -> expected name. A candidate CONFORMS
+      iff it returns the expected name for every row.
+
+      row  n     expected
+      R1   1     "A"
+      R2   26    "Z"
+      R3   27    "AA"
+      R4   28    "AB"
+      R5   52    "AZ"
+      R6   53    "BA"
+      R7   702   "ZZ"
+      R8   703   "AAA"
+
+      Notes for tracing (the correct step is n -= 1; letter = chr(65 + n % 26); n = floor(n / 26)):
+        R2  26 -> 26-1=25; 25 % 26 = 25 -> 'Z'; floor(25/26)=0 -> stop -> "Z".
+        R3  27 -> 27-1=26; 26 % 26 = 0 -> 'A'; floor(26/26)=1; then 1-1=0 -> 'A' -> prepend -> "AA".
+        R7  702 -> "ZZ" (two full places); R8  703 -> "AAA" (carry into a third place).
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function toColumnName(n) {
+        let s = '';
+        while (n > 0) {
+          n -= 1;
+          s = String.fromCharCode(65 + (n % 26)) + s;
+          n = Math.floor(n / 26);
+        }
+        return s;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function toColumnName(n) {
+        let s = '';
+        while (n > 0) {
+          s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+          n = Math.floor(n / 26);          // divides n, not (n - 1)
+        }
+        return s;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function toColumnName(n) {
+        let s = '';
+        while (n > 0) {
+          n -= 1;
+          s = String.fromCharCode(64 + (n % 26)) + s;   // base 64 instead of 65
+          n = Math.floor(n / 26);
+        }
+        return s;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function toColumnName(n) {
+        let s = '';
+        while (n > 0) {
+          n -= 1;
+          s = s + String.fromCharCode(65 + (n % 26));   // appends instead of prepending
+          n = Math.floor(n / 26);
+        }
+        return s;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function toColumnName(n) {
+        if (n <= 0) return '';
+        const q = Math.floor((n - 1) / 26);
+        const r = (n - 1) % 26;
+        return toColumnName(q) + String.fromCharCode(65 + r);
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (bijective base-26 and char-code facts)
+    content: |
+      Scope for this task:
+        - candidate-a … candidate-e are the COMPLETE set of submissions.
+        - acceptance-vector is the COMPLETE acceptance set. A candidate CONFORMS iff for every row it
+          returns the expected name. Any row it misses makes it VIOLATE.
+
+      Facts you need to trace exactly (no execution required):
+        - Bijective base-26 has no zero digit, so the conversion subtracts 1 at EACH place before
+          taking the remainder AND before dividing down: n -= 1; d = n % 26; n = floor(n / 26). Doing
+          the -1 for only one of the two uses is the classic off-by-one; it stays correct for small n
+          and first breaks when a place rolls over — i.e. at a multiple of 26.
+        - String.fromCharCode(65) is 'A', (90) is 'Z'; a digit value d in 0..25 is chr(65 + d). Using
+          64 as the base shifts every letter down by one ('A' becomes '@').
+        - The digits are produced least-significant first, so a correct implementation PREPENDS each
+          new letter. Appending instead reverses multi-letter names.
+        - Math.floor(x / 26) is integer division.
+
+      Judge each candidate ONLY against this contract and vector. A candidate that is correct for the
+      single-letter rows can still VIOLATE on a row where a place rolls over.
+tags: [algorithm, base-conversion, bijective-base-26, off-by-one, algorithmic-correctness, generation]

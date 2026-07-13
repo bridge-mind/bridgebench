@@ -1,0 +1,50 @@
+id: speed-graphql-sdl
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: hard
+title: Emit a GraphQL SDL Schema for a Small Blog Domain
+summary: >-
+  Produce a valid GraphQL schema in SDL for a small blog domain: two object types, an enum, an input
+  type, and the Query and Mutation roots, matching the written contract exactly.
+prompt: |
+  Given [domain-contract], output a single GraphQL schema in SDL (schema definition language). Emit only
+  the SDL.
+
+  1. The `Author` and `Post` object types and the `PostStatus` enum, with the exact fields, nullability,
+     and list types described.
+  2. A `CreatePostInput` input type plus the `Query` and `Mutation` root types with the listed operations,
+     their arguments, and their return types.
+artifacts:
+  - id: domain-contract
+    type: spec
+    label: Domain contract
+    content: |
+      enum PostStatus: DRAFT, PUBLISHED, ARCHIVED
+
+      type Author:
+        id       : ID, non-null
+        name     : String, non-null
+        posts    : list of Post; the list is non-null and each item is non-null
+
+      type Post:
+        id       : ID, non-null
+        title    : String, non-null
+        body     : String, nullable
+        status   : PostStatus, non-null
+        author   : Author, non-null
+        tags     : list of String; the list is non-null and each item is non-null
+
+      input CreatePostInput:
+        title    : String, non-null
+        body     : String, nullable
+        status   : PostStatus, non-null
+        authorId : ID, non-null
+        tags     : list of non-null String; the list itself is nullable
+
+      Query:
+        post(id: ID!): Post              # result is nullable
+        posts(status: PostStatus): [Post!]!   # status argument is optional
+      Mutation:
+        createPost(input: CreatePostInput!): Post!   # result is non-null
+tags: [graphql, schema, api-design]

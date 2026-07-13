@@ -1,0 +1,166 @@
+id: state-corruption-default-card-flag
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Paywell Charges a Card the User Thought They Replaced — Two Rows Flagged Default
+summary: >-
+  A wallet shows two payment methods both flagged is_default=true, so checkout sometimes charges the
+  old card. Checkout looks guilty because it picks the wrong card, a reconciliation lint looks guilty
+  because it flags the drift, and the card-removal path is suspected. Find the one writer whose
+  execution first leaves a user with two defaults, separate it from the readers that only observe the
+  corrupt state, and state the adequate versus the shallow fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (invariant-spec, pm-schema, writers-code,
+  default-diff, event-trace, recon-report, oncall-note). Cite the artifact id(s) for every claim. Use
+  this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  In the "paywell" wallet, user u-5 has two payment methods both with is_default=true, and a checkout
+  charged the card u-5 thought they had replaced. Do not stop at where the wrong charge is observed;
+  trace to the writer where the "exactly one default" invariant is FIRST violated.
+
+  1. State the default invariant precisely, and list the COMPLETE set of functions permitted to write
+     payment_methods.is_default, per the artifacts.
+  2. ROOT CAUSE. Name the single function whose execution first leaves a user with two rows flagged
+     is_default=true, and cite the exact step and the trace point where the second default appears.
+     Explain why that violates the invariant.
+  3. RED HERRINGS. Classify the checkout default-lookup, the reconciliation lint, and the receipt
+     builder. For each, explain whether it corrupts state or only reads / reports state that was
+     already corrupt, citing the trace.
+  4. Explain whether removeCard's promote-another-default step is the defect or is invariant-preserving,
+     and justify with the trace.
+  5. FIX ADEQUACY. Two fixes are on the table: (a) a nightly job that finds users with more than one
+     default and keeps only the newest; (b) restore setDefaultCard so it clears the previous default in
+     the SAME transaction as setting the new one. Classify each as adequate-fix or shallow-fix and
+     justify which durably restores the invariant.
+  6. BLAST RADIUS. State exactly which users can end up with two defaults and which are unaffected,
+     tying it to default-diff.
+artifacts:
+  - id: invariant-spec
+    type: spec
+    label: paywell default-payment-method invariant and the complete writer set
+    content: |
+      paywell payment-method model (authoritative).
+
+      INVARIANT (D1): for every user, EXACTLY ONE of that user's payment_methods rows has
+      is_default=true — no more, no fewer (a user with at least one card always has one default).
+      Formally: COUNT(*) FILTER (WHERE is_default) OVER each user_id MUST equal 1. Setting a new
+      default MUST, in the same operation, clear the previous default, so the count never rises to 2.
+
+      COMPLETE WRITER SET: exactly two functions may write payment_methods.is_default — setDefaultCard
+      (when the user chooses a different default) and removeCard (which, only when it deletes the
+      current default, promotes another card to default). There are no other writers of is_default;
+      database triggers and raw SQL updates are prohibited by policy. This is the complete and
+      exhaustive list.
+
+      READERS (never write is_default): checkout's default-lookup reads WHERE is_default=true to pick a
+      card, the reconciliation lint counts defaults per user, and the receipt builder prints the default
+      card. None of them may modify is_default.
+  - id: pm-schema
+    type: config
+    label: paywell payment_methods table (excerpt)
+    content: |
+      -- payment_methods: one row per saved card.
+      --   card_id text primary key
+      --   user_id text not null
+      --   last4 text not null
+      --   is_default boolean not null default false   -- D1: exactly one true per user
+      --   created_at timestamptz not null default now()
+      -- There is NO partial unique index enforcing one default per user today
+      -- (e.g. no `CREATE UNIQUE INDEX ... ON payment_methods(user_id) WHERE is_default`).
+      -- The one-default rule is maintained solely by the writer functions.
+  - id: writers-code
+    type: code
+    label: the two is_default writers
+    content: |
+      // paywell/payment-methods.ts — the only functions permitted to write is_default.
+
+      export async function setDefaultCard(userId, newCardId) {
+        // user picked a new default card. (see default-diff for the step that moved)
+        await db.query(
+          'UPDATE payment_methods SET is_default=true WHERE card_id=$1 AND user_id=$2',
+          [newCardId, userId]);
+      }
+
+      export async function removeCard(userId, cardId) {
+        // delete a card; if it was the default, promote the most recent remaining card.
+        const { was_default } = await db.tx(async (t) => {
+          const row = await t.query('SELECT is_default FROM payment_methods WHERE card_id=$1', [cardId]);
+          await t.query('DELETE FROM payment_methods WHERE card_id=$1', [cardId]);
+          if (row.is_default) {
+            // promote exactly one replacement, atomically, only when the deleted card was the default.
+            await t.query(
+              `UPDATE payment_methods SET is_default=true WHERE card_id = (
+                 SELECT card_id FROM payment_methods WHERE user_id=$1
+                 ORDER BY created_at DESC LIMIT 1)`, [userId]);
+          }
+          return { was_default: row.is_default };
+        });
+        return was_default;
+      }
+  - id: default-diff
+    type: diff
+    label: change to setDefaultCard shipped on 2026-07-04
+    content: |
+      # commit "simplify setDefaultCard: just flag the chosen card"
+      # paywell/payment-methods.ts  setDefaultCard
+
+        export async function setDefaultCard(userId, newCardId) {
+      -   // v2: clear the old default, then set the new one, in one transaction.
+      -   await db.tx(async (t) => {
+      -     await t.query('UPDATE payment_methods SET is_default=false WHERE user_id=$1 AND is_default', [userId]);
+      -     await t.query('UPDATE payment_methods SET is_default=true  WHERE card_id=$1 AND user_id=$2', [newCardId, userId]);
+      -   });
+      +   // v3: just set the chosen card as default.
+      +   await db.query(
+      +     'UPDATE payment_methods SET is_default=true WHERE card_id=$1 AND user_id=$2',
+      +     [newCardId, userId]);
+        }
+      # The "clear the previous default" UPDATE was dropped. Setting the new default no longer un-sets
+      # the old one, so after a default change the user has TWO rows with is_default=true.
+  - id: event-trace
+    type: log
+    label: payment-method trace for user u-5 (defaults-count shown after each step)
+    content: |
+      # columns: time | op | u-5 rows with is_default=true (count) | note
+      t0 initial: c-1(default), c-2, c-3         defaults={c-1}  count=1   # D1 holds
+      t1 setDefaultCard(u-5, c-2): UPDATE is_default=true WHERE card_id=c-2
+                                                  defaults={c-1,c-2} count=2 # SECOND DEFAULT -> D1 FIRST BROKEN
+                                                  # (v3 did not clear c-1; see default-diff)
+      t2 checkout: SELECT card_id WHERE user_id=u-5 AND is_default=true LIMIT 1 -> returns c-1
+                                                  # charges the OLD card u-5 replaced; reads corrupt state, count still 2
+      t3 reconciliation lint: counts 2 defaults for u-5 -> FLAGS drift   # first observation, not first cause; count still 2
+      t4 removeCard(u-5, c-3): c-3 was not default -> DELETE only, no promote
+                                                  defaults={c-1,c-2} count=2  # removeCard left is_default untouched
+  - id: recon-report
+    type: table
+    label: nightly default-count reconciliation output
+    content: |
+      user | default_count | expected | changed_default_since_2026_07_04 | first_flagged
+      -----|---------------|----------|----------------------------------|--------------
+      u-5  | 2             | 1        | yes                              | 2026-07-05
+      u-8  | 1             | 1        | no                               | -
+      u-9  | 2             | 1        | yes                              | 2026-07-05
+      u-3  | 1             | 1        | yes-but-first-card-only          | -
+      # default_count = rows with is_default=true per user. Every user with count=2 changed their
+      # default (setDefaultCard old->new) after 2026-07-04. u-3 called setDefaultCard but only ever had
+      # one card set as its first default (no prior default to strand), so it stays at 1.
+  - id: oncall-note
+    type: note
+    label: on-call triage thread
+    content: |
+      Triage guesses during the incident (record only; not all correct):
+      - "Checkout is buggy — it charges the wrong card; fix the LIMIT 1 lookup." — checkout only READS
+        WHERE is_default=true (invariant-spec READERS). With two defaults its LIMIT 1 picks one
+        arbitrarily; it faithfully reads corrupt state and does not create the second default.
+      - "The reconciliation lint is miscounting / inventing a second default." — the lint only counts
+        rows and compares to 1 (invariant-spec READERS); event-trace t3 is the first OBSERVATION of the
+        drift, not its cause.
+      - "removeCard's promote step is adding an extra default." — removeCard promotes a replacement ONLY
+        when it deletes the current default, inside one transaction; event-trace t4 shows it left
+        is_default untouched when removing a non-default. It is invariant-preserving.
+      - "Just add is_default to the receipt and let support fix duplicates." — the receipt builder is a
+        read-only observer; it prints whichever default it reads and cannot restore D1.
+      Reminder: the only writers of is_default are the two in invariant-spec; look for the one that made
+      the count go from 1 to 2.
+tags: [state-corruption, invariant, default-flag, debugging, payments]

@@ -1,0 +1,228 @@
+id: spec-conformance-semver-precedence
+version: 1.0.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: compareVersions — Which Submission Obeys Every Semantic-Version Precedence Clause
+summary: A frozen precedence spec fixes seven clauses for compareVersions(a, b) returning -1/0/1 — core ordering, build-metadata is ignored, a pre-release is lower than its release, numeric-versus-alphanumeric identifier rules, numeric identifiers compared numerically not as strings, and the more-identifiers tie-break. Five submissions are under review; exactly one conforms while each near-miss breaks one clause. Classify all five and name the input that exposes each.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (precedence-spec, acceptance-vector,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite the artifact id(s) for
+  every claim. Do not add a precedence rule the spec omits and do not ignore one it states. The
+  verdict vocabulary is exactly: conforms / violates.
+
+  precedence-spec fixes clauses V1..V7 and is the complete contract. compareVersions(a, b) returns
+  -1 when a has LOWER precedence than b, 1 when HIGHER, and 0 when they are EQUAL in precedence.
+  acceptance-vector gives authoritative outputs. submission-manifest declares candidate-1..candidate-5
+  the entire set with exactly one conformer.
+
+  1. Classify each of candidate-1..candidate-5 as `conforms` or `violates` against precedence-spec.
+
+  2. For every candidate you mark `violates`, name the single clause (one of V1..V7) it breaks and
+     give one concrete (a, b) pair on which its returned number differs from the spec-correct number.
+     State both numbers.
+
+  3. Exactly one candidate `conforms`. Identify it and state the number it returns for the input
+     compareVersions("1.0.0-alpha.1", "1.0.0-alpha.beta").
+
+  4. In reviewer-thread, reviewer @nadia argues candidate-2 conforms because "it compares major,
+     minor, patch, the pre-release, and everything after it, so nothing is left out." State
+     candidate-2's verdict and cite the one clause that refutes @nadia, giving an (a, b) pair on
+     which candidate-2 returns a DIFFERENT number than the spec (state both numbers).
+
+  5. For the pair compareVersions("1.0.0-1.2", "1.0.0-1.10"), exactly one candidate returns 1 where
+     the spec requires -1. Name that candidate and the clause it breaks.
+artifacts:
+  - id: precedence-spec
+    type: spec
+    label: compareVersions precedence specification (frozen, complete)
+    content: |
+      compareVersions(a: string, b: string): -1 | 0 | 1
+
+      Both inputs are well-formed semantic-version strings of the shape
+      MAJOR.MINOR.PATCH[-prerelease][+build] (MAJOR/MINOR/PATCH are non-negative integers; the
+      optional prerelease is a dot-separated list of identifiers; the optional build is dot-separated
+      build metadata). You need NOT validate the inputs. The clauses below are the complete contract.
+
+      V1  RETURN CONTRACT. Return exactly the number -1, 0, or 1. -1 means a has LOWER precedence than
+          b; 1 means HIGHER; 0 means EQUAL precedence. No other value, and never a boolean.
+
+      V2  CORE PRECEDENCE. Compare MAJOR, then MINOR, then PATCH, each NUMERICALLY. The first
+          position that differs decides: the smaller number is lower precedence. If all three are
+          equal, precedence is decided by V3..V6.
+
+      V3  BUILD METADATA IGNORED. Everything after the first "+" (the build metadata) MUST NOT affect
+          precedence. Two versions that differ ONLY in build metadata have EQUAL precedence -> 0.
+
+      V4  PRE-RELEASE IS LOWER. When the cores are equal, a version WITH a pre-release has LOWER
+          precedence than the same core WITHOUT one. So "1.0.0-alpha" is lower than "1.0.0" -> -1.
+
+      V5  IDENTIFIER COMPARISON. When the cores are equal and BOTH have a pre-release, compare the
+          dot-separated identifiers left to right:
+            - two NUMERIC identifiers are compared numerically (so 2 is lower than 10);
+            - a NUMERIC identifier has LOWER precedence than an ALPHANUMERIC one;
+            - two ALPHANUMERIC identifiers are compared by ASCII order.
+          The first differing position decides.
+
+      V6  IDENTIFIER-COUNT TIE-BREAK. If one pre-release is a proper prefix of the other (every shared
+          identifier is equal), the one with MORE identifiers has HIGHER precedence. So "1.0.0-alpha"
+          is lower than "1.0.0-alpha.1" -> -1.
+
+      V7  EQUALITY. If none of V2..V6 produces a difference, the versions have equal precedence -> 0.
+
+      This is the entire specification.
+  - id: acceptance-vector
+    type: table
+    label: authoritative input/output vectors (spec-correct)
+    content: |
+      Authoritative outputs computed from precedence-spec. A conforming implementation reproduces
+      every row exactly.
+
+      #   compareVersions(a, b)                                 expected
+      --  ----------------------------------------------------  --------
+      AV1 ("1.2.3",              "1.2.4")                        -1     # patch 3 < 4 (V2)
+      AV2 ("2.0.0",              "1.9.9")                         1     # major 2 > 1 (V2)
+      AV3 ("1.0.0-alpha",        "1.0.0")                        -1     # pre-release < release (V4)
+      AV4 ("1.0.0+build.1",      "1.0.0+build.9")                 0     # build ignored (V3)
+      AV5 ("1.0.0-alpha",        "1.0.0-alpha.1")                -1     # fewer identifiers < more (V6)
+      AV6 ("1.0.0-alpha.1",      "1.0.0-alpha.beta")             -1     # numeric < alphanumeric (V5)
+      AV7 ("1.0.0-1.2",          "1.0.0-1.10")                   -1     # numeric 2 < 10, NOT "2" > "10" (V5)
+      AV8 ("1.0.0-alpha.beta",   "1.0.0-beta")                   -1     # "alpha" < "beta" ASCII (V5)
+      AV9 ("1.0.0",              "1.0.0")                         0     # identical (V7)
+
+      Ordering notes:
+        - AV4: the two strings differ only in build metadata; V3 says build is ignored, so 0 (not -1).
+        - AV7: "2" vs "10" as numbers is 2 < 10 -> -1. Comparing them as STRINGS gives "2" > "10"
+          (because '2' > '1'), which would wrongly return 1. V5 requires the numeric comparison.
+        - AV6: at the second identifier, "1" is numeric and "beta" is alphanumeric; V5 makes the
+          numeric one lower -> -1.
+  - id: candidates-a
+    type: code
+    label: shared helpers plus submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // Shared helpers used by every candidate.
+      // parseVer("1.2.3-a.1+b.2") -> { core:[1,2,3], pre:["a","1"], build:"b.2" }
+      function parseVer(v) {
+        const plus = v.indexOf('+');
+        const build = plus >= 0 ? v.slice(plus + 1) : '';
+        const noBuild = plus >= 0 ? v.slice(0, plus) : v;
+        const dash = noBuild.indexOf('-');
+        const coreStr = dash >= 0 ? noBuild.slice(0, dash) : noBuild;
+        const core = coreStr.split('.').map(Number);
+        const pre = dash >= 0 ? noBuild.slice(dash + 1).split('.') : null;
+        return { core, pre, build };
+      }
+      const isNum = (s) => /^[0-9]+$/.test(s);
+      const sign = (d) => (d < 0 ? -1 : d > 0 ? 1 : 0);
+      // comparePre(pa, pb): both are non-null identifier arrays -> -1|0|1 per V5/V6.
+      function comparePre(pa, pb) {
+        const n = Math.min(pa.length, pb.length);
+        for (let i = 0; i < n; i++) {
+          const x = pa[i], y = pb[i];
+          if (isNum(x) && isNum(y)) { const d = Number(x) - Number(y); if (d !== 0) return sign(d); }
+          else if (isNum(x)) return -1;              // numeric < alphanumeric (V5)
+          else if (isNum(y)) return 1;
+          else if (x !== y) return x < y ? -1 : 1;   // ASCII order (V5)
+        }
+        return sign(pa.length - pb.length);          // more identifiers -> higher (V6)
+      }
+
+      // ---- candidate-1 ----
+      function candidate1(a, b) {
+        const A = parseVer(a), B = parseVer(b);
+        for (let i = 0; i < 3; i++) if (A.core[i] !== B.core[i]) return sign(A.core[i] - B.core[i]); // V2
+        if (A.pre === null && B.pre === null) return 0;   // build ignored (V3), else equal (V7)
+        if (A.pre === null) return 1;                     // release > pre-release (V4)
+        if (B.pre === null) return -1;
+        return comparePre(A.pre, B.pre);                  // V5 / V6
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(a, b) {
+        const A = parseVer(a), B = parseVer(b);
+        for (let i = 0; i < 3; i++) if (A.core[i] !== B.core[i]) return sign(A.core[i] - B.core[i]);
+        if (A.pre === null && B.pre === null) {
+          if (A.build !== B.build) return A.build < B.build ? -1 : 1;  // compares build metadata
+          return 0;
+        }
+        if (A.pre === null) return 1;
+        if (B.pre === null) return -1;
+        return comparePre(A.pre, B.pre);
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(a, b) {
+        const A = parseVer(a), B = parseVer(b);
+        for (let i = 0; i < 3; i++) if (A.core[i] !== B.core[i]) return sign(A.core[i] - B.core[i]);
+        if (A.pre === null && B.pre === null) return 0;
+        if (A.pre === null) return -1;   // a WITHOUT a pre-release is treated as LOWER
+        if (B.pre === null) return 1;
+        return comparePre(A.pre, B.pre);
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5
+    content: |
+      // (reuse parseVer, isNum, sign from candidates-a)
+
+      // ---- candidate-4 ----
+      function candidate4(a, b) {
+        const A = parseVer(a), B = parseVer(b);
+        for (let i = 0; i < 3; i++) if (A.core[i] !== B.core[i]) return sign(A.core[i] - B.core[i]);
+        if (A.pre === null && B.pre === null) return 0;
+        if (A.pre === null) return 1;
+        if (B.pre === null) return -1;
+        // compares EVERY identifier as a string (no numeric handling)
+        const n = Math.min(A.pre.length, B.pre.length);
+        for (let i = 0; i < n; i++) if (A.pre[i] !== B.pre[i]) return A.pre[i] < B.pre[i] ? -1 : 1;
+        return sign(A.pre.length - B.pre.length);
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(a, b) {
+        const A = parseVer(a), B = parseVer(b);
+        for (let i = 0; i < 3; i++) if (A.core[i] !== B.core[i]) return sign(A.core[i] - B.core[i]);
+        if (A.pre === null && B.pre === null) return 0;
+        if (A.pre === null) return 1;
+        if (B.pre === null) return -1;
+        const n = Math.min(A.pre.length, B.pre.length);
+        for (let i = 0; i < n; i++) {
+          const x = A.pre[i], y = B.pre[i];
+          if (isNum(x) && isNum(y)) { const d = Number(x) - Number(y); if (d !== 0) return sign(d); }
+          else if (isNum(x)) return -1;
+          else if (isNum(y)) return 1;
+          else if (x !== y) return x < y ? -1 : 1;
+        }
+        return 0;   // returns 0 when one pre-release is a prefix of the other
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the five submissions
+    content: |
+      Review thread for compareVersions (PR #6402).
+
+      @nadia: "candidate-2 compares major, minor, patch, then the pre-release, and then everything
+      after it — nothing is left out. I think candidate-2 conforms."
+
+      @owen: "Comparing MORE than the spec asks is just as wrong as comparing less. V3 says one part
+      of the string must NOT affect the result. Feed candidate-2 two versions that differ only in
+      that part and see whether it still returns 0."
+
+      QA-208 (untriaged): "One submission orders a pre-release ABOVE its own release — it reports
+      '1.0.0-alpha' as higher precedence than '1.0.0'. Per V4 the pre-release must be lower."
+
+      QA-233 (untriaged): "One submission returns 1 for ('1.0.0-1.2', '1.0.0-1.10'). Those pre-release
+      identifiers are numeric; per V5 the second must be compared as 2 < 10, so the answer is -1."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for compareVersions: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5. This is the COMPLETE set; no other implementation is being
+      considered.
+
+      Acceptance rule: exactly one submission conforms to precedence-spec on every input (it
+      reproduces all nine acceptance-vector rows and obeys V1..V7 generally) and is to be accepted.
+      Each of the other four breaks exactly one clause. The process assumes precisely one conformer
+      exists in this set.
+tags: [generation, spec-conformance, semver, versioning, code-review]

@@ -1,0 +1,148 @@
+id: counterexample-pagination-cursor
+version: 1.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Keyset Pagination That Claims Every Row Exactly Once But Skips a Tied Boundary Row
+summary: >-
+  A team claims its keyset (cursor) pagination over orders sorted by a non-unique timestamp returns
+  every row exactly once. Decide whether the exactly-once property holds, and if not produce a concrete
+  counterexample from the data and the recorded run, isolate the diverging claim and code line, give
+  the weakest precondition and the minimal fix, adjudicate three reviewer objections, and judge whether
+  a proposed patch restores the property.
+prompt: |
+  The orders list uses keyset pagination: page size 2, ordered by created_at descending, with the next
+  page's cursor set to the last returned row's created_at. The team asserts this returns every row
+  EXACTLY ONCE across all pages (no skips, no duplicates). The authoritative property is defined by
+  [pagination-spec]; the shipped query is [query-code]; the table contents are [orders-data]; the
+  recorded run is [page-trace]; [schema-note] describes the columns; [reviewer-notes] holds three
+  objections; [proposed-patch] is a candidate fix.
+
+  Deliverables (answer every one, with the derivation that supports it):
+
+  1. Does the exactly-once property hold for this table? Answer yes or no.
+
+  2. If not, give a concrete counterexample: the specific row that is mishandled, and a step-by-step
+     trace of the pages (with the exact WHERE predicate value and the rows returned on each page, per
+     [page-trace]) showing how it is mishandled and why.
+
+  3. Name the exact claim in [pagination-spec] and the exact line in [query-code] that diverge, and
+     state the direction of the error (does the pagination under-return or over-return rows, and what
+     is the consequence?).
+
+  4. Give the weakest precondition on [orders-data] under which the SHIPPED query is exactly-once, and
+     state the minimal code change that makes it exactly-once for all tables. Justify the minimality.
+
+  5. Adjudicate the three objections in [reviewer-notes] (R1 concurrency-only, R2 add a tiebreaker to
+     ORDER BY, R3 raise the page size). For each, say whether it is a real divergence/fix and justify
+     from the spec, the data, and the code.
+
+  6. Does [proposed-patch] restore the exactly-once property? If not, give a second concrete
+     counterexample on which the patched query still violates it, and name the exact line the patch got
+     wrong.
+artifacts:
+  - id: pagination-spec
+    type: spec
+    label: Keyset pagination contract and the exactly-once claim
+    content: |
+      Keyset (cursor) pagination contract for the orders list:
+        - Page size is 2. Rows are ordered by created_at DESCENDING.
+        - The first page is requested with no cursor. Each response's NEXT cursor is the created_at of
+          the LAST row on the page. A later page is requested by passing that cursor.
+        - Pagination ends when a page returns fewer than 2 rows.
+
+      CLAIMED PROPERTY (under test): concatenating the pages, in order, yields every row of the table
+      EXACTLY ONCE — no row is skipped and no row appears on two pages. The team states this holds "for
+      any table contents, because each page starts strictly after the previous page's last row."
+
+      Definitions:
+        - SKIP: a row present in the table appears on no page.
+        - DUPLICATE: a row appears on two or more pages.
+        - EXACTLY-ONCE: neither a skip nor a duplicate occurs for any row.
+
+      The claimed property is exactly-once for the specific table in [orders-data] under the recorded
+      run in [page-trace]. Judge the property against the data and the shipped query, not against what
+      the team intended.
+  - id: query-code
+    type: code
+    label: orders pagination query (shipped)
+    content: |
+      // orders/pagination.ts  (shipped)
+      // cursor is the created_at of the previous page's last row, or null for the first page.
+      export function buildPageQuery(cursor: number | null) {
+        const where = cursor === null ? '' : 'WHERE created_at < :cursor';   // strict less-than
+        return sql`
+          SELECT id, created_at
+          FROM orders
+          ${where}
+          ORDER BY created_at DESC
+          LIMIT 2
+        `;
+        // next cursor is set by the caller to the last returned row's created_at:
+        //   nextCursor = rows.length === 2 ? rows[rows.length - 1].created_at : null;
+      }
+  - id: orders-data
+    type: table
+    label: orders table contents (complete)
+    content: |
+      # These are ALL rows in the orders table for this scenario. No other rows exist, and no rows are
+      # inserted, updated, or deleted during pagination (the run in page-trace is over this fixed set).
+      id     | created_at
+      ord_A  | 100
+      ord_B  | 90
+      ord_C  | 90
+      ord_D  | 80
+      ord_E  | 70
+      # created_at is a coarse (second-resolution) timestamp; ord_B and ord_C share created_at = 90.
+  - id: page-trace
+    type: log
+    label: Recorded pagination run (actual engine output)
+    content: |
+      # The actual rows the database returned for each page over [orders-data]. This is observed
+      # output, not a theory about tie-ordering: page 1 really returned ord_A then ord_B.
+      PAGE 1  cursor=null    -> ORDER BY created_at DESC LIMIT 2
+              returned: [ord_A (100), ord_B (90)]      nextCursor = 90
+      PAGE 2  cursor=90      -> WHERE created_at < 90 ORDER BY created_at DESC LIMIT 2
+              returned: [ord_D (80), ord_E (70)]       nextCursor = 70
+      PAGE 3  cursor=70      -> WHERE created_at < 70 ORDER BY created_at DESC LIMIT 2
+              returned: []                              (fewer than 2 -> pagination ends)
+      # Concatenation across pages: ord_A, ord_B, ord_D, ord_E.
+      # Total rows in the table: 5. Rows returned: 4.
+  - id: schema-note
+    type: note
+    label: orders schema facts
+    content: |
+      orders columns:
+        id          text  PRIMARY KEY        -- globally unique
+        created_at  integer (unix seconds)   -- NOT unique; coarse to the second
+      Multiple orders created in the same second share a created_at. Such ties are common in this
+      table; ord_B and ord_C are one such pair (both 90). id is the only unique/total-ordering column.
+  - id: reviewer-notes
+    type: note
+    label: Review objections
+    content: |
+      Three objections were filed against the exactly-once claim. None is guaranteed correct:
+
+        R1 (concurrency): "This is only a problem if rows are inserted WHILE you paginate. On a static
+        table, keyset pagination with `created_at < cursor` is exactly-once."
+
+        R2 (ordering): "The bug is just nondeterministic ordering within a tie. Add a tiebreaker to the
+        sort — `ORDER BY created_at DESC, id DESC` — and pagination becomes exactly-once."
+
+        R3 (page size): "Ties on a page boundary are rare. Raise the page size (LIMIT) so a tie group
+        doesn't straddle a boundary, and the problem disappears."
+
+      Decide the exactly-once property on the data and the shipped query first, then judge R1, R2, R3.
+  - id: proposed-patch
+    type: diff
+    label: Proposed patch to query-code
+    content: |
+      Proposed change to the cursor predicate in orders/pagination.ts:
+
+        const where = cursor === null ? '' :
+      -   'WHERE created_at < :cursor';
+      +   'WHERE created_at <= :cursor';
+
+      Author's note: "The strict `<` was dropping the boundary row. Switching to `<=` includes it, so no
+      row is skipped. Exactly-once restored." ORDER BY, LIMIT, and the nextCursor rule are unchanged.
+tags: [pagination, keyset-cursor, sql, counterexample, ordering, formal-reasoning]

@@ -1,0 +1,206 @@
+id: triage-iac-misconfig-report
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Triage a Bastion IaC Scan Against the Northwind Terraform Config
+summary: >-
+  A fictional infrastructure-as-code scanner "Bastion" raised 6 findings against the
+  Northwind Terraform config and declares full-tree coverage. Half are noise: an
+  intended-public CDN bucket, the load balancer's public HTTPS ingress, and an
+  RDS instance encrypted via a module default the scanner can't resolve. Classify
+  each finding as a true positive or a false positive using only the config and the
+  infra baseline, and refuse to inflate. Confirming all 6 is scored as an error.
+prompt: |
+  You are the cloud-security engineer triaging an automated IaC scan. The scanner
+  "Bastion" ran against the Northwind Terraform configuration and emitted 6 findings
+  (scan-report). Bastion matches per-resource: it does NOT resolve Terraform variable
+  defaults across module boundaries, and it does NOT read the team's infra baseline of
+  intended-public resources. Roughly half of what it reported is a false positive.
+
+  You are given the report plus the relevant config and triage context: scan-report,
+  storage-tf, network-tf, database-tf, iam-tf, and baseline. Answer each deliverable
+  using ONLY the supplied artifacts. Cite the artifact id(s) you rely on for every
+  claim. If something is not defined, not reachable, or not exploitable in the
+  artifacts, say so explicitly. This is analysis only: do NOT write exploit code,
+  attack commands, or credential-harvesting steps — the ceiling is explaining why an
+  issue is or is not a real exposure.
+
+  Over-flagging loses as clearly as missing. A finding is "real" only if you can cite
+  the misconfiguration in the config AND show baseline does not sanction it; a finding
+  is a false positive when an artifact shows a citable mechanism that neutralizes it
+  (an intended-public declaration, or a module default the scanner did not resolve). Do
+  not confirm a finding to appear cautious, and do not carry Bastion's severity ratings
+  through uncritically.
+
+  For findings C1 through C6, give a Verdict of TRUE POSITIVE or FALSE POSITIVE:
+    - For a TRUE POSITIVE: state the exposure (what is reachable/at risk), cite the
+      config line and the baseline rule it violates, give a calibrated Severity, and say
+      whether Bastion's own rating is accurate, inflated, or under-rated.
+    - For a FALSE POSITIVE: name the specific artifact and mechanism that neutralizes the
+      finding, and explain why Bastion could not see it.
+
+  1. C1 — public-read on the nw-backups S3 bucket (rule BAS-S3-PUBLIC). True or false positive?
+  2. C2 — public-read on the nw-site-assets S3 bucket (rule BAS-S3-PUBLIC). True or false positive?
+  3. C3 — sg-bastion-ssh allows 0.0.0.0/0 to tcp/22 (rule BAS-SG-WORLD). True or false positive?
+  4. C4 — sg-alb allows 0.0.0.0/0 to tcp/443 and tcp/80 (rule BAS-SG-WORLD). True or false positive?
+  5. C5 — nw-orders-db is unencrypted at rest (rule BAS-RDS-ENC). True or false positive?
+  6. C6 — nw-partner-role trust policy allows Principal "*" (rule BAS-IAM-TRUST). True or false positive?
+  7. Give the non-inflated summary: how many of the 6 findings are genuine exposures, broken
+     down by YOUR calibrated severity (not Bastion's). This count must reflect only findings
+     you confirmed in deliverables 1-6.
+artifacts:
+  - id: scan-report
+    type: table
+    label: Bastion IaC scan report for northwind-infra (6 findings, declares coverage)
+    content: |
+      Bastion IaC scan — northwind-infra
+      Engine: Bastion 2.3.1   Ruleset: bastion-terraform-default
+      Target: northwind-infra @ commit e5f6a7b8   (FULL-TREE scan)
+      Coverage: every .tf file under the config root and its modules/ was parsed. This report
+      lists EVERY finding Bastion raised — nothing is suppressed, deduplicated, or truncated.
+
+      Bastion limitations (declared by the vendor): Bastion evaluates each resource block in
+      isolation. It does NOT resolve Terraform variable defaults across module boundaries (a
+      value set from `var.x` is treated as unknown/absent), and it does NOT consult any
+      out-of-band inventory of intended-public resources — so it flags every public ACL and
+      every 0.0.0.0/0 ingress regardless of intent.
+
+      id  | rule           | bastion_severity | resource                        | finding
+      ----|----------------|------------------|---------------------------------|---------------------------------------------
+      C1  | BAS-S3-PUBLIC  | High             | aws_s3_bucket_acl.backups       | bucket ACL is public-read
+      C2  | BAS-S3-PUBLIC  | Critical         | aws_s3_bucket_acl.site_assets   | bucket ACL is public-read
+      C3  | BAS-SG-WORLD   | Medium           | aws_security_group.bastion_ssh  | ingress 0.0.0.0/0 to tcp/22
+      C4  | BAS-SG-WORLD   | High             | aws_security_group.alb          | ingress 0.0.0.0/0 to tcp/443 and tcp/80
+      C5  | BAS-RDS-ENC    | High             | aws_db_instance.this            | storage_encrypted not set to a literal true
+      C6  | BAS-IAM-TRUST  | High             | aws_iam_role.partner            | assume-role trust allows Principal "*"
+
+      Triage instruction: confirm or refute each finding against the config and the baseline.
+      A finding Bastion rated high is not automatically real, and its rating is not authoritative.
+  - id: storage-tf
+    type: config
+    label: northwind-infra/storage.tf — S3 buckets and ACLs (C1, C2)
+    content: |
+      # northwind-infra/storage.tf
+
+      resource "aws_s3_bucket" "site_assets" {
+        bucket = "nw-site-assets"
+        tags   = { exposure = "public-cdn-origin", contains = "static-assets" }
+      }
+      resource "aws_s3_bucket_acl" "site_assets" {
+        bucket = aws_s3_bucket.site_assets.id
+        acl    = "public-read"   # C2 — this is the CDN origin bucket
+      }
+
+      resource "aws_s3_bucket" "backups" {
+        bucket = "nw-backups"
+        tags   = { exposure = "private", contains = "db-snapshots" }
+      }
+      resource "aws_s3_bucket_acl" "backups" {
+        bucket = aws_s3_bucket.backups.id
+        acl    = "public-read"   # C1 — database snapshots bucket
+      }
+  - id: network-tf
+    type: config
+    label: northwind-infra/network.tf — security groups (C3, C4)
+    content: |
+      # northwind-infra/network.tf
+
+      resource "aws_security_group" "alb" {
+        name = "sg-alb"   # the public application load balancer
+        ingress { from_port = 443, to_port = 443, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] } # C4
+        ingress { from_port = 80,  to_port = 80,  protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] } # C4 (redirect to 443)
+        egress  { from_port = 0,   to_port = 0,   protocol = "-1",  cidr_blocks = ["0.0.0.0/0"] }
+      }
+
+      resource "aws_security_group" "bastion_ssh" {
+        name = "sg-bastion-ssh"   # the operator SSH jump host
+        ingress { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] } # C3
+        egress  { from_port = 0,  to_port = 0,  protocol = "-1",  cidr_blocks = ["0.0.0.0/0"] }
+      }
+  - id: database-tf
+    type: config
+    label: northwind-infra database resources and RDS module (C5)
+    content: |
+      # northwind-infra/database.tf
+      module "orders_db" {
+        source         = "./modules/rds"
+        identifier     = "nw-orders-db"
+        instance_class = "db.r6g.large"
+        # storage_encrypted is NOT overridden here, so the module default applies.
+      }
+
+      # northwind-infra/modules/rds/main.tf  (the leaf Bastion flagged as C5)
+      resource "aws_db_instance" "this" {
+        identifier        = var.identifier
+        instance_class    = var.instance_class
+        storage_encrypted = var.storage_encrypted   # driven by the module variable, not a literal
+        kms_key_id        = var.kms_key_id
+      }
+
+      # northwind-infra/modules/rds/variables.tf
+      variable "identifier"        { type = string }
+      variable "instance_class"    { type = string }
+      variable "storage_encrypted" { type = bool,   default = true }               # encrypted unless overridden
+      variable "kms_key_id"        { type = string, default = "alias/nw-rds-default" }
+  - id: iam-tf
+    type: config
+    label: northwind-infra/iam.tf — partner cross-account role (C6)
+    content: |
+      # northwind-infra/iam.tf
+
+      data "aws_iam_policy_document" "partner_trust" {
+        statement {
+          actions = ["sts:AssumeRole"]
+          principals {
+            type        = "AWS"
+            identifiers = ["*"]   # C6 — ANY AWS principal may assume this role
+          }
+        }
+      }
+
+      resource "aws_iam_role" "partner" {
+        name               = "nw-partner-role"
+        assume_role_policy  = data.aws_iam_policy_document.partner_trust.json
+      }
+
+      # The partner role is granted write access to the orders data bucket.
+      resource "aws_iam_role_policy_attachment" "partner_orders_write" {
+        role       = aws_iam_role.partner.name
+        policy_arn = aws_iam_policy.orders_write.arn   # s3:PutObject on nw-orders-data/*
+      }
+  - id: baseline
+    type: note
+    label: Northwind infra baseline (authoritative for classification)
+    content: |
+      Northwind infrastructure baseline — authored by the platform team; authoritative for
+      classifying the Bastion findings.
+
+      Intended-public inventory (COMPLETE). The ONLY resources intended to be reachable from
+      the public internet are:
+        (1) the nw-site-assets S3 bucket — public-read by design; it is the CDN origin for
+            static front-end assets and holds NO confidential data.
+        (2) the sg-alb security group's 0.0.0.0/0 ingress on tcp/443 and tcp/80 — the public
+            web entry point through the application load balancer (80 redirects to 443).
+      Every OTHER public-read bucket, and every OTHER 0.0.0.0/0 ingress, is a real exposure.
+      In particular: nw-backups holds database snapshots and MUST be private; and NO security
+      group is intended to expose SSH (tcp/22) to 0.0.0.0/0 — the SSH jump host is meant to be
+      restricted to the corporate CIDR.
+
+      RDS encryption rule. Every Northwind RDS instance is provisioned through modules/rds,
+      whose `storage_encrypted` variable DEFAULTS to true and whose invocations never override
+      it (database.tf). So every RDS instance — including nw-orders-db — is encrypted at rest,
+      even though the leaf aws_db_instance sets storage_encrypted from a variable rather than a
+      literal. There is no unencrypted RDS instance in this config.
+
+      Partner trust rule. nw-partner-role is intended to be assumable ONLY by the partner's
+      specific AWS account (id 440829173355). A wildcard trust Principal "*" is NOT sanctioned;
+      it lets any AWS account assume the role, which (per iam-tf) can write to the orders data
+      bucket.
+
+      Scanner blind spots. Bastion evaluates each resource in isolation: it does not resolve
+      the modules/rds storage_encrypted default across the module boundary (so it reports
+      module-defaulted encryption as absent), and it does not read this intended-public
+      inventory (so it reports the CDN bucket and the ALB ingress alongside the real exposures).
+      This baseline is the authoritative reference for what is intended versus a real defect.
+tags: [security, finding-triage, iac, terraform, false-positives]

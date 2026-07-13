@@ -1,0 +1,245 @@
+id: edge-case-coverage-csv-line-parser
+version: 1.0.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: parseFields — Which Submission Handles Every Declared CSV Field Edge
+summary: A single-record CSV parser spec enumerates five mandatory edges (quoted fields with literal commas, the doubled-quote escape, trailing empty fields, no whitespace trimming, and the empty line producing one empty field). Six submissions are under review; exactly one satisfies all five while each of five decoys misses exactly one. Classify all six by reading the code against the behavior scenarios and pin the failing edge for each near-miss.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (parser-spec, behavior-vectors,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent edges the spec omits and do not overlook one it requires. The verdict
+  vocabulary is exactly: conforms / violates. A submission `conforms` only if it satisfies EVERY
+  required edge E1..E5 in parser-spec.
+
+  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
+  satisfies all five edges. No code is executed; reason about behavior by reading each candidate
+  against the behavior-vectors scenarios.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single required edge (one of E1..E5) it
+     fails and cite the behavior-vectors scenario that exposes it. Give the conforming output and the
+     candidate's output for that scenario.
+
+  3. Exactly one candidate `conforms` (satisfies all five edges). Identify it.
+
+  4. In reviewer-thread, reviewer @lena says candidate-5 conforms because "trimming stray whitespace
+     around fields is what callers always want." State candidate-5's verdict and cite the edge and
+     behavior-vectors scenario that refutes @lena.
+
+  5. For candidate-6, state exactly what it returns for the empty-string input "" and name the
+     required edge this breaks.
+artifacts:
+  - id: parser-spec
+    type: spec
+    label: parseFields specification with required edge set (complete)
+    content: |
+      parseFields(line: string): string[]
+
+      parseFields splits ONE CSV record (a single line, no embedded newlines) into its field values.
+      A conforming implementation MUST satisfy every required edge below. This list is COMPLETE; an
+      implementation that mishandles any single one does NOT conform.
+
+      E1  QUOTED FIELDS. A field MAY be wrapped in double quotes. The surrounding quotes are NOT part
+          of the value (they are removed), and a comma INSIDE a quoted field is a literal character,
+          not a field separator. So `x,"a,b",y` parses to three fields: x, then a,b, then y.
+
+      E2  ESCAPED QUOTE. Inside a quoted field, two consecutive double quotes ("") denote ONE literal
+          double-quote character in the value. So `"a""b"` is one field whose value is a"b.
+
+      E3  EMPTY AND TRAILING FIELDS. An empty field yields the empty string "". A trailing comma
+          therefore produces a trailing empty field. So `p,q,` parses to three fields: p, q, "".
+
+      E4  NO TRIMMING. Whitespace is significant and preserved; fields are NOT trimmed. So ` a , b `
+          parses to two fields whose values are " a " and " b " (each with its surrounding spaces).
+
+      E5  EMPTY LINE. The empty input string "" is one empty field: parseFields("") returns [""] (an
+          array containing a single empty string), NOT the empty array [].
+
+      This is the entire required edge set.
+  - id: behavior-vectors
+    type: note
+    label: authoritative behavior scenarios (one per required edge)
+    content: |
+      One authoritative scenario per required edge. A conforming implementation produces the stated
+      conforming output. (Field arrays shown as JSON.)
+
+      BV-E1 (quoted fields):    parseFields(`x,"a,b",y`)
+        Conforming: ["x", "a,b", "y"]   (the middle field keeps its comma; quotes removed)
+
+      BV-E2 (escaped quote):    parseFields(`"a""b"`)
+        Conforming: ["a\"b"]            (one field; the "" becomes a single literal ")
+
+      BV-E3 (trailing field):   parseFields("p,q,")
+        Conforming: ["p", "q", ""]      (the trailing comma yields a trailing empty field)
+
+      BV-E4 (no trimming):      parseFields(" a , b ")
+        Conforming: [" a ", " b "]      (surrounding spaces preserved, not trimmed)
+
+      BV-E5 (empty line):       parseFields("")
+        Conforming: [""]                (a single empty field, not [])
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function parseFields1(line) {
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"') {
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }  // E2: "" -> literal "
+              inQ = false; continue;                                      // E1: closing quote removed
+            }
+            field += ch; continue;                                       // E1: literal, incl. commas
+          }
+          if (ch === '"') { inQ = true; continue; }                      // E1: opening quote removed
+          if (ch === ',') { out.push(field); field = ''; continue; }     // E3: separator
+          field += ch;                                                   // E4: literal, incl. spaces
+        }
+        out.push(field);                                                 // E3: final field
+        return out;
+      }
+
+      // ---- candidate-2 ----
+      function parseFields2(line) {
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === ',') { out.push(field); field = ''; continue; }     // splits even inside quotes
+          if (inQ) {
+            if (ch === '"') {
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }
+              inQ = false; continue;
+            }
+            field += ch; continue;
+          }
+          if (ch === '"') { inQ = true; continue; }
+          field += ch;
+        }
+        out.push(field);
+        return out;
+      }
+
+      // ---- candidate-3 ----
+      function parseFields3(line) {
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"') { inQ = false; continue; }                   // closes on ANY quote (no "")
+            field += ch; continue;
+          }
+          if (ch === '"') { inQ = true; continue; }
+          if (ch === ',') { out.push(field); field = ''; continue; }
+          field += ch;
+        }
+        out.push(field);
+        return out;
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function parseFields4(line) {
+        if (line.endsWith(',')) line = line.slice(0, -1);                // drops one trailing field
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"') {
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }
+              inQ = false; continue;
+            }
+            field += ch; continue;
+          }
+          if (ch === '"') { inQ = true; continue; }
+          if (ch === ',') { out.push(field); field = ''; continue; }
+          field += ch;
+        }
+        out.push(field);
+        return out;
+      }
+
+      // ---- candidate-5 ----
+      function parseFields5(line) {
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"') {
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }
+              inQ = false; continue;
+            }
+            field += ch; continue;
+          }
+          if (ch === '"') { inQ = true; continue; }
+          if (ch === ',') { out.push(field.trim()); field = ''; continue; }  // trims each field
+          field += ch;
+        }
+        out.push(field.trim());                                              // trims the final field
+        return out;
+      }
+
+      // ---- candidate-6 ----
+      function parseFields6(line) {
+        if (line === '') return [];                                      // empty line -> no fields
+        const out = [];
+        let field = '';
+        let inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (inQ) {
+            if (ch === '"') {
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }
+              inQ = false; continue;
+            }
+            field += ch; continue;
+          }
+          if (ch === '"') { inQ = true; continue; }
+          if (ch === ',') { out.push(field); field = ''; continue; }
+          field += ch;
+        }
+        out.push(field);
+        return out;
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the six submissions
+    content: |
+      Review thread for parseFields (PR #8041).
+
+      @lena: "candidate-5 is the cleanest. Trimming stray whitespace around each field is what callers
+      always want anyway, so I'd approve it."
+
+      @raj: "The spec explicitly says whitespace is significant — a leading or trailing space is part
+      of the value. Feed each submission a field that is deliberately padded with spaces and compare
+      it to the required output."
+
+      QA-410 (untriaged): "One submission loses the trailing empty field when a record ends in a
+      comma. One returns nothing at all for a blank line. One splits a quoted field on the comma
+      inside it. These may be different submissions."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for parseFields: candidate-1, candidate-2, candidate-3, candidate-4,
+      candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: exactly one submission satisfies ALL five required edges (E1..E5) and is to be
+      accepted. Each of the other five mishandles exactly one required edge. The process assumes
+      precisely one such all-edges-correct submission exists in this set.
+tags: [generation, edge-case-coverage, csv, parsing, code-review]

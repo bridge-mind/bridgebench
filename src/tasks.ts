@@ -23,8 +23,8 @@ import { packageRoot } from './paths.js';
 // Package-relative, not repo-relative: the task packs ship in the npm
 // tarball, so the default root must resolve inside the installed package.
 const ROOT = packageRoot(import.meta.url);
-export const TASKS_PER_CATEGORY = 12;
-export const TASKS_PER_CLUSTER = 2;
+export const TASKS_PER_CATEGORY = 18;
+export const TASKS_PER_CLUSTER = 3;
 const APPROXIMATE_CHARS_PER_TOKEN = 4;
 
 export function defaultTaskRoot(category: BenchmarkCategory): string {

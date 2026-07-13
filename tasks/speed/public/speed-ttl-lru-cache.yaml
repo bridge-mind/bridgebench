@@ -1,0 +1,34 @@
+id: speed-ttl-lru-cache
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: hard
+title: Build an In-Memory LRU Cache With Per-Entry TTL
+summary: >-
+  Produce a complete, self-contained TypeScript module implementing a capacity-bounded LRU cache whose
+  entries expire after a TTL, with lazy expiry on access and an explicit prune method.
+prompt: |
+  Write a single TypeScript module `ttlCache.ts` implementing the cache described in [cache-spec] using
+  only standard-library features. Emit the full file.
+
+  1. A generic `class TtlCache<K, V>` constructed with `{ capacity: number; ttlMs: number }`.
+  2. Methods `get(key)`, `set(key, value)`, `has(key)`, `delete(key)`, a `size` accessor, and `prune()`,
+     each honoring the eviction and expiry rules exactly.
+  3. A brief doc comment on each public member stating its effect on recency and expiry.
+artifacts:
+  - id: cache-spec
+    type: spec
+    label: Cache behavior
+    content: |
+      TtlCache<K, V>({ capacity, ttlMs })
+      - each entry stores its value and an expiresAt = Date.now() + ttlMs, computed when the entry is written
+      - get(key): if the entry is missing or expired, delete it if present and return undefined; otherwise
+        mark it most-recently-used and return the value
+      - set(key, value): insert or overwrite; overwriting refreshes expiresAt and marks the entry MRU; if
+        inserting a brand-new key would exceed capacity, evict the least-recently-used entry first
+      - has(key): true only when the key is present and not expired; it must not change recency
+      - delete(key): remove the entry, returning true if it existed and false otherwise
+      - size: the number of entries currently present and not yet expired
+      - prune(): drop every expired entry and return the count removed
+      - recency is defined solely by get and set; has, delete, size, and prune never promote an entry
+tags: [typescript, cache, data-structures]

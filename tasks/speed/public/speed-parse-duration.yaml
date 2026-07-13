@@ -1,0 +1,29 @@
+id: speed-parse-duration
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Implement a Duration-String Parser With a Small Test
+summary: >-
+  Write a single TypeScript function that parses a human-readable duration string like "1h30m" into a
+  total number of milliseconds per the given rules, plus three assertion-style examples.
+prompt: |
+  Implement the function described in [duration-spec] in TypeScript, then give three example calls with
+  their expected outputs that together exercise a compound value, a single unit, and the invalid case.
+
+  1. The complete `parseDuration` function, typed, with no external dependencies.
+  2. Three lines: two `expect(parseDuration(input)).toBe(output)` and one showing the thrown error for a
+     malformed input, covering a multi-unit string, a single-unit string, and an unrecognized unit.
+artifacts:
+  - id: duration-spec
+    type: spec
+    label: Duration rules
+    content: |
+      parseDuration(input: string): number  // returns whole milliseconds
+      - the string is one or more `<integer><unit>` components with no separators, e.g. "1h30m", "500ms"
+      - recognized units and their millisecond values: ms=1, s=1000, m=60000, h=3600000, d=86400000
+      - each integer is a run of ASCII digits; components are summed left to right
+      - "ms" must be matched before "m", so "500ms" is 500 ms, not 500 minutes followed by a stray "s"
+      - leading and trailing ASCII whitespace is trimmed before parsing
+      - throw a RangeError if the string is empty, has any leftover characters, or names an unknown unit
+tags: [typescript, parsing, utility]

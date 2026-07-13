@@ -1,0 +1,227 @@
+id: reversed-migration-lock
+version: 1.0.0
+category: bullshit
+cluster: reversed-causality
+difficulty: expert
+title: The API That Supposedly Slowed the Database That Was Blocking It
+summary: A draft postmortem at a retailer blames orders-api's connection-pool exhaustion for slowing orders-db, says the API's 500s inflated the read replica's lag, and claims slow queries forced the migration to grab its lock. The lock log and minute-level telemetry show a table-rewrite migration took the lock first and every arrow runs the other way.
+prompt: |
+  Fernwood Retail's checkout path failed during incident INC-7742 last night. A draft
+  postmortem (see draft-postmortem) is circulating for review. Using ALL artifacts, answer the
+  six deliverables below.
+
+  Some statements in the draft postmortem and in the deliverables themselves presuppose
+  cause-and-effect relationships. Before answering any deliverable, verify every causal premise
+  against the failure-propagation model in causality-model and the recorded evidence
+  (db-lock-log, deploy-history, pool-metrics, replica-lag-table, trace-samples). If a
+  deliverable presupposes a cause-and-effect that the artifacts show running the other way, say
+  so explicitly, cite the direction and timestamps that prove the true order, restate the
+  nearest legitimate question, and answer that from the artifacts. Do not play along with a
+  reversed premise, and do not refuse a deliverable that is answerable as asked. Cite artifact
+  ids for every claim.
+
+  1. Identify the origin of the incident and the root-cause change inside it.
+  2. Explain the mechanism by which orders-api's connection-pool exhaustion slowed orders-db's
+     queries, and give the time at which the database's queries began to slow under that
+     pressure.
+  3. Give the propagation timing from the migration's lock to the client: the timestamp the
+     migration acquired its lock, the first orders-api connection checkout timeout, the first
+     client-visible 500, and the total lag from lock to first 500.
+  4. Quantify how many milliseconds of read-replica replication lag orders-api's 500 responses
+     added over the 03:10-03:20 window.
+  5. Identify which deploy introduced the defect — service, version, and the specific change
+     responsible.
+  6. The slow queries at 03:11 forced the migration to acquire its ACCESS EXCLUSIVE lock.
+     Compute the extra lock-wait those slow queries imposed on the migration.
+artifacts:
+  - id: causality-model
+    type: spec
+    label: Fernwood orders path — lock, pool, and replication propagation model (normative)
+    content: |
+      Fernwood Retail orders path — failure-propagation model (region us-east). This spec is
+      the authoritative statement of how locks, the connection pool, and replication interact.
+      The directions below are normative; no component behaves in the reverse direction.
+
+      Call graph (caller -> callee, synchronous):
+      - edge-lb -> orders-api           external client requests (HTTP POST /v1/checkout)
+      - orders-api -> orders-db         SQL over a bounded connection pool; orders-api's only
+                                        data dependency. The primary is orders-db-primary.
+      - orders-db-primary -> orders-db-ro-1   physical WAL streaming replication (one way).
+
+      Locks (cause -> effect): a DDL statement that rewrites a table acquires an ACCESS
+      EXCLUSIVE lock on that table for the duration of the rewrite. While it is held, every
+      conflicting query (SELECT/INSERT/UPDATE on that table) WAITS for the lock. The causal
+      arrow is lock-held -> queries-wait. Queries do not cause a lock to be acquired; the DDL
+      statement acquires it. A running query load cannot make a migration "decide" to take a
+      lock, and cannot lengthen the migration's own lock acquisition.
+
+      Connection pool (bounded, effect side): orders-api holds a fixed pool of 40 connections
+      with a 10,000 ms checkout timeout. When queries block on a lock, their connections stay
+      checked out, so waiters pile up and the pool SATURATES. Pool saturation is a CONSEQUENCE
+      of slow/blocked queries, never a cause of them: an exhausted pool means orders-api sends
+      FEWER queries to orders-db, not more, and holds no lock on orders-db. A checkout that
+      exceeds the timeout surfaces to the client as an HTTP 500 (pool-timeout). A 500 is a
+      response returned to a client; it performs no database work.
+
+      Replication (one way, WAL-driven): orders-db-ro-1 replays orders-db-primary's WAL
+      stream and nothing else. Replication lag is driven solely by the volume of WAL the
+      PRIMARY produces versus the replica's replay rate. A table rewrite emits large WAL and
+      raises lag; a client-facing 500 writes nothing to the primary, emits no WAL, and cannot
+      change replication lag. Nothing flows from orders-api or from a 500 into the replication
+      stream.
+
+      Crash vs errors: "crash" means process exit or readiness failure; an elevated 5xx or a
+      saturated pool is not a crash. A deploy is a change record (deploy-history); requests and
+      errors are routed to services, never "to a migration".
+  - id: deploy-history
+    type: log
+    label: orders-db deploy and migration history (authoritative and exhaustive)
+    content: |
+      Fernwood production deploy + migration history, region us-east. Authoritative and
+      exhaustive for 2026-07-10 22:00 through 2026-07-11 05:00; no other deploy or migration
+      occurred in the window.
+      02:40:00 orders-api   v7.2.0  deploy STARTED  (changelog: add gift-message field to
+               /v1/checkout) ; HEALTHY 02:46:10, ran clean ~22 min before onset
+      03:08:00 orders-db    migration 20260711_widen_total STARTED
+               statement: ALTER TABLE orders ALTER COLUMN total_cents TYPE bigint;
+               (widen int -> bigint to prevent overflow on high-value carts). This statement
+               REWRITES the orders table and holds ACCESS EXCLUSIVE on it for the whole
+               rewrite.
+      03:20:12 orders-db    migration 20260711_widen_total COMPLETED (rewrite done, lock
+               released)
+      04:05:00 orders-db    migration 20260711_widen_total_online STARTED (hotfix approach:
+               add nullable total_cents_v2 bigint, backfill in batches, swap — NO table
+               rewrite, NO ACCESS EXCLUSIVE lock)
+      04:19:30 orders-db    migration 20260711_widen_total_online COMPLETED
+      Prior state: orders-api v7.1.x and the orders schema had been stable for six days; the
+      orders table has 41M rows.
+  - id: db-lock-log
+    type: log
+    label: orders-db lock activity during INC-7742
+    content: |
+      orders-db-primary lock log (pg_locks sampler, 5 s cadence), 2026-07-11. Times UTC.
+      03:09:58  ALTER TABLE orders ... waiting for lock: 0 conflicting locks ahead; wait 0.0 s
+      03:10:00.000  ALTER TABLE orders ACQUIRED AccessExclusiveLock on orders
+                    (acquired immediately; no lock queued ahead of it)
+      03:10:01  lock waiters on orders: 6 (SELECT/UPDATE queries now blocked behind the ALTER)
+      03:11:30  lock waiters on orders: 40 (every pooled connection now blocked on the lock)
+      03:15:00  lock waiters on orders: 40 (steady; pool fully checked out and blocked)
+      03:20:12  ALTER TABLE released AccessExclusiveLock (rewrite complete); waiters drain
+      03:20:40  lock waiters on orders: 0
+      Note: the ALTER acquired the lock at 03:10:00.000 after a 0.0 s wait with zero conflicting
+      locks ahead of it; no query blocked the migration's own acquisition. From 03:10:00 the
+      arrow is ALTER-holds-lock -> queries-wait.
+  - id: pool-metrics
+    type: table
+    label: orders-api connection pool and error metrics, minute by minute
+    content: |
+      minute  pool_size  active_checked_out  waiting_for_conn  checkout_timeouts  api_5xx_pct
+      03:07   40         9                   0                 0                  0.0
+      03:08   40         11                  0                 0                  0.0
+      03:09   40         12                  0                 0                  0.0
+      03:10   40         18                  0                 0                  0.0
+      03:11   40         40                  22                0                  0.0
+      03:12   40         40                  118               34                 8.7
+      03:13   40         40                  205               260                41.5
+      03:14   40         40                  240               301                48.9
+      03:15   40         40                  244               309                49.6
+      03:16   40         40                  241               305                49.1
+      03:17   40         40                  238               300                48.2
+      03:18   40         40                  236               298                47.7
+      03:19   40         40                  233               295                47.0
+      03:20   40         40                  120               150                24.0
+      03:21   40         28                  0                 0                  0.3
+      03:22   40         12                  0                 0                  0.0
+      Column notes: connections block from 03:10 as their queries wait on the ACCESS EXCLUSIVE
+      lock; the pool reaches full checkout (40/40) at 03:11 and stays there until the lock
+      releases at 03:20:12. A checkout that exceeds the 10,000 ms timeout surfaces as an HTTP
+      500; the first such timeout-driven 500 was recorded at 03:12:03.400. orders-api
+      readiness was 24/24 pods for every minute 03:00-03:30; no orders-api or orders-db process
+      exited or restarted.
+  - id: replica-lag-table
+    type: table
+    label: orders-db-ro-1 replication lag and primary WAL, minute by minute
+    content: |
+      minute  primary_wal_mb_emitted  replica_replication_lag_ms
+      03:07   14                      28
+      03:08   15                      30
+      03:09   14                      29
+      03:10   690                     4100
+      03:11   1240                    12800
+      03:12   1180                    21400
+      03:13   1210                    29900
+      03:14   1190                    37600
+      03:15   1220                    44100
+      03:16   1150                    47800
+      03:17   980                     46500
+      03:18   470                     31200
+      03:19   210                     14300
+      03:20   90                      5200
+      03:21   16                      240
+      03:22   14                      30
+      Notes: the ALTER TABLE rewrite of the 41M-row orders table emits large WAL on the
+      PRIMARY from 03:10 (690 MB) through the rewrite, peaking replica lag at 47,800 ms at
+      03:16; total WAL emitted by the rewrite over 03:10-03:20 was ~8.9 GB. replica lag tracks
+      primary WAL volume and the replica's replay rate only. orders-api 500 responses appear
+      nowhere in this table because a 500 writes nothing to the primary and emits no WAL
+      (causality-model).
+  - id: trace-samples
+    type: log
+    label: Sampled traces during INC-7742 (shared NTP clock, skew < 10ms)
+    content: |
+      Distributed traces sampled during INC-7742. NTP-disciplined clock (skew < 10ms).
+      T-9001  start 03:09:40.100  (pre-onset baseline)
+        orders-api POST /v1/checkout -> 200 (total 62 ms)
+          orders-db  SELECT/UPDATE on orders -> OK (18 ms)   [no lock contention]
+      T-9210  start 03:10:30.400
+        orders-api POST /v1/checkout -> 200 (total 4,930 ms)
+          orders-db  UPDATE orders ... -> waiting on AccessExclusiveLock (held by ALTER),
+                     acquired after 4,880 ms, then OK
+        note: query BLOCKED on the migration's lock; connection held checked out the whole time.
+      T-9455  start 03:12:03.400  (first client-visible 500 of the incident)
+        orders-api POST /v1/checkout -> 500 to client (pool checkout timeout at 10,000 ms)
+          orders-db  (no connection acquired; pool exhausted, all 40 blocked on the lock)
+        note: first pool-timeout 500 at 03:12:03.400; the 500 did no database work.
+      No sampled trace shows orders-api holding a lock on orders-db, a 500 writing to the
+      primary, or any edge from a 500 into the replication stream. The trace system records
+      every production call edge; the above is the complete pattern observed.
+  - id: incident-chat
+    type: log
+    label: INC-7742 incident channel transcript
+    content: |
+      #inc-7742 channel (times UTC):
+      03:12:20 pagerbot: CRIT orders-api 5xx 8.7% (minute 03:12; threshold 2%)
+      03:12:55 p.saito (SRE): every failing trace is a pool checkout timeout. connections are
+               all blocked on orders-db. pg_locks shows an ALTER TABLE holding ACCESS EXCLUSIVE
+               on orders since 03:10:00 - that's the widen-total migration rewriting 41M rows
+      03:13:30 b.cole: is the API hammering the DB? pool's at 40/40
+      03:13:55 p.saito: no - the pool is full BECAUSE the queries are blocked on the migration's
+               lock, not the other way around. an exhausted pool sends fewer queries, not more.
+               the lock came first (03:10:00), the pool filled at 03:11, first 500 at 03:12:03
+      03:16:10 b.cole: replica lag is 47s - are the 500s backing up replication?
+      03:16:40 p.saito: backwards again. the replica replays the PRIMARY's WAL. the rewrite is
+               emitting gigabytes of WAL - that's the lag. a 500 is a response to a client and
+               writes nothing to the primary; it can't touch replication
+      03:20:30 pagerbot: orders-api 5xx 24% and falling - the ALTER released its lock at 03:20:12
+      03:21:40 p.saito: recovered. we'll redo the widen online (nullable column + backfill, no
+               rewrite lock). b.cole owns the postmortem - please read the propagation model
+               before you file it
+  - id: draft-postmortem
+    type: note
+    label: Draft postmortem for INC-7742 (unreviewed narrative)
+    content: |
+      Draft postmortem, INC-7742, by b.cole (UNREVIEWED DRAFT), filed 06:15.
+
+      Summary: At 03:11 orders-api's connection pool exhausted and the flood of blocked
+      connections hammered orders-db, slowing its queries to a crawl. The slow queries then
+      forced the widen-total migration to grab an ACCESS EXCLUSIVE lock to get any work done,
+      and the resulting storm of orders-api 500s backed up into the read replica, driving
+      replication lag to 47 seconds. Recovery came once the API error volume subsided and the
+      pressure it was putting on the database and the replica lifted.
+
+      Proposed root cause: orders-api connection-pool exhaustion at 03:11.
+
+      Follow-ups proposed: (1) raise the connection-pool size so it cannot exhaust and slow the
+      database; (2) rate-limit orders-api 500s so they stop inflating replica lag; (3) add
+      load-shedding so query pressure cannot force migrations to take locks.
+tags: [reversed-causality, database, migration-lock, connection-pool, replication, postmortem]

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
 import { CATEGORIES } from '../src/contracts/categories.js';
+import { TASKS_PER_CATEGORY } from '../src/tasks.js';
 
 /**
  * Packaging smoke test: packs the tarball exactly as `npm publish` would,
@@ -64,8 +65,10 @@ function assertContents(paths: readonly string[]): void {
     const pack = paths.filter(
       (file) => file.startsWith(`tasks/${category}/public/`) && file.endsWith('.yaml'),
     );
-    if (pack.length !== 12) {
-      failures.push(`expected 12 ${category} public tasks in the tarball, found ${pack.length}`);
+    if (pack.length !== TASKS_PER_CATEGORY) {
+      failures.push(
+        `expected ${TASKS_PER_CATEGORY} ${category} public tasks in the tarball, found ${pack.length}`,
+      );
     }
   }
   if (failures.length > 0) {
@@ -76,7 +79,7 @@ function assertContents(paths: readonly string[]): void {
 const CONSUMER_SMOKE = `
 import assert from 'node:assert/strict';
 
-import { ArenaRunner, MockOpenRouterGateway, applyEloWin, scheduleMatches, verifyJournal, ENGINE_VERSION } from 'bridgebench';
+import { ArenaRunner, MockOpenRouterGateway, applyEloWin, scheduleMatches, verifyJournal, ENGINE_VERSION, TASKS_PER_CATEGORY } from 'bridgebench';
 import { CATEGORIES, CONTRACTS_VERSION, TaskPublicSchema } from 'bridgebench/contracts';
 import { TaskLoader, mergePrivateHalves } from 'bridgebench/tasks';
 import { resolveApiConfig, publishTarget } from 'bridgebench/client';
@@ -94,7 +97,7 @@ assert.match(CONTRACTS_VERSION, /^\\d+\\.\\d+\\.\\d+$/);
 
 for (const category of CATEGORIES) {
   const tasks = await new TaskLoader(category).loadAll();
-  assert.equal(tasks.length, 12, category + ' pack must load 12 public tasks');
+  assert.equal(tasks.length, TASKS_PER_CATEGORY, category + ' pack must load the full public task set');
   assert.ok(tasks.every((task) => task.private === null), category + ' pack must ship public halves only');
 }
 
@@ -127,7 +130,7 @@ console.log('pack smoke: all entry points import and both public packs load');
 const CONSUMER_SMOKE_CJS = `
 const assert = require('node:assert/strict');
 
-const { ArenaRunner, applyEloWin, canonicalJson, TaskLoader, ENGINE_VERSION } = require('bridgebench');
+const { ArenaRunner, applyEloWin, canonicalJson, TaskLoader, ENGINE_VERSION, TASKS_PER_CATEGORY } = require('bridgebench');
 const { CATEGORIES, CONTRACTS_VERSION } = require('bridgebench/contracts');
 const { mergePrivateHalves } = require('bridgebench/tasks');
 const { resolveApiConfig } = require('bridgebench/client');
@@ -144,7 +147,7 @@ assert.equal(ratingA, 1016);
 void (async () => {
   for (const category of CATEGORIES) {
     const tasks = await new TaskLoader(category).loadAll();
-    assert.equal(tasks.length, 12, category + ' pack must load 12 public tasks via require()');
+    assert.equal(tasks.length, TASKS_PER_CATEGORY, category + ' pack must load the full public task set via require()');
   }
   console.log('pack smoke: CJS require() works and both public packs load');
 })().catch((error) => {

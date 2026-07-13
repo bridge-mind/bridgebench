@@ -1,0 +1,219 @@
+id: patch-xxe-parser-hardening
+version: 1.0.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Marble Ingest — Verifying Five Candidate XXE Parser-Hardening Fixes
+summary: >-
+  A reported XXE in the Marble document-ingest handler parses external XML with the
+  spindle-xml library at its unsafe defaults. Five competing candidate patches are
+  submitted. Using the authoritative parser-hardening rule (both external-entity
+  knobs must be off; the safe wrapper sets both; input filtering is not a supported
+  control), decide which patches actually close the finding and which are shallow,
+  set only one knob, or fix the wrong layer — analysis only, no payloads.
+prompt: |
+  You are reviewing candidate fixes for a reported XML External Entity (XXE) finding
+  in the "Marble" document-ingest service. The handler POST /ingest/document parses
+  externally-supplied XML with spindle-xml.parseDocument() at the library's DEFAULT
+  options, which resolve external entities and load external DTDs. Five engineers
+  submitted competing patches (A, B, C, D, E); one — or some combination — will be
+  merged.
+
+  You are given six artifacts: original-parse (the vulnerable handler), parser-reference
+  (the authoritative, exhaustive rule for making spindle-xml XXE-safe), patches-abc
+  (candidate patches A, B, C), patches-de (candidate patches D, E), ingest-context (where
+  and on what input the parse runs), and vuln-report (the finding).
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If a fact needed to judge a patch lives in another artifact,
+  OPEN that artifact and cite it — do not guess. This is analysis only: reason about which
+  external-entity vectors each patch disables; do NOT write an XXE payload, a malicious
+  DOCTYPE, or any working exploit.
+
+  Definitions you must use:
+  - parser-reference is authoritative and EXHAUSTIVE for what makes spindle-xml safe. It
+    declares exactly two parser controls (resolveExternalEntities and loadExternalDtd) and
+    that BOTH must be false; disabling only one leaves the OTHER external-entity vector
+    active. It also declares the one-call wrapper parseDocumentSafe() sets BOTH internally,
+    and that input-level filtering is NOT a supported control.
+  - A patch CLOSES the finding only if, after it, NEITHER external-entity vector remains
+    active (both controls off, or the safe wrapper used). It DOES-NOT-CLOSE if either
+    vector is still active, or if it changes a layer parser-reference declares ineffective.
+
+  Deliverables:
+
+  1. Patch A (patches-abc): verdict CLOSES or DOES-NOT-CLOSE. If it does not close, name
+     the external-entity vector that remains active and cite the rule.
+
+  2. Patch B (patches-abc): verdict, and confirm which controls it sets and whether both
+     external-entity vectors are disabled.
+
+  3. Patch C (patches-abc): verdict. Name the mechanism/layer it changes and cite why
+     parser-reference declares that layer is not a supported control against XXE here.
+
+  4. Patch D (patches-de): verdict. Patch D is a single-line change to parseDocumentSafe().
+     State whether that one call is sufficient, and cite exactly what parser-reference says
+     the wrapper does. Do not reject it merely for being small.
+
+  5. Patch E (patches-de): verdict. Which control does it set, which vector does it leave
+     active, and does the extra defense-in-depth it adds change the verdict?
+
+  6. Which patch or minimal combination fully closes the XXE finding? State, per closing
+     patch, that it closes independently; confirm no single knob alone suffices; and give
+     the residual risk if a DOES-NOT-CLOSE patch (address at least patch A alone and patch
+     E alone) were merged in the belief it resolved the finding — at the vector level only,
+     no payloads.
+artifacts:
+  - id: original-parse
+    type: code
+    label: Marble document-ingest handler (vulnerable original)
+    content: |
+      // marble/ingest/document.ts — POST /ingest/document (Marble ingest service).
+      // Parses an externally-supplied XML document with spindle-xml at DEFAULT options.
+      import { parseDocument } from 'spindle-xml';
+
+      export async function ingestDocument(req: Request, res: Response) {
+        const xml = req.rawBody; // raw XML bytes from an external client (see ingest-context)
+
+        // No options passed: spindle-xml defaults apply (resolveExternalEntities: true,
+        // loadExternalDtd: true) — see parser-reference. This is the reported XXE sink.
+        const doc = parseDocument(xml);
+
+        await store.saveDocument(doc);
+        return res.status(202).end();
+      }
+  - id: parser-reference
+    type: spec
+    label: spindle-xml XXE-hardening rule (authoritative and exhaustive)
+    content: |
+      spindle-xml — AUTHORITATIVE and EXHAUSTIVE rule for XXE safety. These are the ONLY
+      controls that affect external-entity processing in this library; there are no other
+      relevant options, flags, or side effects.
+
+      Two independent external-entity vectors, each governed by ONE option:
+
+        (1) resolveExternalEntities  (DEFAULT: true)
+            When true, EXTERNAL GENERAL ENTITIES declared and referenced in the document
+            body are fetched and expanded. Setting it false disables vector (1) ONLY.
+
+        (2) loadExternalDtd          (DEFAULT: true)
+            When true, an EXTERNAL DTD referenced via DOCTYPE SYSTEM is loaded and its
+            declarations — including external PARAMETER entities — are processed. Setting
+            it false disables vector (2) ONLY.
+
+      Safety rule: a parse is XXE-safe ONLY when BOTH resolveExternalEntities: false AND
+      loadExternalDtd: false. Disabling exactly one option leaves the OTHER vector fully
+      active, which is still exploitable. Neither option implies or affects the other.
+
+      Safe wrapper: parseDocumentSafe(xml) is a library-provided convenience that calls
+      parseDocument with BOTH resolveExternalEntities: false AND loadExternalDtd: false
+      set internally. It is exactly equivalent to setting both options off by hand. A
+      single call to parseDocumentSafe(xml) is therefore fully sufficient on its own.
+
+      Input filtering is NOT a supported control. spindle-xml accepts XML in multiple
+      encodings (UTF-8, UTF-16, and others) and normalizes encoding AFTER the bytes are
+      handed to it, so a text-level filter that scans the raw request string for a
+      "<!DOCTYPE" marker does not reliably see every DOCTYPE the parser will honor.
+      Stripping or rejecting DOCTYPE at the input layer does NOT close XXE for this
+      library; only the two parser options (or the wrapper) do.
+  - id: patches-abc
+    type: diff
+    label: Candidate patches A, B, C (mutually exclusive alternatives)
+    content: |
+      Three competing candidate patches. Exactly ONE of A/B/C is applied — they are
+      alternatives, not stacked.
+
+      === Patch A: disable external general entities ===
+      --- a/marble/ingest/document.ts
+      +++ b/marble/ingest/document.ts
+      @@ handler body
+      -  const doc = parseDocument(xml);
+      +  const doc = parseDocument(xml, {
+      +    resolveExternalEntities: false,   // external general entities off
+      +  }); // loadExternalDtd left at its default (true)
+
+      === Patch B: disable both external-entity controls ===
+      --- a/marble/ingest/document.ts
+      +++ b/marble/ingest/document.ts
+      @@ handler body
+      -  const doc = parseDocument(xml);
+      +  const doc = parseDocument(xml, {
+      +    resolveExternalEntities: false,
+      +    loadExternalDtd: false,
+      +  });
+
+      === Patch C: strip DOCTYPE from the input before parsing ===
+      --- a/marble/ingest/document.ts
+      +++ b/marble/ingest/document.ts
+      @@ handler body
+      -  const doc = parseDocument(xml);
+      +  // Remove any DOCTYPE declaration from the raw text, then parse as before.
+      +  const cleaned = String(xml).replace(/<!DOCTYPE[^>]*>/gi, '');
+      +  const doc = parseDocument(cleaned); // parser options unchanged (defaults)
+  - id: patches-de
+    type: diff
+    label: Candidate patches D, E (mutually exclusive alternatives)
+    content: |
+      Two more competing candidate patches — alternatives to A/B/C, not stacked with them.
+
+      === Patch D: use the library safe wrapper ===
+      --- a/marble/ingest/document.ts
+      +++ b/marble/ingest/document.ts
+      @@ imports
+      -import { parseDocument } from 'spindle-xml';
+      +import { parseDocumentSafe } from 'spindle-xml';
+      @@ handler body
+      -  const doc = parseDocument(xml);
+      +  const doc = parseDocumentSafe(xml); // wrapper sets both entity controls off
+
+      === Patch E: disable external DTD loading and add a size/timeout guard ===
+      --- a/marble/ingest/document.ts
+      +++ b/marble/ingest/document.ts
+      @@ handler body
+      -  const doc = parseDocument(xml);
+      +  if (Buffer.byteLength(xml) > 5_000_000) {
+      +    return res.status(413).end(); // reject oversized documents (billion-laughs guard)
+      +  }
+      +  const doc = parseDocument(xml, {
+      +    loadExternalDtd: false,           // external DTD loading off
+      +  }); // resolveExternalEntities left at its default (true)
+  - id: ingest-context
+    type: note
+    label: Marble ingest context (where the parse runs and on what input)
+    content: |
+      Marble ingest context (authoritative for reachability).
+
+      POST /ingest/document is a SHIPPED, externally-reachable route: partners POST
+      document XML to it and the body is attacker-controllable. The parse in
+      original-parse is the ONLY spindle-xml parse call in the service — there is no
+      other XML parser and no other parse site, so a fix applied at this call site fully
+      addresses the ingest surface. The input is untrusted external XML, so the reported
+      XXE is genuinely reachable and a real fix (not merely a rating downgrade) is
+      required.
+
+      Reviewers: judge each patch strictly against parser-reference, which is the
+      authoritative rule for what makes spindle-xml safe. Open it and confirm what each
+      option and the wrapper do rather than assuming.
+  - id: vuln-report
+    type: note
+    label: Marble security advisory MRB-2026-021 (internal)
+    content: |
+      Advisory MRB-2026-021 (internal, fictional).
+
+      A reporter found that POST /ingest/document parses external XML with
+      spindle-xml.parseDocument() at default options, which resolve external entities
+      and load external DTDs — an XXE exposure. Five candidate patches (A-E) were
+      submitted.
+
+      Request to the reviewer:
+        - For each patch, determine whether it CLOSES the XXE finding, and cite the
+          rule that decides it. A patch that disables only ONE of the two external-entity
+          controls does not close the finding; a patch that changes a layer
+          parser-reference declares ineffective does not close it either.
+        - Determine which patch (or minimal combination) fully closes the finding, and
+          confirm whether any single patch suffices.
+
+      Note: treat parser-reference as the exhaustive, authoritative statement of the
+      spindle-xml controls. Do not credit a control it does not list, and do not dismiss
+      the safe wrapper merely because it is a single call.
+tags: [security, patch-verification, xxe, xml-parsing, code-review]

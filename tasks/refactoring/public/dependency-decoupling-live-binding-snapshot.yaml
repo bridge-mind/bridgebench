@@ -1,0 +1,163 @@
+id: dependency-decoupling-live-binding-snapshot
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Decoupling the Client From the apiBase Global — Live Bindings vs Import-Time Snapshots, Import Cycles, and a Second Source
+summary: >-
+  A client reads a module-level apiBase that main reassigns at startup, relying on ES live-binding
+  semantics so the new value shows at call time. Four rewrites decouple the client from importing
+  config. Exactly one preserves the call-time value with no import cycle and a single source. Decoys
+  snapshot apiBase at import (stale default), close a cycle via main, or add a second base main never
+  updates. Classify each and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (config-mod, client-original, module-graph,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to decouple the client from importing the config global directly, while
+  preserving all three properties module-graph lists: (1) endpoint() uses the base value AS OF call
+  time — i.e. it reflects main's startup reassignment, so endpoint('/v1/ping') yields the PROD base;
+  (2) no import cycle among these modules; (3) a single source of truth for the base (config), with no
+  second, separately-tracked base. The observable outcome is the string endpoint('/v1/ping') returns
+  (and whether startup crashes).
+
+  1. Classify rewrite-a. Justify against all three properties (call-time value, acyclic imports, single
+     source), tracing the load order from module-graph.
+
+  2. Classify rewrite-b. If it changes behavior, state the exact base string endpoint('/v1/ping')
+     returns and why, per module-graph's load order and the live-binding-vs-snapshot rule, compared to
+     client-original.
+
+  3. Classify rewrite-c. Name the exact import cycle it introduces (the edges) and state what happens
+     at startup and why, per module-graph's load-order rule.
+
+  4. Classify rewrite-d. State the base string endpoint('/v1/ping') returns and name the mechanism (why
+     config's reassignment does not reach the client), and how this differs from rewrite-b.
+
+  5. Exactly one rewrite decouples the client while preserving the call-time value, staying acyclic, and
+     keeping a single source. Name it. Then, for client-original, state the ground truth: what string
+     does endpoint('/v1/ping') return, and why (in terms of live bindings and the reassignment order)?
+artifacts:
+  - id: config-mod
+    type: code
+    label: app/config.ts — the mutable base binding
+    content: |
+      // app/config.ts — a leaf module (imports nothing). apiBase is a reassignable module binding.
+      export let apiBase = 'https://default.internal'; // default; main reassigns this at startup.
+      export function useProdBase(): void {
+        apiBase = 'https://prod.example';              // reassigns the module's own binding
+      }
+  - id: client-original
+    type: code
+    label: app/client.ts + app/main.ts — original (the reference behavior)
+    content: |
+      // app/client.ts — ORIGINAL: reads the LIVE apiBase binding at call time.
+      import { apiBase } from './config';
+      export function endpoint(path: string): string {
+        return `${apiBase}${path}`; // apiBase read WHEN endpoint is called, not when client.ts loads
+      }
+
+      // app/main.ts — the composition root (the ONLY one).
+      import { useProdBase } from './config';
+      import { endpoint } from './client';
+
+      useProdBase();                                   // reassign apiBase = 'https://prod.example'
+      export const url = endpoint('/v1/ping');         // called AFTER the reassignment -> prod base
+  - id: module-graph
+    type: note
+    label: app module graph — modules, edges, load order, live-binding semantics (complete)
+    content: |
+      app module graph — the complete set of modules, import edges, and load order.
+
+      Modules (the COMPLETE set): config.ts, client.ts, main.ts. main.ts is the ONLY composition root
+      / entry point.
+
+      Original import edges (a DAG, no cycle):
+        client.ts -> config.ts
+        main.ts   -> config.ts, client.ts
+
+      ES module load order for the original (depth-first from the entry main.ts): config.ts (its top
+      level runs, apiBase = 'https://default.internal'), then client.ts (its top level runs), then the
+      main.ts body. A module's top-level code runs once, when it is first imported.
+
+      Live-binding semantics you must apply: `import { apiBase } from './config'` is a LIVE binding —
+      each READ of apiBase inside a function reflects config.ts's CURRENT value at the moment of the
+      read, so config.useProdBase() reassigning apiBase is visible to a later endpoint() call. By
+      contrast, `const b = apiBase` captured at a module's top level SNAPSHOTS the value at that moment
+      and does NOT reflect any later reassignment. A separate module-level variable in another module
+      is only updated if something explicitly assigns to it.
+
+      Startup sequence in main.ts (authoritative): main calls useProdBase() (apiBase becomes
+      'https://prod.example') and THEN calls endpoint('/v1/ping'). Because endpoint reads the live
+      binding at call time, in the original endpoint returns 'https://prod.example/v1/ping'. config.ts
+      is the single source of truth for the base.
+
+      An acceptable decoupling must keep all of: (1) endpoint reflects the call-time (post-reassignment)
+      base -> 'https://prod.example/v1/ping'; (2) no import cycle among these modules; (3) config.ts
+      remains the single source (no second base tracked elsewhere). A circular import here means a
+      module reads another module's export before that export has been initialized.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — base passed as a parameter, read in main at call time
+    content: |
+      // app/client.ts (rewrite-a) — base is a parameter; client imports nothing from config.
+      export function endpoint(base: string, path: string): string {
+        return `${base}${path}`;
+      }
+
+      // app/main.ts (rewrite-a)
+      import { apiBase, useProdBase } from './config';
+      import { endpoint } from './client';
+      useProdBase();                                   // apiBase = 'https://prod.example'
+      export const url = endpoint(apiBase, '/v1/ping'); // reads apiBase AFTER the reassignment
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — snapshot apiBase at client load
+    content: |
+      // app/client.ts (rewrite-b) — capture the base into a const at import time.
+      import { apiBase } from './config';
+      const base = apiBase;                            // captured when client.ts loads (top level)
+      export function endpoint(path: string): string {
+        return `${base}${path}`;
+      }
+
+      // app/main.ts (rewrite-b) — unchanged wiring.
+      import { useProdBase } from './config';
+      import { endpoint } from './client';
+      useProdBase();
+      export const url = endpoint('/v1/ping');
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — client reads a resolved base from main
+    content: |
+      // app/client.ts (rewrite-c) — read a resolved base FROM main at import.
+      import { resolvedBase } from './main';           // NEW edge: client.ts -> main.ts
+      const base = resolvedBase;                        // read at client.ts load (top level)
+      export function endpoint(path: string): string {
+        return `${base}${path}`;
+      }
+
+      // app/main.ts (rewrite-c)
+      import { apiBase, useProdBase } from './config';
+      import { endpoint } from './client';             // main.ts -> client.ts (closes the cycle)
+      useProdBase();
+      export const resolvedBase = apiBase;
+      export const url = endpoint('/v1/ping');
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — client owns its own base with a setter
+    content: |
+      // app/client.ts (rewrite-d) — client keeps its own base variable and a setter.
+      let base = 'https://default.internal';
+      export function setBase(b: string): void { base = b; }
+      export function endpoint(path: string): string {
+        return `${base}${path}`;
+      }
+
+      // app/main.ts (rewrite-d) — reassigns the CONFIG global, not the client's base.
+      import { useProdBase } from './config';
+      import { endpoint } from './client';
+      useProdBase();                                   // sets config.apiBase; client.base untouched
+      export const url = endpoint('/v1/ping');
+tags: [refactoring, dependency-decoupling, live-binding, import-cycle, module-load-order]

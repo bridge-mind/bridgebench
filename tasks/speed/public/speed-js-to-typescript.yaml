@@ -1,0 +1,56 @@
+id: speed-js-to-typescript
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: hard
+title: Add TypeScript Types to an Untyped JavaScript Module
+summary: >-
+  Convert a small untyped JavaScript cart module into TypeScript by adding an interface for the line
+  shape and precise parameter and return types, without changing any runtime behavior.
+prompt: |
+  Rewrite [js-module] as a TypeScript module per [type-contract]. Change only the types and the module
+  syntax; keep every statement, name, and runtime result identical.
+
+  1. An exported `interface CartLine` matching the shape in [type-contract].
+  2. Typed signatures for `subtotal`, `applyDiscount`, `formatMoney`, and `summarize`, including the
+     `DiscountCode` union and each return type.
+  3. No `any`, and an explicit type for the object `summarize` returns; use ES `export` syntax.
+artifacts:
+  - id: js-module
+    type: code
+    label: Untyped module
+    content: |
+      function subtotal(lines) {
+        return lines.reduce((sum, l) => sum + l.unitPrice * l.qty, 0);
+      }
+
+      function applyDiscount(amount, code) {
+        if (code === 'SAVE10') return amount * 0.9;
+        if (code === 'SAVE20') return amount * 0.8;
+        return amount;
+      }
+
+      function formatMoney(cents) {
+        return '$' + (cents / 100).toFixed(2);
+      }
+
+      function summarize(lines, code) {
+        const sub = subtotal(lines);
+        const total = applyDiscount(sub, code);
+        return { lineCount: lines.length, subtotal: sub, total: total };
+      }
+
+      module.exports = { subtotal, applyDiscount, formatMoney, summarize };
+  - id: type-contract
+    type: spec
+    label: Type contract
+    content: |
+      CartLine = { sku: string; unitPrice: number; qty: number }   // all amounts are integer cents
+      - subtotal(lines: CartLine[]): number
+      - applyDiscount(amount: number, code: DiscountCode): number
+        DiscountCode is the union "SAVE10" | "SAVE20" | "NONE"; "SAVE10" takes 10% off, "SAVE20" takes
+        20% off, and "NONE" applies no discount (the existing fall-through branch)
+      - formatMoney(cents: number): string
+      - summarize(lines: CartLine[], code: DiscountCode): { lineCount: number; subtotal: number; total: number }
+      - replace module.exports with ES module `export` syntax; do not otherwise alter the code
+tags: [typescript, migration, refactor]

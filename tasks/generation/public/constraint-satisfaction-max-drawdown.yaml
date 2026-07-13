@@ -1,0 +1,184 @@
+id: constraint-satisfaction-max-drawdown
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: maxDrawdown — Which Candidate Is Single-Pass, O(1)-Memory, And Pure
+summary: A spec defines maxDrawdown(prices) — the largest peak-to-trough drop in a price series — under four constraints, a single linear scan, O(1) auxiliary memory, purity with no input mutation, and the arithmetic contract. All five candidates compute the correct drawdown, so only the constraints decide; one uses a nested quadratic loop, one allocates an O(n) prefix-max array, one overwrites the caller's array. Classify each conforms/violates and cite the exact violating construct.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, worked-example, candidate-a,
+  candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite the artifact id(s) for
+  every claim. Do not execute anything — reason about each candidate from its code using the
+  definitions in `reading-guide`, and trace the arithmetic where a deliverable asks for a value.
+
+  Verdict vocabulary: a candidate CONFORMS if it satisfies ALL FOUR declared constraints C1–C4 in
+  `spec`; it VIOLATES if it breaks any one of them. Every candidate returns the CORRECT drawdown on
+  the worked-example rows, so correctness (C4) is not the deciding axis — the constraints are.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or violates. For every
+     violator, name the exact constraint number (C1–C4) it breaks and quote the exact construct
+     responsible.
+
+  2. State the complete set of conforming candidates. candidate-e is written with
+     Array.prototype.reduce and allocates a small object each step — confirm whether it still
+     satisfies C1 and C2.
+
+  3. candidate-c returns the correct value on every row. Explain precisely why it still VIOLATES, and
+     name the constraint it breaks.
+
+  4. candidate-d — state the value it returns for maxDrawdown([10, 7, 12, 5, 8]) AND the contents of
+     the caller's array AFTER the call, and name the constraint it breaks.
+
+  5. A reviewer approves candidate-b, arguing "it's O(n) — it just compares elements." Rebut this
+     using C1 and the exact structure in candidate-b.
+artifacts:
+  - id: spec
+    type: spec
+    label: maxDrawdown specification (function + constraints)
+    content: |
+      FUNCTION maxDrawdown(prices)
+
+      `prices` is an array of numbers (a time-ordered price series). The function returns the maximum
+      DRAWDOWN: the largest drop from an earlier running peak to a later value, per this contract:
+
+        C4  CORRECTNESS: let the result be the maximum over all positions j of
+              (max of prices[0..j]) - prices[j],
+            i.e. the biggest fall from any running peak to a later point. If prices never falls below
+            its running peak (a non-decreasing series), or is empty or length 1, the result is 0. The
+            result is never negative.
+
+      This runs on a streaming hot path over long series, so it MUST ALSO satisfy each of the
+      following, every one a hard requirement:
+
+        C1  SINGLE LINEAR PASS: it visits each element of `prices` a constant number of times, in one
+            loop (or one reduce) — O(n) time. It MUST NOT use a nested loop that rescans earlier
+            elements for each element (O(n^2)), and MUST NOT sort.
+
+        C2  BOUNDED MEMORY: O(1) auxiliary memory — a constant number of scalar accumulators (a
+            fixed-shape object with a constant field count also counts as O(1)). It MUST NOT allocate
+            an array/Map/Set whose length grows with prices.length (for example a prefix-maximum
+            array of length n).
+
+        C3  PURE AND NO INPUT MUTATION: the result depends ONLY on `prices`; it MUST NOT mutate
+            `prices`, read module-level mutable state, or call Date.now / Math.random / I/O. After the
+            call, `prices` MUST be unchanged, and two calls with the same input MUST return the same
+            result.
+
+      A candidate CONFORMS iff it satisfies C1 AND C2 AND C3 AND C4. Breaking any single constraint
+      means it VIOLATES.
+  - id: worked-example
+    type: table
+    label: worked example and reference values
+    content: |
+      Reference values for C4 so results are checkable by hand.
+
+      prices = [10, 7, 12, 5, 8]
+        running peak: 10, 10, 12, 12, 12
+        drop at each: 0,  3,  0,  7,  4     -> max drawdown = 7 (peak 12 down to 5)
+
+      prices = [3, 1, 4, 1, 5, 9, 2, 6]
+        peak 9 down to 2 -> max drawdown = 7
+
+      prices = [1, 2, 3]     -> non-decreasing -> 0
+      prices = [5, 4, 3, 2]  -> peak 5 down to 2 -> 3
+      prices = []            -> 0
+
+      Every candidate below returns these same values; the task is which candidates also meet C1–C3.
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function maxDrawdown(prices) {
+        let peak = -Infinity, maxDD = 0;
+        for (let i = 0; i < prices.length; i++) {
+          const p = prices[i];
+          if (p > peak) peak = p;
+          else if (peak - p > maxDD) maxDD = peak - p;
+        }
+        return maxDD;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function maxDrawdown(prices) {
+        let maxDD = 0;
+        for (let j = 0; j < prices.length; j++)
+          for (let i = 0; i < j; i++)
+            if (prices[i] - prices[j] > maxDD) maxDD = prices[i] - prices[j];
+        return maxDD;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function maxDrawdown(prices) {
+        const n = prices.length;
+        if (n === 0) return 0;
+        const peaks = new Array(n);                 // running-maximum array
+        peaks[0] = prices[0];
+        for (let i = 1; i < n; i++) peaks[i] = Math.max(peaks[i - 1], prices[i]);
+        let maxDD = 0;
+        for (let i = 0; i < n; i++)
+          if (peaks[i] - prices[i] > maxDD) maxDD = peaks[i] - prices[i];
+        return maxDD;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function maxDrawdown(prices) {
+        let peak = -Infinity, maxDD = 0;
+        for (let i = 0; i < prices.length; i++) {
+          const p = prices[i];
+          if (p > peak) peak = p;
+          else if (peak - p > maxDD) maxDD = peak - p;
+          prices[i] = peak;                          // writes the running peak back into the input
+        }
+        return maxDD;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function maxDrawdown(prices) {
+        const acc = prices.reduce(
+          (s, p) => {
+            const peak = Math.max(s.peak, p);
+            return { peak, maxDD: Math.max(s.maxDD, peak - p) };
+          },
+          { peak: -Infinity, maxDD: 0 },
+        );
+        return acc.maxDD;
+      }
+  - id: reading-guide
+    type: note
+    label: how to read the constraints (definitions + scope)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of submissions. Every candidate returns
+      the correct drawdown on the worked-example rows, so do NOT decide on correctness; judge each
+      against C1, C2, and C3 by reading the code.
+
+      How to read each constraint from the code (no execution needed):
+        C1 (single linear pass): one `for` loop over prices, or one `prices.reduce(...)`, touching
+           each element a constant number of times is O(n). A loop NESTED inside another loop over the
+           array (for each j, scan all i < j) is O(n^2) — that breaks C1, even if the values it
+           computes are correct. Two SEQUENTIAL O(n) loops are still O(n) and do NOT break C1.
+        C2 (bounded memory): a fixed set of scalar accumulators is O(1). A fixed-SHAPE object with a
+           constant number of fields (e.g. { peak, maxDD }) is also O(1), even if a fresh one is made
+           each step, because only a constant amount is live at once. Allocating an array whose length
+           equals prices.length (e.g. a prefix-maximum array) is O(n) auxiliary memory — that breaks
+           C2, even though the time is still linear.
+        C3 (pure, no mutation): the function must not write into `prices`. A statement like
+           `prices[i] = ...` overwrites the caller's array, so after the call `prices` differs from
+           what was passed in — that breaks C3, even though the returned number is correct. A quick
+           test: if `prices` is not identical after the call, C3 is violated.
+        C4 (correctness): the maximum fall from a running peak; trace the worked-example rows.
+
+      Cite the exact line/construct when you assign a violation.
+tags: [drawdown, streaming, complexity, purity, constraint-satisfaction, generation]

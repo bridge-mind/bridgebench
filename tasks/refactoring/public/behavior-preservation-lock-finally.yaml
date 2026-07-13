@@ -1,0 +1,142 @@
+id: behavior-preservation-lock-finally
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: withLock Rewrite Equivalence — Release-on-Throw, finally-return Override, and Double Release
+summary: >-
+  Four candidate rewrites of a withLock resource wrapper are proposed. Exactly one preserves observable
+  behavior (lock.release called exactly once on both the success and the error path, the lock not held
+  after settle, and task's value/error propagated unchanged). The others skip release when task throws,
+  add a return inside finally that swallows the error and overrides the value, or release twice on
+  success. Classify each rewrite and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (lock-original, lock-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to restructure withLock for readability WITHOUT changing any observable
+  behavior: how many times lock.release() is called on the success path and on the error path (each
+  call increments released_total — see lock-note), whether the lock is still held after withLock
+  settles, and the value returned or the error propagated to the caller (which must be exactly task's
+  result). Two scenarios are referenced: S_ok = task() resolves with a value V; S_err = task() rejects
+  with an error E.
+
+  1. Classify rewrite-a relative to lock-original. Justify by tracing BOTH S_ok and S_err: how many
+     times lock.release() runs, whether the lock is held after settle, and what is returned/propagated.
+
+  2. Classify rewrite-b. If it changes behavior, name the exact observable difference under S_err:
+     how many times lock.release() runs, and whether the lock is still held after withLock settles,
+     compared to lock-original.
+
+  3. Classify rewrite-c. State what withLock does under S_ok (what value it resolves to) AND under
+     S_err (does it reject with E, or resolve?), and name the mechanism per lock-note.
+
+  4. Classify rewrite-d. Under S_ok, state how many times lock.release() runs and the released_total
+     delta compared to lock-original, and name the observable difference.
+
+  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for lock-original, state
+     the ground truth: under S_ok and under S_err, how many times lock.release() runs on each path,
+     whether the lock is held after settle, and what value/error the caller observes.
+artifacts:
+  - id: lock-original
+    type: code
+    label: concord/with-lock.ts — shipped withLock (the reference behavior)
+    content: |
+      // concord/with-lock.ts — the shipped helper. This is the ONLY definition of withLock.
+      import type { Lock } from './lock-types';
+
+      export async function withLock<T>(lock: Lock, task: () => Promise<T>): Promise<T> {
+        await lock.acquire();
+        try {
+          return await task();
+        } finally {
+          lock.release();
+        }
+      }
+  - id: lock-note
+    type: note
+    label: concord withLock — observability, control-flow semantics, and the complete contract
+    content: |
+      concord withLock — observability and semantics (complete for the 3.x helper).
+
+      Lock semantics: lock.acquire() marks the lock HELD; lock.release() marks it not-held and
+      increments a released_total counter. The lock is HELD from acquire until the matching release.
+      Whether the lock remains HELD after withLock settles is OBSERVABLE (a still-held lock blocks the
+      next acquirer forever). The NUMBER of lock.release() calls is OBSERVABLE via released_total; a
+      second release for the same acquisition is an observable double-release. lock.acquire() is
+      called exactly once here and always resolves.
+
+      Control-flow semantics you must apply: a `return` (or `throw`) inside a `finally` block OVERRIDES
+      the try block's completion — it replaces any value the try block was returning AND suppresses any
+      error the try block threw, so the function then completes with the finally's value instead. A
+      `finally` with no return/throw simply runs and lets the try's original completion stand.
+
+      Call sites: withLock is called from exactly two places (the job runner and the export flusher),
+      both of which `await withLock(...)`. The task passed in may resolve or reject; whatever task
+      rejects with (E) must propagate to the caller unchanged. This note plus lock-original are the
+      complete behavioral contract: the lock is non-reentrant, there is no other release site, and
+      there is no timeout or background unlock.
+
+      Reference behavior of lock-original (authoritative): acquire once; run task once. On S_ok
+      (task resolves with V) the try returns V, then finally runs lock.release() once (lock not held
+      after settle, released_total += 1), and V is returned. On S_err (task rejects with E) the try
+      throws, finally runs lock.release() once (lock not held after settle, released_total += 1), and
+      E propagates unchanged. So release runs EXACTLY ONCE on both paths and the lock is never left
+      held.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — "hold the result in a local, release in finally, return after"
+    content: |
+      // rewrite-a — proposed by engineer A. "Assign the result, release in finally, then return it."
+      export async function withLock<T>(lock: Lock, task: () => Promise<T>): Promise<T> {
+        await lock.acquire();
+        let result: T;
+        try {
+          result = await task();
+        } finally {
+          lock.release();
+        }
+        return result;
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — "release right after the task, no finally"
+    content: |
+      // rewrite-b — proposed by engineer B. "The finally is noise; release after the await."
+      export async function withLock<T>(lock: Lock, task: () => Promise<T>): Promise<T> {
+        await lock.acquire();
+        const result = await task();
+        lock.release();
+        return result;
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — "return a default from finally to guarantee a value"
+    content: |
+      // rewrite-c — proposed by engineer C. "Always hand back a value from the finally."
+      export async function withLock<T>(lock: Lock, task: () => Promise<T>): Promise<T> {
+        await lock.acquire();
+        try {
+          return await task();
+        } finally {
+          lock.release();
+          return undefined as unknown as T; // added a return inside finally
+        }
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — "release after the task and again in finally, for safety"
+    content: |
+      // rewrite-d — proposed by engineer D. "Release right after the task, and keep the finally too."
+      export async function withLock<T>(lock: Lock, task: () => Promise<T>): Promise<T> {
+        await lock.acquire();
+        try {
+          const result = await task();
+          lock.release();
+          return result;
+        } finally {
+          lock.release();
+        }
+      }
+tags: [refactoring, behavior-preservation, resource-cleanup, finally, error-handling]

@@ -1,0 +1,142 @@
+id: synthesis-flag-targeting
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Which Variant Each User Gets From a Feature Flag Assembled Across Six Evaluation Inputs
+summary: >-
+  Determine the exact variant six users receive from one feature flag whose decision only emerges by
+  combining the evaluation-order spec, the flag config, a segment definition, a precomputed bucket
+  table, user attributes, and an overrides log with expiry, then reject the decoys and verify each
+  outcome against its governing artifacts.
+prompt: |
+  The flag service evaluates flag `checkout-v2` for each user. No single artifact decides a user's
+  variant; you must combine the evaluation order in [eval-spec], the rules in [flag-config], the
+  segment predicate in [segment-defs], the precomputed buckets in [bucket-table], the attributes in
+  [user-attributes], and the pins in [overrides-log]. [triage-note] holds unverified hunches.
+
+  The evaluation timestamp is 2026-07-12 09:00:00 UTC (use it for override expiry). Variants are
+  `control`, `treatment`, and `off`. Answer every deliverable and cite the artifact ids per claim.
+
+  1. Per-user variant. For each of u-101..u-106, give the variant and the SINGLE mechanism that
+     decided it (a named override, a specific rule id, or the fallthrough rollout with the bucket
+     comparison).
+  2. Overrides. Explain why u-101's override is NOT applied and u-104's IS, citing the expiry dates and
+     the evaluation timestamp.
+  3. Precedence. State the full evaluation order. Then explain why u-103 gets its variant despite its
+     bucket being below the fallthrough treatment threshold, and why u-104 gets its variant despite an
+     attribute that a targeting rule would otherwise match.
+  4. Segments and rollout. Explain u-102's outcome via segment membership, and contrast u-105 (matches
+     the country/beta rule, so its 50% rollout applies) with u-106 (does not match that rule, so it
+     falls through to the 30% rollout). Show the bucket comparison for each.
+  5. Decoy refutation. Name and refute: applying u-101's expired pin, sending u-103 to the rollout,
+     letting a targeting rule beat u-104's active pin, matching the country/beta rule for u-106, and
+     treating the flag as disabled.
+  6. Verification. Give the final variant for all six users and cite which artifacts each user's
+     decision drew from.
+artifacts:
+  - id: eval-spec
+    type: spec
+    label: Flag evaluation order and operators
+    content: |
+      Evaluating a flag for a user proceeds in EXACTLY this order; the FIRST step that produces a
+      variant wins and no later step is consulted. This is the complete and exclusive evaluation
+      pipeline — there are no other inputs or steps.
+
+      STEP 0 — ENABLED. If the flag's `enabled` is false, every user gets the flag's `offVariant`
+      immediately. If true, continue.
+
+      STEP 1 — OVERRIDES. If [overrides-log] holds a pin for this (flag, user) whose `expires_at` is
+      strictly AFTER the evaluation timestamp, return that pin's variant. An override whose expires_at
+      is at or before the evaluation timestamp is EXPIRED and is ignored (evaluation continues). Pins
+      take precedence over ALL targeting rules and the fallthrough.
+
+      STEP 2 — TARGETING RULES. Evaluate the flag's rules in listed order. The FIRST rule whose
+      condition is true decides the outcome: either a fixed variant or the rule's own rollout. A rule
+      whose condition is false is skipped. Conditions use these operators:
+        - `in SEGMENT`      : true iff the user satisfies the segment predicate in [segment-defs].
+        - `attr == value`   : exact match on the user's attribute.
+        - `attr in [a, b]`  : membership.
+        - `A AND B`         : both must hold.
+
+      STEP 3 — FALLTHROUGH. If no rule matched, apply the flag's fallthrough rollout.
+
+      ROLLOUT COMPARISON. A rollout with treatment percentage T uses the user's precomputed bucket b
+      from [bucket-table] (an integer 0..99): if b < T the user gets `treatment`, otherwise `control`.
+      Buckets are the deterministic hash output; use the given values, do not recompute. (Example: T=40,
+      b=39 -> treatment; b=40 -> control.)
+  - id: flag-config
+    type: config
+    label: checkout-v2 flag definition
+    content: |
+      flag: checkout-v2
+      enabled: true
+      offVariant: off
+      rules:                         # evaluated in this order, first match wins
+        - id: R1
+          when: user in SEGMENT internal-staff
+          serve: treatment           # fixed variant
+        - id: R2
+          when: plan == "enterprise"
+          serve: control             # fixed variant (enterprise is held out of the experiment)
+        - id: R3
+          when: country in ["DE", "FR"] AND beta_opt_in == true
+          rollout: { treatment_pct: 50 }   # 50% rollout among matches
+      fallthrough:
+        rollout: { treatment_pct: 30 }     # 30% rollout for everyone who matched no rule
+  - id: segment-defs
+    type: spec
+    label: Segment predicates
+    content: |
+      Segment `internal-staff` is satisfied iff EITHER holds:
+        - email_domain == "acme-internal.test", OR
+        - staff == true
+      This is the complete definition of internal-staff; no other attribute affects membership. A user
+      whose email_domain is any other value AND whose staff flag is false is NOT internal-staff.
+  - id: bucket-table
+    type: table
+    label: Precomputed rollout buckets for checkout-v2
+    content: |
+      # Deterministic hash output for (flag=checkout-v2, user). Integer 0..99. Use as-is.
+      user   | bucket
+      u-101  | 55
+      u-102  | 3
+      u-103  | 10
+      u-104  | 88
+      u-105  | 47
+      u-106  | 35
+      note: a bucket is only consulted if the user reaches a rollout (rule R3 or the fallthrough). Users
+      decided by a fixed-variant rule or an override never use their bucket.
+  - id: user-attributes
+    type: table
+    label: User attributes
+    content: |
+      user   | plan       | country | beta_opt_in | staff | email_domain
+      u-101  | pro        | US      | false       | false | acme.test
+      u-102  | pro        | US      | false       | false | acme-internal.test
+      u-103  | enterprise | DE      | true        | false | bigco.test
+      u-104  | pro        | FR      | true        | true  | acme.test
+      u-105  | pro        | DE      | true        | false | acme.test
+      u-106  | pro        | FR      | false       | false | acme.test
+  - id: overrides-log
+    type: table
+    label: Individual override pins for checkout-v2
+    content: |
+      # Pins for (flag=checkout-v2, user). Evaluation timestamp is 2026-07-12 09:00:00 UTC.
+      user   | pinned_variant | expires_at (UTC)
+      u-101  | treatment      | 2026-07-01 00:00:00
+      u-104  | control        | 2026-12-31 00:00:00
+      note: only u-101 and u-104 have pins for this flag. u-101's pin expired on 2026-07-01 (before the
+      evaluation timestamp); u-104's pin is valid until 2026-12-31.
+  - id: triage-note
+    type: note
+    label: On-call hunches (unverified)
+    content: |
+      From a thread trying to explain "why did user X see the old checkout" (NOT verified):
+        - "u-101 is pinned to treatment, so they should be in the new flow."
+        - "u-103 buckets at 10, well under 30, so they're getting treatment."
+        - "u-104 is staff, and staff always get treatment."
+        - "u-105 and u-106 are both EU beta users, so they're on the same 50% rollout."
+        - "Maybe the flag is just off and everyone's on control/off."
+      Do not assume any of these is correct; several are wrong.
+tags: [feature-flags, targeting, rollout, segments, overrides, multi-artifact-synthesis]

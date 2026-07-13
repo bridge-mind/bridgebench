@@ -1,0 +1,147 @@
+id: root-cause-cache-stampede
+version: 1.0.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Catalog Service Latency Spikes Every Five Minutes While the Database Sits Nearly Idle
+summary: >-
+  catalogd's product-detail endpoint spikes to multi-second latency in a sharp burst every five
+  minutes while the database idles at ~10% CPU between bursts. A recent deploy, the origin join, GC,
+  and "the database is undersized" all look guilty. Reconcile the cache code, its config, a boundary
+  trace, a metrics table, an EXPLAIN, a deploy note, and a fix list to isolate the one root cause, rule
+  out the decoys, and pick the fix that does not just move the cliff.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (cache-code, cache-config, boundary-trace,
+  metrics, explain, deploy-note, fixes). Cite the artifact id(s) for every claim. Use this vocabulary
+  for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  catalogd serves GET /v1/product/{id} from a read-through cache. p99 latency spikes to ~1.9s in a
+  brief burst every five minutes; between bursts it is ~2ms. Do not stop at where the latency is
+  observed; trace to the origin.
+
+  1. ROOT CAUSE. Name the single defect and cite the exact artifact id and code location. State
+     precisely why simultaneous cache misses at a TTL boundary saturate a database that otherwise idles
+     at ~10% CPU.
+  2. SYMPTOM-TO-CAUSE CHAIN. From boundary-trace, trace one spike from the TTL expiry to the database
+     saturation. Cite the lines that establish (a) how many concurrent requests miss at the same
+     instant, (b) that every miss issues the identical origin query for the same key, and (c) that the
+     per-query time inflates under the concurrent load while a lone miss between boundaries is fast.
+  3. RED HERRING: SLOW QUERY. Explain why the origin join is NOT a slow query, citing explain. Explain
+     why it nonetheless takes ~1.9s inside the burst.
+  4. RED HERRING: DB CAPACITY, DEPLOY, GC. Explain why "the database is undersized / needs a bigger
+     box," the recent deploy, and GC pauses are not the root cause, citing metrics and deploy-note.
+  5. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression, and
+     state the invariant it enforces between concurrent misses of one key.
+  6. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow or
+     harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: cache-code
+    type: code
+    label: catalogd/product-cache.ts — the read-through cache (current)
+    content: |
+      // This is the COMPLETE path that populates productCache. There is no background refresh job,
+      // no cron warmer, and no request coalescing / single-flight anywhere in the service. getProduct
+      // is the only function that writes productCache; nothing else sets it. This is exhaustive.
+
+      export async function getProduct(id: string) {
+        const hit = await productCache.get(id);      // O(1) lookup, ~1ms
+        if (hit !== undefined) return hit;            // HIT: return cached value
+
+        // MISS: every request that misses recomputes independently — there is no lock, no
+        // in-flight de-duplication, no "wait for the first loader". All concurrent missers below
+        // run this same block at the same time.
+        const product = await db.query(ORIGIN_JOIN, [id]);   // the heavy origin read (see explain)
+        await productCache.set(id, product, TTL_SECONDS);     // repopulate for the next TTL window
+        return product;
+      }
+      // ORIGIN_JOIN is a single prepared statement keyed by id; for a given id it returns the same
+      // rows every time within a TTL window (product data changes at most a few times per hour).
+  - id: cache-config
+    type: config
+    label: catalogd cache settings (complete)
+    content: |
+      cache:
+        engine: in-process-lru
+        maxEntries: 50000            # the hot catalog is ~2000 ids; the cache never evicts under load
+        ttlSeconds: 300              # every entry expires exactly 300s after it was written
+      freshnessSLA:
+        maxStalenessSeconds: 300     # product data must be at most 5 minutes stale (product req P-12)
+      # These are the complete cache and freshness settings. ttlSeconds has been 300 since the service
+      # launched; no recent deploy changed it (see deploy-note). Because the hot ids were all first
+      # cached during the same warmup, their 300s TTLs expire in the same ~1s window, together.
+  - id: boundary-trace
+    type: log
+    label: request trace across one TTL boundary (12:05:00) vs a lone miss between boundaries
+    content: |
+      # Each hot id's entry was written at 12:00:00 during warmup, so all expire at 12:05:00 together.
+      12:04:59.998  getProduct(p-17) -> cache HIT 2ms                 (steady state: ~99% hit rate)
+      12:05:00.000  productCache entries for the 2000 hot ids EXPIRE (ttlSeconds=300 since 12:00:00)
+      12:05:00.001  214 concurrent getProduct(p-17) requests in flight -> ALL miss simultaneously
+      12:05:00.001  -> 214 identical ORIGIN_JOIN[p-17] queries issued at once (same id, same result)
+      12:05:00.001  ...plus similar concurrent misses fanning out across the other hot ids
+      12:05:00.002  db: 900+ concurrent ORIGIN_JOIN executions; per-query time 120ms -> ~1900ms (contention)
+      12:05:01.900  first ORIGIN_JOIN[p-17] returns; productCache.set(p-17); subsequent p-17 reads HIT again
+      12:05:02.050  burst drains; latency returns to ~2ms; db CPU falls back toward ~10%
+      # Contrast — a lone miss OUTSIDE the boundary (e.g. a cold id at 12:07:30):
+      12:07:30.000  getProduct(p-988) -> MISS -> ORIGIN_JOIN[p-988] returns in 121ms -> set -> done
+      # One miss at a time = 121ms. The 1900ms is not the query; it is ~900 copies of it contending.
+  - id: metrics
+    type: table
+    label: catalogd + database, 1-minute buckets (12:00-12:07)
+    content: |
+      bucket   req_total  p99_ms  cache_hit%  db_cpu%  db_active_queries_p99  gc_pause_p99_ms
+      12:00    73400      3       99.1        11       4                      9
+      12:01    72900      3       99.2        10       3                      8
+      12:02    73100      3       99.1        10       4                      9
+      12:03    72800      3       99.2        11       3                      8
+      12:04    73500      3       99.1        10       4                      9
+      12:05    73200      1910    52.0        96       930                    10
+      # The p99 spike, the cache-hit collapse, the db_cpu spike, and the db_active_queries spike ALL
+      # land in the 12:05 bucket — the TTL boundary — and only there. Between boundaries db_cpu is ~10%
+      # and there are ~4 concurrent queries. gc_pause_p99 is 8-10ms all window (no long pauses).
+  - id: explain
+    type: note
+    label: EXPLAIN ANALYZE for ORIGIN_JOIN (captured with one query running)
+    content: |
+      EXPLAIN ANALYZE SELECT ... FROM products p JOIN inventory i ON i.product_id = p.id
+        JOIN prices pr ON pr.product_id = p.id WHERE p.id = $1;
+        Nested Loop  (actual time=0.4..120.6 rows=1 loops=1)
+          -> Index Scan using products_pkey on products p   (actual time=0.03..0.05 rows=1)
+          -> Index Scan using inventory_product_id_idx        (actual time=0.1..0.2 rows=1)
+          -> Index Scan using prices_product_id_idx           (actual time=0.1..0.2 rows=1)
+        Planning Time: 0.1 ms
+        Execution Time: 120.7 ms
+      # Every join uses an index; no sequential scan; no lock wait. A single execution is ~120ms, well
+      # within the 400ms per-miss budget. It is not, and never was, a slow query in isolation. The
+      # ~1900ms seen in the burst is contention among ~900 simultaneous copies of this same 120ms query.
+  - id: deploy-note
+    type: diff
+    label: most recent deploy d-77 (shipped 11:30, before the incident) — for rule-out
+    content: |
+      # Files changed by d-77: catalogd/serializer.ts ONLY.
+        function toDto(product) {
+      -   return { id: product.id, name: product.name, price: product.price };
+      +   return { id: product.id, name: product.name, price: product.price, currency: product.currency };
+        }
+      # d-77 added one field to the response DTO. It did NOT touch product-cache.ts, cache-config
+      # (ttlSeconds unchanged at 300), the ORIGIN_JOIN, or any concurrency/locking code. The five-minute
+      # spike period matches ttlSeconds=300, which predates this deploy.
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Add single-flight (request coalescing) around the miss path: the first misser for an id takes
+          a per-key in-flight lock and runs ORIGIN_JOIN once; every other concurrent misser for that id
+          awaits that same in-flight promise and reuses its result, then all share the one set().
+      F2: Raise ttlSeconds from 300 to 1800 (30 minutes) so the boundary comes six times less often.
+      F3: Scale catalogd from 8 to 32 web replicas to absorb the burst latency.
+      F4: Move the database to a 4x-larger instance so it can run the concurrent queries faster.
+
+      Constraints:
+        - Freshness SLA (cache-config, product req P-12): product data must be at most 300s stale.
+        - The shared Postgres instance is sized for the steady ~4 concurrent queries plus headroom; the
+          per-key result is identical for all concurrent missers, so only ONE recompute per id per
+          expiry is actually needed.
+tags: [debugging, root-cause-isolation, cache, thundering-herd, latency]

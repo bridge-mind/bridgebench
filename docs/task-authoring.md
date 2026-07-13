@@ -8,7 +8,7 @@ Every task is split into a **public half** (what competitors and everyone else s
 
 ## Pack invariants (enforced by the loader and `npm run tasks -- validate`)
 
-- Exactly **12 tasks per category**, **2 per cluster**, unique IDs.
+- Exactly **18 tasks per category**, **3 per cluster**, unique IDs.
 - Public and private halves must agree on `id` and `version`.
 - Every `requiredEvidence` entry in the private half must name an existing public artifact ID.
 - Public artifact IDs must be unique and the YAML filename must match the task ID.
@@ -23,7 +23,7 @@ Use `npm run tasks -- validate --file <path>` to validate one proposed public ta
 | ------------------ | ----------------------------------------------------------------------------------------------- |
 | `id`               | kebab-case, regex-validated                                                                     |
 | `version`          | semver; bump on any content change (hashes are journaled)                                       |
-| `category`         | `reasoning` \| `hallucination` \| `security` \| `bullshit`                                     |
+| `category`         | `reasoning` \| `hallucination` \| `security` \| `bullshit` \| `refactoring` \| `debugging` \| `generation` \| `speed` |
 | `cluster`          | one of the category's six clusters (below)                                                      |
 | `difficulty`       | `hard` \| `expert` (current packs are all `expert`)                                             |
 | `title`, `summary` | summary ≤ 500 chars                                                                             |
@@ -154,5 +154,5 @@ The Speed arena is not judged. Both models answer the same task and the faster c
 3. Bump `version` on any edit to either half; the journal hashes both, so silent drift is detectable.
 4. External contributors: validate and propose the public half through the task-proposal issue form. Do not include a hidden reference.
 5. After a public task is accepted, a maintainer starts a private handoff through the GitHub account attached to the issue. The private half never appears in the public issue or pull request.
-6. Replacing a live task requires a pack-rotation plan that preserves the 12-task, two-per-cluster invariant.
+6. Replacing a live task requires a pack-rotation plan that preserves the 18-task, three-per-cluster invariant.
 7. Private halves are published when their pack retires (see [private-packs.md](private-packs.md)).

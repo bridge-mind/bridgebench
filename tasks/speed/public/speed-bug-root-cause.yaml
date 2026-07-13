@@ -1,0 +1,44 @@
+id: speed-bug-root-cause
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: hard
+title: Diagnose a Case-Sensitivity Bug From a Spec, Code, and Bug Report
+summary: >-
+  Read a feature spec, the relevant lookup function, and a QA bug report, correlate them, and produce a
+  root-cause explanation plus the single-line code fix.
+prompt: |
+  Using [feature-spec], [lookup-code], and [bug-report], diagnose the defect.
+
+  1. A 2-3 sentence root cause: what the code does, how it diverges from [feature-spec], and the exact
+     line in [lookup-code] responsible. Cite the artifacts.
+  2. The single-line change to [lookup-code] that fixes it while preserving the spec's other guarantees.
+artifacts:
+  - id: feature-spec
+    type: spec
+    label: Feature spec
+    content: |
+      Password-reset lookup:
+      - a builder requests a reset by email address
+      - email matching is case-insensitive and ignores surrounding whitespace ("A@x.com " matches the
+        stored "a@x.com")
+      - stored emails are already normalized to lowercase and trimmed at signup
+      - if a matching active user exists, send the reset link; otherwise do nothing and return no error
+  - id: lookup-code
+    type: code
+    label: Lookup function
+    content: |
+      async function findResetTarget(rawEmail: string) {
+        const email = rawEmail.trim();
+        const user = await db.users.findOne({ where: { email, active: true } });
+        return user ?? null;
+      }
+  - id: bug-report
+    type: note
+    label: QA bug report
+    content: |
+      Title: Reset emails never arrive when the address is typed with capitals
+      Steps: sign up as "Dana@Acme.com" (stored as "dana@acme.com"), then request a reset typing
+      "Dana@Acme.com". No email arrives. Requesting with lowercase "dana@acme.com" works. Trailing
+      whitespace is handled fine either way.
+tags: [debugging, synthesis, root-cause]

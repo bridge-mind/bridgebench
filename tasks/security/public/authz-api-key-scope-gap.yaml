@@ -1,0 +1,198 @@
+id: authz-api-key-scope-gap
+version: 1.0.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Stanchion API — Machine-Key Scope Boundary Analysis
+summary: >-
+  The Stanchion orders API authenticates callers as either a role-gated JWT session
+  or a scope-gated machine API key. Several routes look under-protected; some are
+  JWT-only, some require a scope no issued key holds. Exactly one mutating route
+  accepts API keys without a scope check, letting a read-only key trigger a
+  money-moving action. Classify five routes, name the single exposure, state the fix
+  — using only the artifacts.
+prompt: |
+  You are reviewing authorization on the "Stanchion" orders API. Every request
+  authenticates as EITHER a JWT session principal (an interactive user, gated by
+  @Roles) OR a machine API-key principal (gated by @RequireScopes). Routes carry
+  decorators like @AllowApiKey(), @RequireScopes(), and @Roles(). You are given six
+  artifacts: orders-controller, reports-controller, auth-model, key-catalog,
+  scope-map, and exposure-note.
+
+  Answer each item using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If something is not defined/reachable/exploitable in the
+  artifacts, say so explicitly. Do NOT write exploit code, requests, or bypass
+  strings — this is an analysis-only task.
+
+  For items 1-5, state (a) WHICH principals can successfully call the route — an API
+  key holding which scope (if any), and/or which JWT users — and (b) whether that
+  matches the declared intent. Justify every answer by citing the route decorators,
+  the composite-auth semantics in auth-model, the issued-key scopes in key-catalog,
+  and the intended-scope declarations in exposure-note.
+
+  1. GET    /orders                (OrdersController.listOrders)
+  2. POST   /orders/:id/refund     (OrdersController.refundOrder)
+  3. DELETE /orders/:id            (OrdersController.cancelOrder)
+  4. POST   /orders/export         (ReportsController.exportOrders)
+  5. GET    /orders/:id/ledger     (ReportsController.getLedger)
+
+  6. Exactly one route is an UNINTENDED exposure — reachable by a machine principal
+     that should not be able to trigger it. Name that single route and state the
+     sensitive action it lets that principal trigger. Ground the claim in the
+     decorators, the composite-auth semantics, the issued-key scopes, and the
+     intended-scope declaration.
+
+  7. State the one-line fix that closes the exposure from item 6, and explain why it
+     restores the intended protection (cite the scope-check semantics).
+artifacts:
+  - id: orders-controller
+    type: code
+    label: stanchion-api/src/orders/orders.controller.ts
+    content: |
+      // Every route authenticates via the global CompositeAuthGuard (JWT session OR
+      // API key). Per-route decorators refine who may proceed. This file lists EVERY
+      // route on the /orders controller; there are no other /orders routes.
+
+      @Controller('orders')
+      export class OrdersController {
+        // List the caller's orders. Read-only.
+        @Get()
+        @AllowApiKey()
+        @RequireScopes('orders:read')
+        listOrders(@GetPrincipal() p: Principal) {
+          return this.orders.list(p);
+        }
+
+        // Issue a money refund against an order to the original payment method.
+        // This MOVES MONEY and is irreversible once settled.
+        @Post(':id/refund')
+        @AllowApiKey()
+        // NOTE: no @RequireScopes and no @Roles on this route.
+        refundOrder(@Param('id') id: string) {
+          return this.orders.refund(id);
+        }
+
+        // Cancel (soft-delete) an order. Mutating.
+        @Delete(':id')
+        @AllowApiKey()
+        @RequireScopes('orders:write')
+        cancelOrder(@Param('id') id: string) {
+          return this.orders.cancel(id);
+        }
+      }
+  - id: reports-controller
+    type: code
+    label: stanchion-api/src/reports/reports.controller.ts
+    content: |
+      // This file lists every route on the /orders reporting surface. exportOrders
+      // carries no @AllowApiKey, so machine (API-key) principals cannot reach it (see
+      // auth-model); getLedger DOES allow API keys but requires finance:audit, a scope
+      // no issued key holds (see key-catalog).
+
+      @Controller('orders')
+      @Roles(Role.ADMIN)                 // class-level: JWT callers must be ADMIN
+      export class ReportsController {
+        // Export the full orders dataset as a report bundle. Sensitive but JWT-only.
+        @Post('export')
+        exportOrders() {
+          return this.reports.exportAll();
+        }
+
+        // Read the immutable financial ledger for one order.
+        @Get(':id/ledger')
+        @AllowApiKey()
+        @RequireScopes('finance:audit')
+        getLedger(@Param('id') id: string) {
+          return this.reports.ledger(id);
+        }
+      }
+  - id: auth-model
+    type: spec
+    label: Stanchion composite-auth + decorator reference (authoritative)
+    content: |
+      Authoritative model for how Stanchion authenticates and authorizes. This is the
+      complete semantics; no other auth decorators or principal types exist.
+
+      Principals. The global CompositeAuthGuard resolves every request to EXACTLY ONE
+      principal type:
+        - a JWT SESSION principal (an interactive user). Users carry ROLES, not scopes.
+        - an API-KEY principal (a machine integration). Keys carry SCOPES, not roles.
+
+      @AllowApiKey()
+        Permits an API-key principal to proceed on this route. WITHOUT @AllowApiKey on
+        a route (or its controller), an API-key principal is REJECTED and only a JWT
+        session principal may call it. @AllowApiKey does NOT itself check any scope.
+
+      @RequireScopes(scope)
+        Enforced ONLY against an API-key principal: the key must hold `scope` (or a
+        scope that supersedes it) or the request is rejected. It has no effect on a JWT
+        session principal. CRITICAL: on a route that carries @AllowApiKey() but NO
+        @RequireScopes, an API-key principal passes the scope stage VACUOUSLY — ANY
+        valid API key is accepted regardless of which scopes it holds. A missing
+        @RequireScopes on an API-key-allowed route is therefore "any key," not "no key."
+
+      @Roles(role)
+        Enforced ONLY against a JWT session principal: the user must hold `role`. It
+        has no effect on an API-key principal (keys are not users). A class-level
+        @Roles applies to every route on the controller for JWT callers.
+
+      Scope supersession (finance): a key with `finance:audit` supersedes `orders:read`.
+      No other supersession relationships exist. `orders:write` does NOT supersede or
+      imply any other scope, and `orders:read` supersedes nothing.
+  - id: key-catalog
+    type: config
+    label: Stanchion issued API-key scopes (authoritative, complete)
+    content: |
+      # stanchion issued API-key types. This is the COMPLETE and authoritative set of
+      # API keys that exist. Every machine principal is one of these; there are no
+      # other key types and no key holds a scope not listed against it here.
+
+      keyTypes:
+        integration-readonly:            # the widely-distributed integration key
+          scopes: [orders:read]
+        integration-fulfillment:
+          scopes: [orders:read, orders:write]
+
+      # There is NO issued key type that holds `finance:audit`. finance:audit is a
+      # JWT-user entitlement only; it is not granted to any API key. There is also no
+      # key holding any "refunds" scope — no refunds scope is defined or issued at all.
+  - id: scope-map
+    type: table
+    label: Stanchion route authorization map (COMPLETE — every route, accepted principals, required scope/role)
+    content: |
+      Stanchion authorization map — COMPLETE. Every mounted route is listed with
+      whether it accepts an API-key principal (@AllowApiKey), the API-key scope it
+      requires (@RequireScopes), and the JWT role it requires (@Roles). A route not in
+      this table is not served.
+
+      route                     | accepts API key? | required key scope        | required JWT role
+      --------------------------|------------------|---------------------------|------------------
+      GET    /orders            | yes              | orders:read               | (none)
+      POST   /orders/:id/refund | yes              | (NONE declared)           | (none)
+      DELETE /orders/:id        | yes              | orders:write              | (none)
+      POST   /orders/export     | no (JWT only)    | n/a                       | ADMIN (class-level)
+      GET    /orders/:id/ledger | yes              | finance:audit             | ADMIN (class-level, JWT)
+
+      Reminder (auth-model): "accepts API key = yes" with "required key scope = NONE
+      declared" means ANY valid API key is accepted on that route, regardless of scope.
+  - id: exposure-note
+    type: note
+    label: Stanchion intended machine-access policy (authoritative)
+    content: |
+      Intended machine-access policy. This states, authoritatively, what each mutating
+      route is SUPPOSED to require of an API-key principal.
+
+        - Reads (list orders) require orders:read.
+        - Cancelling an order requires orders:write.
+        - Issuing a REFUND is the most sensitive machine action: it moves money and is
+          irreversible once settled. It MUST require a dedicated write scope
+          (refunds:write) that is NOT held by the widely-distributed read-only
+          integration key. A refund must never be triggerable by a read-only key.
+        - The export report is intended to be JWT-admin-only and must not be reachable
+          by any API key.
+        - The per-order ledger is intended for finance auditors (finance:audit), which
+          — per key-catalog — no issued API key holds.
+
+      Any route whose ACTUAL accepted-principal set is broader than the above is a
+      misconfiguration. Compare each route's decorators (scope-map) against this intent.
+tags: [authz, api-keys, scopes, access-control, authz-boundary, security]
