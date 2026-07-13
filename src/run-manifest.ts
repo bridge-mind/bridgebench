@@ -36,28 +36,28 @@ const ManifestJudgeSchema = ManifestModelSchema.extend({
   role: z.literal('judge'),
 });
 
-export const RunManifestSchema = z.object({
-  version: z.literal(RUN_MANIFEST_VERSION),
-  methodologyVersion: z.string().min(1),
-  engineVersion: z.string().min(1),
-  category: BenchmarkCategorySchema,
-  seed: z.string(),
-  matches: z.number().int().positive(),
-  competitors: z
-    .array(ManifestCompetitorSchema)
-    .min(2)
-    .superRefine((models, context) => {
-      if (new Set(models.map((model) => model.id)).size !== models.length) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'Competitor manifest entries must be unique',
-        });
-      }
-    }),
-  judges: z
-    .array(ManifestJudgeSchema)
-    .length(3)
-    .superRefine((models, context) => {
+export const RunManifestSchema = z
+  .object({
+    version: z.literal(RUN_MANIFEST_VERSION),
+    methodologyVersion: z.string().min(1),
+    engineVersion: z.string().min(1),
+    category: BenchmarkCategorySchema,
+    seed: z.string(),
+    matches: z.number().int().positive(),
+    competitors: z
+      .array(ManifestCompetitorSchema)
+      .min(2)
+      .superRefine((models, context) => {
+        if (new Set(models.map((model) => model.id)).size !== models.length) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Competitor manifest entries must be unique',
+          });
+        }
+      }),
+    // Length is category-gated by the top-level refine below: the speed arena
+    // binds an empty judge set, every other category the fixed three-judge panel.
+    judges: z.array(ManifestJudgeSchema).superRefine((models, context) => {
       if (new Set(models.map((model) => model.id)).size !== models.length) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -65,20 +65,31 @@ export const RunManifestSchema = z.object({
         });
       }
     }),
-  tasks: z.array(
-    z.object({
-      id: z.string().min(1),
-      version: z.string().min(1),
-      publicHash: z.string().min(1),
-      // Null for public-only packs (e.g. the speed arena); judged packs bind a real hash.
-      privateHash: z.string().min(1).nullable(),
+    tasks: z.array(
+      z.object({
+        id: z.string().min(1),
+        version: z.string().min(1),
+        publicHash: z.string().min(1),
+        // Null for public-only packs (e.g. the speed arena); judged packs bind a real hash.
+        privateHash: z.string().min(1).nullable(),
+      }),
+    ),
+    promptPolicyHashes: z.object({
+      competitor: z.string().regex(/^[a-f0-9]{64}$/),
+      judge: z.string().regex(/^[a-f0-9]{64}$/),
     }),
-  ),
-  promptPolicyHashes: z.object({
-    competitor: z.string().regex(/^[a-f0-9]{64}$/),
-    judge: z.string().regex(/^[a-f0-9]{64}$/),
-  }),
-});
+  })
+  .superRefine((manifest, context) => {
+    // Speed runs have no judge panel; every other category binds exactly three.
+    const expectedJudges = manifest.category === 'speed' ? 0 : 3;
+    if (manifest.judges.length !== expectedJudges) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['judges'],
+        message: `Expected ${expectedJudges} judges for ${manifest.category}, found ${manifest.judges.length}`,
+      });
+    }
+  });
 
 export type RunManifest = z.infer<typeof RunManifestSchema>;
 
@@ -129,9 +140,13 @@ export function createRunManifest(
   const competitors = canonicalCompetitors
     .map((model) => ({ ...manifestModel(model), role: 'competitor' as const }))
     .sort((left, right) => left.id.localeCompare(right.id));
-  const judges = listModels('judge')
-    .map((model) => ({ ...manifestModel(model), role: 'judge' as const }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+  // The speed arena is decided by latency alone — it binds no judge panel.
+  const judges =
+    config.category === 'speed'
+      ? []
+      : listModels('judge')
+          .map((model) => ({ ...manifestModel(model), role: 'judge' as const }))
+          .sort((left, right) => left.id.localeCompare(right.id));
   const manifest: RunManifest = {
     version: RUN_MANIFEST_VERSION,
     methodologyVersion: METHODOLOGY_VERSION,
