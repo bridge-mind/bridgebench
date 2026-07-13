@@ -1,0 +1,34 @@
+id: speed-config-schema-json
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: hard
+title: Author a JSON Schema for a Service Config File
+summary: >-
+  Write a strict draft 2020-12 JSON Schema validating a service configuration object, enforcing types,
+  enums, numeric ranges, a conditional requirement, and no unexpected properties.
+prompt: |
+  Produce a single JSON Schema (draft 2020-12) that validates the config described in [config-spec].
+  Emit only the JSON.
+
+  1. Types, `enum`s, defaults, and numeric bounds for every field.
+  2. `additionalProperties: false` at each fixed object level and a correct top-level `required` list.
+  3. A conditional: when `tls.enabled` is true, `tls.certPath` and `tls.keyPath` are required.
+artifacts:
+  - id: config-spec
+    type: spec
+    label: Config shape
+    content: |
+      serviceName : string, required, 1..64 characters
+      port        : integer, required, 1..65535
+      logLevel    : one of "debug" | "info" | "warn" | "error", default "info"
+      replicas    : integer, 1..50, default 1
+      tls         : object, required
+        tls.enabled  : boolean, required
+        tls.certPath : string
+        tls.keyPath  : string
+      featureFlags: optional object mapping arbitrary string keys to boolean values
+
+      No properties beyond those listed are permitted at any level, except that featureFlags may hold
+      arbitrary string -> boolean entries.
+tags: [json-schema, validation, config]

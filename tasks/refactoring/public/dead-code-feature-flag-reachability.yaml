@@ -1,0 +1,162 @@
+id: dead-code-feature-flag-reachability
+version: 1.1.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Auditing a dead-code cleanup PR for the Nimbus notify module
+summary: A cleanup PR deletes seven items from the notify module, each claimed to be dead. Reachability runs through two live entry points, a string-keyed channel dispatcher, and a flag registry where one flag is active-but-off and another is permanently removed. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
+prompt: |
+  A cleanup PR (removal-pr) deletes seven items from the Nimbus `notify` module, each labelled
+  "dead code." Reachability is fully determined by three self-declared-complete artifacts: the
+  entry-manifest (the only entry points and the no-reflection guarantee), the flag-registry (every
+  flag and whether it is active or permanently removed), and the dispatch-registry (every channel
+  key the dispatcher is ever called with). The module source is in module-source.
+
+  Answer each deliverable using ONLY the supplied artifacts (entry-manifest, flag-registry,
+  dispatch-registry, module-source, removal-pr). Cite the artifact id(s) for every claim.
+
+  For removals R1..R7, classify each as exactly one of:
+    - behavior-preserving  (the item is truly unreachable; deleting it changes nothing observable)
+    - changes-behavior     (the item is reachable on some entry point / flag state / dispatch key;
+                            deleting it removes live behavior)
+
+  A code path guarded by a flag that is enabled, or that operators can still toggle ON, is
+  REACHABLE (not dead). A path guarded by a flag that has been permanently removed from the registry
+  is unreachable.
+
+  1. Classify R1 (remove sendPush).
+  2. Classify R2 (remove checkoutV2Path and its call in notifyUser).
+  3. Classify R3 (remove legacyExportPath and its dead guarded call in notifyUser).
+  4. Classify R4 (remove sendSms).
+  5. Classify R5 (remove formatLegacyReceipt).
+  6. Classify R6 (remove computeTax).
+  7. Classify R7 (remove the attachBanner call and function).
+  8. GOAL. Taking the elimination goal as "remove all and only truly-dead code," does this PR
+     meet-goal or fails-goal? If fails-goal, name every reachable item it wrongly removes AND any
+     truly-dead item it leaves behind.
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, name the reachability path (entry point, flag state, or
+  dispatch key) that keeps the item alive.
+artifacts:
+  - id: entry-manifest
+    type: spec
+    label: notify module reachability manifest (complete)
+    content: |
+      Nimbus `notify` module — reachability surface. This manifest is COMPLETE.
+
+      Entry points (the ONLY ways execution enters this module):
+        - notifyUser(user)   — exported; called by the API controller on every send request.
+        - notifyBatch(users) — exported; called by the nightly cron job.
+      There are NO other exported functions and no other callers of this module.
+
+      Dynamic behavior: the module dispatches channel handlers by string key through the
+      dispatch-registry (see that artifact). Apart from that registry lookup, the module uses NO
+      reflection, NO eval, NO dynamic import, and NO string-to-symbol resolution. A function is
+      reachable ONLY if it can actually execute at runtime from notifyUser or notifyBatch — i.e. a
+      static call chain reaches it AND every feature-flag guard on that chain can be true per the
+      flag-registry — OR it is a channel handler registered in the dispatch-registry under a key in
+      CHANNELS. A call reached only through a guard whose flag is REMOVED (permanently false in the
+      flag-registry) is NOT a live chain.
+
+      Therefore: a defined function is truly dead if it has no static caller at all, OR its only
+      static callers sit behind a permanently-false (REMOVED) flag, AND it has no dispatch-registry
+      registration under a CHANNELS key.
+  - id: flag-registry
+    type: config
+    label: feature-flag registry (complete and authoritative)
+    content: |
+      # flags.registry.yaml — the COMPLETE set of flags. Any key not listed here does not exist,
+      # and flags.isEnabled(missingKey) returns false and can never be toggled true.
+
+      flags:
+        - key: promo.banner
+          enabled: true
+          status: active        # operators may toggle; currently ON
+        - key: checkout.v2
+          enabled: true
+          status: active        # currently ON; operators may toggle it either way
+        - key: legacy-export
+          enabled: false
+          status: REMOVED       # key was deleted from the registry service on 2026-03-14.
+                                # isEnabled('legacy-export') is permanently false and CANNOT be
+                                # toggled true again; the flag no longer exists operationally.
+
+      # No other flags exist. A branch guarded by an `active` flag is reachable (it is ON now, or
+      # can be turned ON); a branch guarded by a REMOVED flag is unreachable (permanently false).
+  - id: dispatch-registry
+    type: code
+    label: channel dispatch registry (complete key set)
+    content: |
+      // notify/dispatch.ts
+      // The dispatcher is invoked ONLY with keys from CHANNELS. This is the complete key set.
+      export const CHANNELS = ['email', 'sms'] as const;
+
+      const HANDLERS: Record<string, (u: User) => void> = {
+        email: sendEmail,
+        sms:   sendSms,
+        // NOTE: sendPush is intentionally NOT registered here and 'push' is not in CHANNELS.
+      };
+
+      export function dispatch(channel: string, u: User): void {
+        // channel is always one of CHANNELS (validated upstream by notifyUser).
+        HANDLERS[channel](u);
+      }
+  - id: module-source
+    type: code
+    label: notify module source
+    content: |
+      // notify/index.ts
+
+      export function notifyUser(user: User): void {
+        const amountDue = computeTax(user.subtotal);              // live, unconditional call
+        if (flags.isEnabled('promo.banner')) attachBanner(user);  // promo.banner is ON
+        if (flags.isEnabled('checkout.v2')) checkoutV2Path(user.cart);       // checkout.v2 is ON
+        if (flags.isEnabled('legacy-export')) legacyExportPath(user.order);  // legacy-export REMOVED
+        dispatch(user.channel, user);                             // user.channel in CHANNELS
+        record(user.id, amountDue);
+      }
+
+      export function notifyBatch(users: User[]): void {
+        for (const u of users) notifyUser(u);
+      }
+
+      // Called from notifyUser, guarded at the call site by checkout.v2 (flag-registry: enabled).
+      // No internal flag check.
+      function checkoutV2Path(cart: Cart): void {
+        const tax = computeTax(cart.subtotal);
+        finalizeCheckout(cart, tax);
+      }
+
+      // Called from notifyUser, guarded at the call site by legacy-export, which is REMOVED
+      // (permanently false), so this call never fires and this function is never reached.
+      function legacyExportPath(order: Order): void {
+        emit(formatLegacyReceipt(order));
+      }
+
+      function computeTax(subtotal: number): number { return Math.round(subtotal * 1.08); }
+      function attachBanner(user: User): void { user.banner = currentPromo(); }
+      function formatLegacyReceipt(order: Order): string { return `RECEIPT ${order.id}`; }
+
+      function sendEmail(u: User): void { mail.queue(u.email); }   // registered channel 'email'
+      function sendSms(u: User): void { sms.queue(u.phone); }      // registered channel 'sms'
+      function sendPush(u: User): void { push.queue(u.deviceId); } // NOT registered, no callers
+
+      // Defined long ago; no caller anywhere, not a channel handler, not touched by any flag.
+      function oldRetryHelper(fn: () => void): void { try { fn(); } catch { fn(); } }
+  - id: removal-pr
+    type: diff
+    label: proposed dead-code cleanup PR
+    content: |
+      PR #812 "remove dead code from notify module". Proposed deletions:
+
+      R1  delete function sendPush                                     (reason: "no callers")
+      R2  delete function checkoutV2Path and its call in notifyUser    (reason: "behind the checkout.v2 feature flag")
+      R3  delete function legacyExportPath and its dead guarded call in notifyUser (reason: "behind the legacy-export feature flag")
+      R4  delete function sendSms                                      (reason: "no direct callers found")
+      R5  delete function formatLegacyReceipt                          (reason: "only used by legacyExportPath")
+      R6  delete function computeTax                                   (reason: "only used by checkoutV2Path")
+      R7  delete function attachBanner and its call in notifyUser      (reason: "promo branch is dead")
+
+      The PR does NOT touch oldRetryHelper (the author did not notice it).
+tags: [dead-code-elimination, refactoring, feature-flags, reachability, dispatch]

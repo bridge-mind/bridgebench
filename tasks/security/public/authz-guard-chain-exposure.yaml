@@ -1,0 +1,224 @@
+id: authz-guard-chain-exposure
+version: 1.1.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Cobalt API Global Guard Chain — Route Exposure Analysis
+summary: >-
+  The Cobalt service protects routes with a global guard chain (authentication →
+  role → tier → CSRF) plus per-controller @UseGuards and route decorators.
+  Several admin-looking routes appear risky; exactly one is a genuine
+  unauthenticated exposure. Classify five named routes against declared intent,
+  identify the single real exposure, and state the fix — using only the artifacts.
+prompt: |
+  You are reviewing authorization on the "Cobalt" API. Guards are registered
+  globally and also, redundantly, per controller; individual routes carry
+  decorators like @Public(), @Roles(), @RequireTier(), and @FeatureEnabled().
+  You are given seven artifacts: admin-controller, billing-controller,
+  public-controller, guard-registration, decorator-reference, feature-flags, and
+  exposure-note.
+
+  Answer each item using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If something is not defined/reachable/exploitable in
+  the artifacts, say so explicitly. Do NOT write exploit code, requests, or
+  bypass strings — this is an analysis-only task.
+
+  For items 1–5, state (a) who can successfully call the route (an unauthenticated
+  caller, any authenticated user, an authenticated user of a given tier, an
+  authenticated ADMIN, or no one in production), and (b) whether that matches the
+  declared intent. Justify every answer by citing the specific decorators on the
+  route, the global guard chain and its ORDER, and the relevant declarations.
+
+  1. DELETE /admin/workspaces/:id  (AdminController.deleteWorkspace)
+  2. POST  /admin/keys/rotate      (AdminController.rotateSigningKeys)
+  3. GET   /billing/invoices       (BillingController.getInvoices)
+  4. POST  /admin/audit/purge      (AdminController.purgeAuditLog)
+  5. GET   /public/health          (PublicController.health)
+
+  6. Exactly one route in this service is an UNINTENDED exposure — reachable by a
+     caller who should not reach it. Name that single route and state the
+     destructive action it lets that caller trigger. Ground the claim in the
+     decorators, the guard chain, and the intended-public declaration.
+
+  7. State the one-line fix that closes the exposure from item 6, and explain why
+     it restores the intended protection (cite the guard chain / decorator
+     semantics).
+artifacts:
+  - id: admin-controller
+    type: code
+    label: cobalt-api/src/admin/admin.controller.ts
+    content: |
+      // The @UseGuards + @Roles here are class-level; the authentication and role
+      // guards are ALSO registered globally (see guard-registration), so these are
+      // defense-in-depth. This file lists EVERY route on the /admin controller;
+      // there are no other admin routes.
+
+      @Controller('admin')
+      @UseGuards(JwtAuthGuard, RoleGuard)   // redundant with the global chain
+      @Roles(Role.ADMIN)                    // class default: /admin is admin-only...
+      export class AdminController {
+        // Permanently and irreversibly deletes a workspace together with ALL of
+        // its projects, members, invitations, and billing history.
+        @Delete('workspaces/:id')
+        @Public()
+        deleteWorkspace(@Param('id') id: string) {
+          return this.admin.deleteWorkspace(id);
+        }
+
+        // Rotates the JWT signing keys for the entire tenant.
+        @Post('keys/rotate')
+        rotateSigningKeys() {
+          return this.admin.rotateSigningKeys();
+        }
+
+        // Hard-deletes the append-only audit log. Gated behind a feature flag.
+        @Post('audit/purge')
+        @FeatureEnabled('beta-shredder')
+        purgeAuditLog() {
+          return this.admin.purgeAuditLog();
+        }
+      }
+  - id: billing-controller
+    type: code
+    label: cobalt-api/src/billing/billing.controller.ts
+    content: |
+      // NOTE: this controller declares NO class-level @UseGuards of its own.
+      // This file lists every route on the /billing controller.
+
+      @Controller('billing')
+      export class BillingController {
+        // Lists the caller's own invoices. Requires an active PRO (or higher) tier.
+        @Get('invoices')
+        @RequireTier('PRO')
+        getInvoices(@GetUser('id') userId: string) {
+          return this.billing.listInvoices(userId);
+        }
+
+        // Opens the billing provider's portal session for the caller.
+        @Post('portal-session')
+        @RequireTier('BASIC')
+        createPortalSession(@GetUser('id') userId: string) {
+          return this.billing.createPortalSession(userId);
+        }
+      }
+  - id: public-controller
+    type: code
+    label: cobalt-api/src/public/public.controller.ts
+    content: |
+      // This file lists every route on the /public controller.
+
+      @Controller('public')
+      export class PublicController {
+        // Liveness probe for the load balancer. Intentionally unauthenticated.
+        @Get('health')
+        @Public()
+        health() {
+          return { status: 'ok' };
+        }
+
+        // Pricing table rendered by the unauthenticated marketing site.
+        @Get('pricing')
+        @Public()
+        pricing() {
+          return this.catalog.publicPricing();
+        }
+      }
+  - id: guard-registration
+    type: code
+    label: cobalt-api/src/app.module.ts (global guard registration — complete)
+    content: |
+      // The COMPLETE set of globally-registered guards. APP_GUARD guards run for
+      // EVERY route in the application — including controllers that declare no
+      // @UseGuards of their own — in the order they are registered below. There
+      // are no other global guards.
+
+      providers: [
+        { provide: APP_GUARD, useClass: JwtAuthGuard }, // 1. authentication
+        { provide: APP_GUARD, useClass: RoleGuard },    // 2. role check (needs the
+                                                        //    principal from step 1)
+        { provide: APP_GUARD, useClass: TierGuard },    // 3. subscription tier
+        { provide: APP_GUARD, useClass: CsrfGuard },    // 4. CSRF (mutating verbs)
+      ];
+
+      // Ordering guarantee: Nest executes APP_GUARD providers in registration
+      // order. Authentication (1) therefore ALWAYS runs before the role check (2),
+      // which always runs before the tier check (3). A caller with no valid token
+      // is rejected at step 1 and never reaches steps 2–4 — UNLESS the route opts
+      // out of authentication via @Public() (see decorator-reference).
+  - id: decorator-reference
+    type: spec
+    label: Cobalt authorization decorator reference (authoritative)
+    content: |
+      Authoritative meaning of every authorization decorator in Cobalt. This is
+      the complete list; no other authorization decorators exist in the codebase.
+
+      @UseGuards(...guards)
+        Attaches controller/route-scoped guards. In Cobalt these DUPLICATE guards
+        that are also registered globally (see guard-registration); they are
+        defense-in-depth and add no protection beyond the global chain. A
+        controller WITHOUT @UseGuards is still fully covered by the global chain.
+
+      @Public()
+        Marks a route (or controller) as NOT requiring authentication. When
+        present, the authentication guard (step 1) short-circuits to ALLOW. Because
+        no authenticated principal is then established, the role guard (step 2)
+        ALSO allows the request — it has no principal to evaluate and treats the
+        route as public. Net effect: a @Public() route is reachable by ANY caller,
+        with no token and no role, REGARDLESS of any @Roles present on the same
+        route or its controller.
+
+      @Roles(role)
+        Requires the authenticated principal to hold `role`. Enforced by the role
+        guard (step 2), which runs AFTER authentication (step 1). It therefore can
+        never be reached by an unauthenticated caller UNLESS the route is @Public().
+        A class-level @Roles applies to every route on the controller that is not
+        @Public().
+
+      @RequireTier(tier)
+        Requires the authenticated principal's subscription tier to be `tier` or
+        higher (FREE < BASIC < PRO < ULTRA). Enforced by the tier guard (step 3).
+        Implies authentication: an unauthenticated caller is rejected at step 1
+        before the tier guard runs.
+
+      @FeatureEnabled(flag)
+        The route responds 404 (as though it did not exist) whenever `flag` is not
+        enabled in the running environment (see feature-flags). A disabled flag
+        makes the route unreachable in that environment.
+
+      @SkipCsrf()
+        Exempts a route from the CSRF guard (step 4) ONLY. It has NO effect on the
+        authentication, role, or tier checks.
+
+      CsrfGuard is NOT an authentication or authorization control. It exists only
+      to reject FORGED state-changing requests that ride ambient session
+      credentials — e.g. a browser that auto-attaches session cookies — when a
+      valid CSRF token is absent. A direct, credential-less API call carries no
+      ambient session to forge against, so CsrfGuard does NOT block it, on ANY HTTP
+      verb (including DELETE). CsrfGuard can therefore never turn a @Public() route
+      back into a protected one: a route left reachable by @Public() is reachable by
+      an unauthenticated direct caller regardless of verb.
+  - id: feature-flags
+    type: config
+    label: cobalt feature flags (resolved values, production)
+    content: |
+      # Resolved feature-flag values. This file is the COMPLETE flag set; any flag
+      # not listed here is treated as disabled in every environment.
+      flags:
+        beta-shredder:   { prod: false, staging: true }   # audit-log purge (admin)
+        new-invoice-pdf: { prod: true,  staging: true }
+        workspace-export:{ prod: true,  staging: true }
+  - id: exposure-note
+    type: note
+    label: Cobalt intended-public route inventory (authoritative)
+    content: |
+      Intended-public route inventory. The routes below are the ONLY routes in the
+      service intended to be reachable WITHOUT authentication. Every other route
+      must require a valid token.
+
+        - GET /public/health    (load-balancer liveness probe)
+        - GET /public/pricing   (marketing pricing table)
+
+      Any route that carries @Public() but is NOT in this list is a
+      misconfiguration: per the decorator-reference, @Public() disables BOTH the
+      authentication and the role checks for that route.
+tags: [authz, guards, nestjs, access-control, authz-boundary, security]

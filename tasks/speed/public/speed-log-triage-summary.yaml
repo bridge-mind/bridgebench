@@ -1,0 +1,35 @@
+id: speed-log-triage-summary
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: hard
+title: Synthesize an Incident Summary From Logs and a Deploy Record
+summary: >-
+  Read a short application log excerpt and a deploy record, correlate them, and produce a concise
+  incident summary plus the single configuration change that restores prior behavior.
+prompt: |
+  Using [app-log] and [deploy-record], write a short incident summary and a one-line configuration fix.
+
+  1. A 3-4 sentence summary: what failed, the first timestamp it appeared, the likely trigger
+     (correlated with [deploy-record]), and the user-visible impact.
+  2. The single environment-variable change (name and value) that would restore the prior behavior,
+     citing the log line that identifies it.
+artifacts:
+  - id: app-log
+    type: log
+    label: Application log excerpt
+    content: |
+      2026-05-02T14:02:11Z INFO  boot: worker started, pool size 20
+      2026-05-02T14:03:40Z INFO  deploy: version 4.7.0 live
+      2026-05-02T14:03:41Z WARN  db: DB_POOL_MAX=5 (was 20) applied from env
+      2026-05-02T14:04:02Z ERROR db: pool exhausted, 15 requests queued > 3000ms
+      2026-05-02T14:04:03Z ERROR http: 503 returned to /checkout (db timeout)
+      2026-05-02T14:06:00Z ERROR http: 503 rate 34% on /checkout
+  - id: deploy-record
+    type: table
+    label: Deploy record
+    content: |
+      version | time                  | notes
+      4.6.3   | 2026-04-28T09:00:00Z  | baseline, DB_POOL_MAX=20
+      4.7.0   | 2026-05-02T14:03:40Z  | env refactor: consolidated pool settings
+tags: [incident, logs, synthesis]

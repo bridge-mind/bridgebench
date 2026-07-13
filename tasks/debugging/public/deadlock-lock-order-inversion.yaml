@@ -1,0 +1,131 @@
+id: deadlock-lock-order-inversion
+version: 1.0.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Wallet Transfers Deadlock Under Load From Inconsistent Row-Lock Ordering
+summary: >-
+  walletsvc transfers intermittently fail with lock errors while users see timeouts. Given the
+  transfer code, a full interleaving of two concurrent transfers, a waits-for graph, a metrics table,
+  two sibling lock paths, and a candidate-fix list, identify the failing schedule and the defect,
+  trace the client-timeout and pool symptoms back to their origin, rule out the safe paths, and pick
+  the fix that removes the deadlock without breaking the throughput SLA.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (transfer-code, trace-fail, waits-graph,
+  metrics, sibling-code, fixes). Cite the artifact id(s) for every claim.
+
+  1. THE DEFECT. Name the concurrency defect in transfer-code and cite the exact statements. State the
+     precise condition on two concurrent calls that produces a deadlock.
+  2. FAILING SCHEDULE. From trace-fail and waits-graph, prove the deadlock. Cite the lines that show
+     which lock each transaction holds and which it is blocked on, and the resulting cycle.
+  3. SYMPTOM TO ORIGIN. Users report "request timed out" and there are pool-acquire errors. Explain
+     why these are downstream of the deadlock, not the root cause, citing metrics.
+  4. RULE OUT SAFE PATHS. Explain why applyInterest and batchSettle in sibling-code are not the source
+     of the deadlock, citing what each does.
+  5. ADEQUATE FIX. From fixes, name the one option that removes the deadlock without regression, and
+     state the invariant it enforces.
+  6. SHALLOW/HARMFUL FIXES. For each of the other options in fixes, state why it is shallow or harmful,
+     naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: transfer-code
+    type: code
+    label: walletsvc/transfer.ts — move balance between two accounts (current)
+    content: |
+      export async function transfer(fromId, toId, amount) {
+        await db.query('BEGIN');
+        try {
+          // Locks are acquired in ARGUMENT order: fromId first, then toId.
+          const from = await db.query(
+            'SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [fromId]);   // lock A: fromId
+          const to = await db.query(
+            'SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [toId]);     // lock B: toId
+          if (from.balance < amount) { await db.query('ROLLBACK'); throw new Insufficient(); }
+          await db.query('UPDATE accounts SET balance = balance - $2 WHERE id=$1', [fromId, amount]);
+          await db.query('UPDATE accounts SET balance = balance + $2 WHERE id=$1', [toId, amount]);
+          await db.query('COMMIT');
+          return 'ok';
+        } catch (e) { await db.query('ROLLBACK'); throw e; }
+      }
+      // Nothing sorts fromId/toId before locking; the acquisition order is whatever the caller passed.
+  - id: trace-fail
+    type: log
+    label: interleaved execution — transfer(A,B) and transfer(B,A) run concurrently
+    content: |
+      # T1 = transfer(A, B, 10);  T2 = transfer(B, A, 5). Same two accounts, opposite directions.
+      t=0.000 T1 BEGIN
+      t=0.000 T2 BEGIN
+      t=0.001 T1 SELECT ... id=A FOR UPDATE   -> ACQUIRES lock(A)
+      t=0.001 T2 SELECT ... id=B FOR UPDATE   -> ACQUIRES lock(B)
+      t=0.002 T1 SELECT ... id=B FOR UPDATE   -> BLOCKS (lock(B) held by T2)
+      t=0.002 T2 SELECT ... id=A FOR UPDATE   -> BLOCKS (lock(A) held by T1)
+      # Neither can proceed: T1 holds A and waits for B; T2 holds B and waits for A.
+      t=1.002 db deadlock detector: victim = T2 -> T2 aborted with SQLSTATE 40P01 (deadlock detected)
+      t=1.003 T2 ROLLBACK; transfer(B,A) fails and is surfaced to the client
+      t=1.003 T1 SELECT ... id=B FOR UPDATE   -> now ACQUIRES lock(B); T1 proceeds and COMMITs
+      # The deadlock is provable: two transfers over the SAME pair in OPPOSITE order form a 2-cycle.
+  - id: waits-graph
+    type: note
+    label: waits-for graph captured at t=0.002 (from pg_locks)
+    content: |
+      Waits-for graph among blocked transactions at t=0.002:
+        T1  --waits-for-->  T2      (T1 requests lock(B), currently held by T2)
+        T2  --waits-for-->  T1      (T2 requests lock(A), currently held by T1)
+      This is a cycle of length 2 (T1 -> T2 -> T1) => deadlock. The only edges in the graph are these
+      two; no other transaction participates. A cycle exists iff two transfers hold one of {A,B} and
+      request the other, which happens exactly when their (fromId,toId) orders are inverted.
+  - id: metrics
+    type: table
+    label: walletsvc metrics, 1-minute buckets (deadlock vs. pool)
+    content: |
+      bucket     transfers_per_s  deadlocks_40P01  client_timeouts  pool_acquire_errs  pool_active/max
+      12:00      420              0                0                0                  18/40
+      12:01      910              7                7                0                  27/40
+      12:02      1780             36               34               11                 40/40
+      12:03      1810             39               37               13                 40/40
+      # deadlocks_40P01 rises first and tracks client_timeouts almost 1:1. pool_acquire_errs appear
+      # only at 12:02+ once pool_active hits max 40 — because deadlocked transfers hold their
+      # connection for the full ~1s detector interval before aborting, starving the pool. The 40P01
+      # count leads; the pool errors follow.
+  - id: sibling-code
+    type: code
+    label: walletsvc — other paths that also take row locks (for contrast)
+    content: |
+      // applyInterest locks exactly ONE row. A single lock cannot form a cycle with itself.
+      export async function applyInterest(accountId, bps) {
+        await db.query('BEGIN');
+        await db.query('SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [accountId]);
+        await db.query('UPDATE accounts SET balance = balance + balance*$2/10000 WHERE id=$1',
+          [accountId, bps]);
+        await db.query('COMMIT');
+      }
+
+      // batchSettle locks MANY rows, but always in a CANONICAL sorted order, so no two batchSettle
+      // calls can invert their acquisition order relative to each other.
+      export async function batchSettle(accountIds) {
+        const ids = [...accountIds].sort();          // canonical order before locking
+        await db.query('BEGIN');
+        for (const id of ids) {
+          await db.query('SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [id]);
+        }
+        await db.query('COMMIT');
+      }
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: In transfer(), sort {fromId, toId} into a canonical order and acquire the two FOR UPDATE
+          locks in that order (lock min(id) first, then max(id)) before doing the debit/credit.
+      F2: Raise lock_timeout / statementTimeoutMs so a blocked transfer waits longer before failing.
+      F3: Catch SQLSTATE 40P01 and retry the whole transfer, up to N attempts.
+      F4: Serialize all transfers through one process-wide global mutex so only one runs at a time.
+      F5: Switch isolationLevel to SERIALIZABLE.
+
+      Constraints:
+        - Throughput SLA: walletsvc must sustain at least 1500 transfers/second (see metrics, which
+          shows ~1800/s in normal operation).
+        - Transfer p99 latency budget is 250ms.
+        - walletsvc runs multiple replicas over one Postgres database (a process-local mutex on one
+          replica does not coordinate the others).
+tags: [debugging, concurrency-defect, deadlock, lock-ordering, database]

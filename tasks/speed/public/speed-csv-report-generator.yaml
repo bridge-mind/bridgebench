@@ -1,0 +1,38 @@
+id: speed-csv-report-generator
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: hard
+title: Build a CSV Sales-Summary Generator From In-Memory Rows
+summary: >-
+  Write a complete TypeScript module that aggregates order rows into a per-region monthly summary and
+  serializes it to RFC 4180 CSV, including proper quoting and a totals row.
+prompt: |
+  Implement `salesSummaryCsv(rows: OrderRow[]): string` in TypeScript per [summary-spec] and
+  [csv-rules]. Emit the whole module, including any helpers.
+
+  1. The `OrderRow` interface and the `salesSummaryCsv` function.
+  2. Correct RFC 4180 quoting for fields containing commas, quotes, or newlines.
+  3. A trailing `TOTAL` row summing net revenue across all regions and months.
+artifacts:
+  - id: summary-spec
+    type: spec
+    label: Aggregation
+    content: |
+      OrderRow = { region: string; isoDate: string; revenue: number; refunded: boolean }
+      - group by (region, YYYY-MM derived from isoDate)
+      - net revenue per group = sum(revenue where refunded === false) - sum(revenue where refunded === true)
+      - output columns, in order: Region,Month,Orders,NetRevenue
+      - Orders counts every row in the group regardless of refunded
+      - sort output rows by Region ascending, then Month ascending
+      - NetRevenue is formatted to exactly two decimals
+  - id: csv-rules
+    type: spec
+    label: CSV format
+    content: |
+      - RFC 4180: any field containing a comma, double-quote, CR, or LF is wrapped in double quotes
+      - an embedded double-quote is escaped by doubling it
+      - a header row comes first; rows are joined with CRLF
+      - the final TOTAL row uses "TOTAL" in Region, an empty Month, the total order count, and the
+        summed NetRevenue across every group
+tags: [typescript, csv, reporting]

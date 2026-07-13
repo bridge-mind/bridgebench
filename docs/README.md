@@ -1,25 +1,45 @@
 # BridgeBench documentation
 
-Start with the contract, then follow the workflow you need.
+Choose the path that matches what you are trying to verify or change.
 
-## Protocol
+## Review a benchmark result
 
-- [Methodology](methodology.md) — scheduling, blind judging, outcomes, and Elo.
-- [Replay Elo](replay-elo.md) — verify a journal and reproduce its ladder.
-- [Private packs](private-packs.md) — hidden-reference data flow and contamination controls.
+1. [Reviewing BridgeBench](reviewing-bridgebench.md) — the guided path from a
+   public task through votes, journal evidence, and replayed Elo.
+2. [Methodology](methodology.md) — the canonical scheduling, execution,
+   anonymization, voting, failure, and scoring contract.
+3. [Replay the Elo](replay-elo.md) — reproduce a ladder and validate every
+   journal transition.
+4. [Private packs](private-packs.md) — understand hidden references,
+   contamination controls, retirement, and the external trust boundary.
 
-## Contributing
+Use the [glossary](glossary.md) whenever a contract term is unfamiliar.
 
-- [Task authoring](task-authoring.md) — public schema, private schema, clusters, and validation.
-- [Glossary](glossary.md) — the terms used by the engine, CLI, and published reports.
-- [Repository contribution guide](../CONTRIBUTING.md) — local checks and pull-request expectations.
+## Contribute
 
-## Canonical sources
+- [Task authoring](task-authoring.md) — public/private schemas, arena clusters,
+  balance invariants, and proposal workflow.
+- [Repository contribution guide](../CONTRIBUTING.md) — local checks,
+  pull-request expectations, task proposals, and audit reports.
+- [Security policy](../SECURITY.md) — report vulnerabilities privately.
+
+## Operate and release
+
+- [Operator guide](operator-guide.md) — paid runs, results, dashboard, triage,
+  resume, and publishing.
+- [Private packs](private-packs.md) — required reading before handling active
+  hidden references.
+- [Release guide](../RELEASING.md) — npm trusted publishing and tag workflow.
+
+## Canonical executable sources
 
 - Model roster and request policy: [`src/models.ts`](../src/models.ts)
-- Category and methodology constants: [`src/types.ts`](../src/types.ts)
+- Category and methodology constants:
+  [`src/contracts/categories.ts`](../src/contracts/categories.ts)
 - Task-pack invariants: [`src/tasks.ts`](../src/tasks.ts)
 - Journal verification: [`src/verification.ts`](../src/verification.ts)
+- Elo implementation: [`src/elo.ts`](../src/elo.ts)
 - CLI workflows: `npm run arena -- --help` and `npm run tasks -- --help`
 
-When prose and executable validation disagree, treat the code as the current behavior and open an issue to repair the documentation.
+When prose and executable validation disagree, treat the executable contract
+as current behavior and open an issue to repair the documentation.

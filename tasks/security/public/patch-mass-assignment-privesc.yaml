@@ -1,0 +1,226 @@
+id: patch-mass-assignment-privesc
+version: 1.0.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Wicket Accounts — Verifying Five Candidate Mass-Assignment Privilege-Escalation Fixes
+summary: >-
+  The Wicket accounts profile-update handler trusts `body.role` AND spreads nested
+  `body.metadata` onto the account row, allowing self privilege escalation. Five
+  competing candidate patches are submitted. Decide which actually close BOTH write
+  paths and which are incomplete, cosmetic, or only provable by reading the
+  editable-fields allowlist — analysis only.
+prompt: |
+  You are reviewing candidate fixes for a reported mass-assignment privilege-escalation
+  finding in the "Wicket" accounts service. The handler PATCH /accounts/me lets a caller
+  update their own profile, but it writes `req.body.role` directly onto the account row
+  AND spreads `req.body.metadata` onto the same row, so a role supplied either directly
+  or nested under metadata reaches the privileged `role` column. Five engineers submitted
+  competing patches (A, B, C, D, E); exactly one will be merged.
+
+  You are given six artifacts: update-handler (the vulnerable handler), editable-fields
+  (the allowlist constant defining which columns a self-service update may write),
+  patches-abc (candidate patches A, B, C), patches-de (candidate patches D, E), role-model
+  (the authoritative spec on how `role` is stored and every position that can write it),
+  and vuln-report (the finding).
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If a fact needed to judge a patch lives in another artifact,
+  OPEN that artifact and cite it — do not guess. This is analysis only: reason about which
+  write positions each patch neutralizes; do NOT write exploit requests or payloads.
+
+  Definitions you must use:
+  - role-model is authoritative: it enumerates EXACTLY the code positions in this handler
+    that can write `user.role`. A patch CLOSES the finding only if it neutralizes BOTH
+    declared write positions.
+  - editable-fields is the source of truth for which fields a profile update may write.
+  - A patch DOES-NOT-CLOSE if any declared write position for `role` still reaches the
+    row, or if it changes a layer (e.g. the response) that does not affect the write.
+
+  Deliverables:
+
+  1. Patch A (patches-abc): verdict CLOSES or DOES-NOT-CLOSE, with the specific reason.
+     Which declared write positions does it neutralize?
+
+  2. Patch B (patches-abc): verdict and the specific gap. Does it neutralize BOTH declared
+     write positions, or does one path still reach `role`?
+
+  3. Patch C (patches-abc): verdict and the specific gap. Consider what values survive its
+     check, using role-model.
+
+  4. Patch D (patches-de): verdict. Patch D uses `Object.assign(user, pick(req.body,
+     EDITABLE_FIELDS))`. State whether D is safe, unsafe, or unverifiable from the
+     artifacts, and name the EXACT artifact you must open to decide. Justify with what
+     that artifact contains.
+
+  5. Patch E (patches-de): verdict and the specific gap. Which layer does it change, and
+     does that layer affect the write path?
+
+  6. Recommend which single patch to merge and state any residual work still required
+     after merging it (for example, a declared write position a different patch would have
+     left open). Justify from role-model and editable-fields.
+artifacts:
+  - id: update-handler
+    type: code
+    label: Wicket profile-update handler (vulnerable original)
+    content: |
+      // wicket/accounts/update-profile.ts — PATCH /accounts/me (Wicket accounts service).
+      // Self-service profile update for the logged-in caller.
+
+      export async function updateProfile(req: Request, res: Response) {
+        const user = await accounts.findById(req.session.userId);
+
+        // Apply the caller's changes.
+        user.displayName = req.body.displayName ?? user.displayName;
+        user.role = req.body.role ?? user.role;        // WRITE POSITION 1: direct role assign
+        Object.assign(user, req.body.metadata ?? {});  // WRITE POSITION 2: spreads nested metadata
+
+        await accounts.save(user);
+        return res.json({ id: user.id, displayName: user.displayName, role: user.role });
+      }
+  - id: editable-fields
+    type: code
+    label: EDITABLE_FIELDS allowlist constant (source of truth)
+    content: |
+      // wicket/accounts/editable-fields.ts
+      // Single source of truth for which account columns a self-service profile update
+      // may write. Anything NOT listed here is server-controlled and must never be set
+      // from request input.
+
+      export const EDITABLE_FIELDS = [
+        'displayName',
+        'bio',
+        'avatarUrl',
+        'locale',
+      ] as const;
+
+      // NOTE: 'role' is intentionally EXCLUDED — role changes go through the admin grant
+      // flow only (see role-model). 'metadata' is also excluded: it is not a persisted
+      // column, so it is never a valid write target for a profile update.
+  - id: role-model
+    type: spec
+    label: Wicket role model — authoritative role storage and write-position inventory
+    content: |
+      Wicket role model — AUTHORITATIVE.
+
+      Storage:
+        - Every account row has a single top-level column `role` (string). Its legal
+          values are exactly ROLE_ENUM = ['member', 'billing', 'support', 'admin'].
+        - `role` is PRIVILEGED and server-controlled. In the self-service profile-update
+          path it must NEVER be writable from request input.
+        - The ONLY legitimate way to change a role is the admin grant flow
+          (POST /admin/roles), which is out of scope for updateProfile.
+
+      Why enum validation is insufficient:
+        - All four ROLE_ENUM values are syntactically valid role names. 'admin' is the
+          privileged one. Validating a submitted role against ROLE_ENUM therefore does NOT
+          prevent escalation — 'admin' passes the enum check and is still a self-assigned
+          privileged role.
+
+      Write-position inventory for updateProfile (EXHAUSTIVE):
+        - `user.role` can be written by EXACTLY TWO code positions in this handler:
+            WP1 — a direct assignment `user.role = <request input>`.
+            WP2 — any `Object.assign(user, X)` / object spread where X carries a `role`
+                  key. In the original handler X is `req.body.metadata`, so a caller can
+                  set `role` nested under `metadata` and reach the same column.
+        - There are NO other code positions in this handler that can write `role`.
+        - A fix CLOSES the mass-assignment finding ONLY if it neutralizes BOTH WP1 and WP2.
+        - `metadata` is not a persisted column and is not in EDITABLE_FIELDS; spreading it
+          onto the account row is itself the nested-assignment bug (WP2).
+  - id: patches-abc
+    type: diff
+    label: Candidate patches A, B, C (mutually exclusive alternatives)
+    content: |
+      Three competing candidate patches. Exactly ONE of A/B/C is applied — they are
+      alternatives, not stacked.
+
+      === Patch A: strict allowlist DTO (role and metadata rejected) ===
+      --- a/wicket/accounts/update-profile.ts
+      +++ b/wicket/accounts/update-profile.ts
+      @@ handler body
+      -  user.displayName = req.body.displayName ?? user.displayName;
+      -  user.role = req.body.role ?? user.role;
+      -  Object.assign(user, req.body.metadata ?? {});
+      +  // validateProfileDto returns ONLY { displayName?, bio?, avatarUrl?, locale? };
+      +  // it strips/rejects any other key, including `role` and `metadata`.
+      +  const dto = validateProfileDto(req.body);
+      +  if (dto.displayName !== undefined) user.displayName = dto.displayName;
+      +  if (dto.bio !== undefined) user.bio = dto.bio;
+      +  if (dto.avatarUrl !== undefined) user.avatarUrl = dto.avatarUrl;
+      +  if (dto.locale !== undefined) user.locale = dto.locale;
+
+      === Patch B: reject a direct body.role ===
+      --- a/wicket/accounts/update-profile.ts
+      +++ b/wicket/accounts/update-profile.ts
+      @@ handler body
+      +  if (req.body.role !== undefined) {
+      +    return res.status(400).json({ error: 'role is not editable' });
+      +  }
+         user.displayName = req.body.displayName ?? user.displayName;
+      -  user.role = req.body.role ?? user.role;
+      +  // (direct role assignment removed)
+         Object.assign(user, req.body.metadata ?? {});   // metadata spread KEPT
+
+      === Patch C: validate body.role against the role enum ===
+      --- a/wicket/accounts/update-profile.ts
+      +++ b/wicket/accounts/update-profile.ts
+      @@ handler body
+         user.displayName = req.body.displayName ?? user.displayName;
+      -  user.role = req.body.role ?? user.role;
+      +  if (req.body.role !== undefined) {
+      +    if (!ROLE_ENUM.includes(req.body.role)) {
+      +      return res.status(400).json({ error: 'invalid role' });
+      +    }
+      +    user.role = req.body.role;   // accepts ANY valid role name
+      +  }
+         Object.assign(user, req.body.metadata ?? {});   // metadata spread KEPT
+  - id: patches-de
+    type: diff
+    label: Candidate patches D, E (mutually exclusive alternatives)
+    content: |
+      Two more competing candidate patches — alternatives to A/B/C, not stacked with them.
+
+      === Patch D: pick() over the EDITABLE_FIELDS allowlist ===
+      --- a/wicket/accounts/update-profile.ts
+      +++ b/wicket/accounts/update-profile.ts
+      @@ imports
+      +import { EDITABLE_FIELDS } from './editable-fields';
+      @@ handler body
+      -  user.displayName = req.body.displayName ?? user.displayName;
+      -  user.role = req.body.role ?? user.role;
+      -  Object.assign(user, req.body.metadata ?? {});
+      +  // pick() keeps ONLY keys present in EDITABLE_FIELDS; every other key of req.body
+      +  // (role, metadata, and anything nested) is dropped before it can touch the row.
+      +  Object.assign(user, pick(req.body, EDITABLE_FIELDS));
+
+      === Patch E: drop role from the response body ===
+      --- a/wicket/accounts/update-profile.ts
+      +++ b/wicket/accounts/update-profile.ts
+      @@ handler body
+         user.displayName = req.body.displayName ?? user.displayName;
+         user.role = req.body.role ?? user.role;         // WRITE POSITION 1 unchanged
+         Object.assign(user, req.body.metadata ?? {});   // WRITE POSITION 2 unchanged
+
+         await accounts.save(user);
+      -  return res.json({ id: user.id, displayName: user.displayName, role: user.role });
+      +  return res.json({ id: user.id, displayName: user.displayName }); // role not echoed
+  - id: vuln-report
+    type: note
+    label: Wicket security advisory WICKET-2026-014 (internal)
+    content: |
+      Advisory WICKET-2026-014 (internal, fictional).
+
+      A reporter found that PATCH /accounts/me lets a caller escalate their OWN role. Two
+      observations:
+        (1) the handler copies `req.body.role` straight onto the account row (a direct
+            write position);
+        (2) the handler ALSO spreads `req.body.metadata` onto the row, so a `role` nested
+            under metadata reaches the same column (a second, nested write position).
+
+      Request to the reviewer: verify that each candidate patch actually closes BOTH write
+      positions, not just the obvious direct one. Authoritative details on how `role` is
+      stored and the exhaustive list of write positions are in role-model; the
+      editable-fields constant is the source of truth for what a profile update may write.
+      To judge a patch that relies on that constant, OPEN editable-fields and confirm what
+      it contains rather than assuming.
+tags: [security, patch-verification, mass-assignment, privilege-escalation, allowlist]

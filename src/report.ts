@@ -8,8 +8,50 @@ import {
   type BenchmarkCategory,
   type LeaderboardEntry,
   type MatchResult,
+  type SpeedMetric,
+  type SpeedStats,
 } from './types.js';
 import { verifyJournal, type VerificationOptions } from './verification.js';
+
+interface SpeedSample {
+  ttftMs: number[];
+  tps: number[];
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function collectSpeedSample(
+  samples: Map<string, SpeedSample>,
+  modelId: string,
+  metric: SpeedMetric,
+): void {
+  const existing = samples.get(modelId) ?? { ttftMs: [], tps: [] };
+  existing.ttftMs.push(metric.ttftMs);
+  existing.tps.push(metric.tps);
+  samples.set(modelId, existing);
+}
+
+function speedStats(sample: SpeedSample | undefined): SpeedStats {
+  const ttftMs = sample?.ttftMs ?? [];
+  const tps = sample?.tps ?? [];
+  return {
+    samples: ttftMs.length,
+    medianTtftMs: round(median(ttftMs), 1),
+    avgTtftMs: round(average(ttftMs), 1),
+    medianTps: round(median(tps), 2),
+    avgTps: round(average(tps), 2),
+  };
+}
 
 export interface SnapshotOptions extends VerificationOptions {
   /** Seed empty standings with this run roster; defaults to every enabled competitor. */
@@ -61,6 +103,7 @@ export function buildSnapshot(
 ): ArenaSnapshot {
   const verified = verifyJournal(matches, category, options);
   const entries = new Map<string, Omit<LeaderboardEntry, 'rank'>>();
+  const speedSamples = new Map<string, SpeedSample>();
   const competitorIds = options.competitorIds ?? listModels('competitor').map((model) => model.id);
   for (const modelId of competitorIds) {
     ensureEntry(entries, modelId);
@@ -73,6 +116,10 @@ export function buildSnapshot(
     modelB.elo = match.eloAfter[modelB.modelId] ?? modelB.elo;
     modelA.totalCostUsd += competitorCost(match.competitors.responseA);
     modelB.totalCostUsd += competitorCost(match.competitors.responseB);
+    if (category === 'speed' && match.speedMetrics) {
+      collectSpeedSample(speedSamples, modelA.modelId, match.speedMetrics.a);
+      collectSpeedSample(speedSamples, modelB.modelId, match.speedMetrics.b);
+    }
     if (match.outcome === 'no-contest' || !match.winnerModelId) continue;
     modelA.matches += 1;
     modelB.matches += 1;
@@ -94,6 +141,9 @@ export function buildSnapshot(
       elo: round(verified.ratings[entry.modelId] ?? ELO_INITIAL),
       winRate: entry.matches === 0 ? 0 : round((entry.wins / entry.matches) * 100, 1),
       totalCostUsd: round(entry.totalCostUsd, 6),
+      // Speed aggregates are surfaced only for the speed category; judged
+      // categories keep their existing entry shape unchanged.
+      ...(category === 'speed' ? { speed: speedStats(speedSamples.get(entry.modelId)) } : {}),
     }))
     .sort(
       (a, b) => b.elo - a.elo || b.points - a.points || a.displayName.localeCompare(b.displayName),
@@ -125,10 +175,17 @@ export function renderMarkdown(snapshot: ArenaSnapshot): string {
   const modelNames = new Map(
     snapshot.leaderboard.map((entry) => [entry.modelId, entry.displayName]),
   );
-  const rows = snapshot.leaderboard.map(
-    (entry) =>
-      `| ${entry.rank} | ${entry.displayName} | ${entry.elo.toFixed(2)} | ${entry.points} | ${entry.wins}-${entry.losses} | ${entry.forfeits} | ${entry.winRate.toFixed(1)}% | $${entry.totalCostUsd.toFixed(4)} |`,
-  );
+  const isSpeed = snapshot.category === 'speed';
+  const speedHeader = isSpeed ? ' Median TTFT (ms) | Median TPS |' : '';
+  const speedAlign = isSpeed ? '---:|---:|' : '';
+  const rows = snapshot.leaderboard.map((entry) => {
+    const base = `| ${entry.rank} | ${entry.displayName} | ${entry.elo.toFixed(2)} | ${entry.points} | ${entry.wins}-${entry.losses} | ${entry.forfeits} | ${entry.winRate.toFixed(1)}% | $${entry.totalCostUsd.toFixed(4)} |`;
+    if (!isSpeed) return base;
+    const speed = entry.speed;
+    const ttft = speed && speed.samples > 0 ? speed.medianTtftMs.toFixed(0) : '—';
+    const tps = speed && speed.samples > 0 ? speed.medianTps.toFixed(1) : '—';
+    return `${base} ${ttft} | ${tps} |`;
+  });
   const recent = snapshot.matches
     .slice(-20)
     .reverse()
@@ -144,8 +201,8 @@ export function renderMarkdown(snapshot: ArenaSnapshot): string {
     `# BridgeBench V3 ${meta.label} Arena\n\n` +
     `${meta.tagline}\n\n` +
     `Generated ${snapshot.generatedAt}. Ratings start at ${snapshot.initialElo} with K=${snapshot.kFactor}.\n\n` +
-    `## Leaderboard\n\n| Rank | Model | Elo | Points | W-L | Forfeits | Win rate | Competitor cost |\n` +
-    `|---:|---|---:|---:|---:|---:|---:|---:|\n${rows.join('\n')}\n\n` +
+    `## Leaderboard\n\n| Rank | Model | Elo | Points | W-L | Forfeits | Win rate | Competitor cost |${speedHeader}\n` +
+    `|---:|---|---:|---:|---:|---:|---:|---:|${speedAlign}\n${rows.join('\n')}\n\n` +
     `## Recent matches\n\n| Task | Matchup | Winner | Outcome | Total cost |\n|---|---|---|---|---:|\n` +
     `${recent.join('\n') || '| — | — | — | — | — |'}\n`
   );

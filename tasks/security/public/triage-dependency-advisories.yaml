@@ -1,0 +1,189 @@
+id: triage-dependency-advisories
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Triage a Ferroscan Dependency Report Against the Fernwood Storefront Lockfile
+summary: >-
+  A fictional dependency auditor "Ferroscan" reported 5 advisories against a lockfile by matching
+  the caret ranges in package.json instead of the resolved versions. Classify each advisory as
+  applicable-and-reachable or not-applicable, using the authoritative lockfile version versus the
+  advisory's affected range AND the exhaustive usage map. Only two are genuinely actionable.
+  "Patch everything, all critical" is scored as an error.
+prompt: |
+  You are triaging an automated dependency scan for the Fernwood storefront API. The auditor
+  "Ferroscan" reported 5 advisories (advisory-report). Ferroscan matches on the version RANGE
+  declared in package.json (package-manifest) and does NOT resolve the lockfile, and it does NOT
+  check whether the vulnerable export is actually imported. The lockfile (lockfile-excerpt) is
+  authoritative for what is installed, and the usage map (usage-map) is exhaustive for what is
+  imported in production.
+
+  You are given: advisory-report, lockfile-excerpt, package-manifest, usage-map, hot-path,
+  handler, and triage-note. Answer each deliverable using ONLY the supplied artifacts. Cite the
+  artifact id(s) you rely on for every claim. If something is not determinable from the
+  artifacts, say so explicitly. This is analysis only: do NOT write exploit code or attack
+  payloads — the ceiling is explaining, per advisory, whether the vulnerable code is in range and
+  reachable in production.
+
+  Classify each advisory with one of two verdicts:
+    - APPLICABLE-AND-REACHABLE: the resolved (lockfile) version is within the advisory's affected
+      range AND the vulnerable export/function is reachable in the shipped production runtime.
+      Cite the version-versus-range comparison and the production usage site.
+    - NOT-APPLICABLE: at least one half fails — the resolved version is outside the affected
+      range, OR the package does not run in production, OR the vulnerable export is never
+      imported. Name which half fails and cite it.
+
+  Over-flagging loses as clearly as missing: recommending an update for an advisory that does not
+  apply is an error, not caution. A caret range in package.json is a declared range, not the
+  installed version — resolve it against the lockfile before judging.
+
+  1. A1 — quillparse (prototype pollution in parse()). Applicable-and-reachable or not-applicable?
+  2. A2 — figtree-cli (arbitrary file write during archive extract). Which verdict?
+  3. A3 — sablewire (ReDoS in renderMarkdown()). Which verdict?
+  4. A4 — mica-json (deserialization RCE in parse()). Which verdict?
+  5. A5 — borealis-xml (XXE in parseDocument()). Which verdict?
+  6. Give the prioritized remediation list containing ONLY the genuinely applicable-to-production
+     advisories, most urgent first, with the reachability that sets each one's priority. Do not
+     include advisories that failed either half of the applicability test.
+artifacts:
+  - id: advisory-report
+    type: table
+    label: Ferroscan dependency audit for storefront-api (5 advisories, declares match basis)
+    content: |
+      Ferroscan dependency audit — storefront-api
+      Advisory database: FSA snapshot 2026-07-01
+      Match basis: each dependency's version RANGE from package.json is intersected with each
+      advisory's affected range. Ferroscan does NOT read the resolved lockfile and does NOT check
+      whether the vulnerable export is actually imported anywhere. This report lists EVERY advisory
+      that matched a declared range; there are no omitted or suppressed matches.
+
+      id  | package       | affected_range   | fixed_in | ferroscan_severity | summary
+      ----|---------------|------------------|----------|--------------------|------------------------------------------
+      A1  | quillparse    | <2.4.0           | 2.4.0    | High               | Prototype pollution in quillparse.parse()
+      A2  | figtree-cli   | <1.9.0           | 1.9.0    | Critical           | Arbitrary file write during archive extract
+      A3  | sablewire     | >=1.0.0 <1.6.0   | 1.6.0    | High               | ReDoS in sablewire.renderMarkdown()
+      A4  | mica-json     | >=3.0.0 <3.5.2   | 3.5.2    | Critical           | Deserialization RCE in mica-json.parse()
+      A5  | borealis-xml  | <4.2.0           | 4.2.0    | High               | XXE in borealis-xml.parseDocument()
+
+      Note: Ferroscan reports the affected range and the manifest match. Whether the installed
+      version is actually inside the affected range, and whether the vulnerable code path runs,
+      must be confirmed against the lockfile and the usage map.
+  - id: lockfile-excerpt
+    type: config
+    label: ferrolock v3 — resolved dependency tree (authoritative)
+    content: |
+      # storefront-api  ferrolock v3  — RESOLVED dependency tree.
+      # This lockfile is the single source of truth for what is actually installed. The resolved
+      # version below is authoritative over any range declared in package.json.
+      #
+      # "dev: true" marks a package present ONLY in the development/test/build tree; such packages
+      # are pruned from the production runtime image and never execute in production.
+
+      packages:
+        quillparse@2.4.1:      { dev: false, resolved_from: "^2.3.0" }
+        figtree-cli@1.8.2:     { dev: true,  resolved_from: "^1.8.0" }
+        sablewire@1.5.4:       { dev: false, resolved_from: "^1.5.0" }
+        mica-json@3.5.0:       { dev: false, resolved_from: "^3.5.0" }
+        borealis-xml@4.1.3:    { dev: false, resolved_from: "^4.1.0" }
+
+      # This is the complete set of packages named in the Ferroscan report. No other versions of
+      # these packages are installed.
+  - id: package-manifest
+    type: config
+    label: package.json (excerpt) — declared caret ranges, not resolved versions
+    content: |
+      # package.json (excerpt). These are DECLARED ranges, not installed versions. A caret range
+      # "^2.3.0" permits >=2.3.0 <3.0.0; the version actually installed is whatever the lockfile
+      # resolved (see lockfile-excerpt), NOT the floor of the range.
+      {
+        "dependencies": {
+          "quillparse": "^2.3.0",
+          "sablewire": "^1.5.0",
+          "mica-json": "^3.5.0",
+          "borealis-xml": "^4.1.0"
+        },
+        "devDependencies": {
+          "figtree-cli": "^1.8.0"
+        }
+      }
+      # Ferroscan matched A1 because the declared floor 2.3.0 falls inside "<2.4.0". The resolved
+      # version in the lockfile is what is actually installed.
+  - id: usage-map
+    type: table
+    label: usage-map — exhaustive import map of the shipped production tree
+    content: |
+      Import / usage map for storefront-api (production runtime).
+      This map is EXHAUSTIVE: it was generated from a complete scan of every `import` and
+      `require` in the shipped src/ tree. There are no dynamic or computed imports in this
+      codebase. If a package or a named export is not listed here, it is NOT imported anywhere in
+      the production code.
+
+      package       | in prod runtime? | exports actually imported | call sites
+      --------------|------------------|---------------------------|-----------------------------------
+      quillparse    | yes              | parse                     | src/orders/import.ts
+      figtree-cli   | no (dev/test)    | (none in production)      | scripts/build.ts, test/extract.spec.ts
+      sablewire     | yes              | slugify                   | src/catalog/slug.ts
+      mica-json     | yes              | parse                     | src/http/body-parser.ts  (see hot-path)
+      borealis-xml  | yes              | parseDocument             | src/webhooks/supplier.ts (see handler)
+
+      Notes:
+        - sablewire.renderMarkdown is NOT imported anywhere in production; only sablewire.slugify
+          is used.
+        - figtree-cli is imported only by the build script and a test spec; per the lockfile it is
+          dev: true and is pruned from the production image.
+        - quillparse.parse IS imported in production (src/orders/import.ts).
+  - id: hot-path
+    type: code
+    label: src/http/body-parser.ts — global JSON body middleware (A4)
+    content: |
+      // src/http/body-parser.ts
+      import { parse } from 'mica-json';
+
+      // Registered as APPLICATION-LEVEL middleware, so it executes for EVERY inbound request that
+      // carries a JSON body, before any route handler runs.
+      export function jsonBodyMiddleware(req, res, next) {
+        if (req.headers['content-type']?.includes('application/json')) {
+          // mica-json.parse() — the function named in advisory A4 — is invoked here on the raw,
+          // attacker-supplied request bytes.
+          req.body = parse(req.rawBody);
+        }
+        next();
+      }
+  - id: handler
+    type: code
+    label: src/webhooks/supplier.ts — supplier XML webhook (A5)
+    content: |
+      // src/webhooks/supplier.ts
+      import { parseDocument } from 'borealis-xml';
+
+      // Handler for POST /webhooks/supplier. Suppliers POST inventory updates as XML. This route
+      // is shipped and reachable in production (it is how inventory syncs). The external XML body
+      // is parsed with borealis-xml.parseDocument() — the function named in advisory A5.
+      export async function supplierWebhook(req, res) {
+        const doc = parseDocument(req.rawBody);
+        await ingestInventory(doc);
+        return res.status(202).end();
+      }
+  - id: triage-note
+    type: note
+    label: triage-note — storefront platform team (authoritative for classification)
+    content: |
+      Triage context for the Ferroscan report. Authored by the storefront platform team;
+      authoritative for classifying the advisories below.
+
+      - The lockfile (lockfile-excerpt) is authoritative for what is installed. Where a
+        package.json caret range and the lockfile disagree, the lockfile wins. Ferroscan matches
+        on the manifest range and does not resolve the lockfile, so each match must be re-checked
+        against the resolved version before it is believed.
+      - The production runtime image is built with dev/test dependencies PRUNED. A package marked
+        `dev: true` in the lockfile never executes in production and carries no production risk,
+        even when its installed version is inside an advisory's affected range. (Such a package
+        may still deserve a separate dev-tooling hygiene ticket, but it is not a production
+        advisory.)
+      - The usage-map is exhaustive and there are no dynamic imports. An advisory that names a
+        specific export is reachable only if that export appears in the usage-map as imported in
+        production.
+      - "Applicable-and-reachable" for this triage means BOTH: the resolved version is inside the
+        affected range AND the vulnerable code is reachable in the production runtime. An advisory
+        that fails either half is not-applicable for production risk.
+tags: [security, finding-triage, dependencies, sca, false-positives]

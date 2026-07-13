@@ -1,0 +1,115 @@
+id: semantic-equivalence-numeric-guards
+version: 1.1.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Are these six JavaScript simplifications behavior-preserving across all inputs?
+summary: Six small pure functions each have a proposed one-line simplification. Some are equivalent for every input; others break on a specific edge case (falsy zero vs nullish, 32-bit shift truncation, IEEE-754 rounding and overflow, floor vs truncation of negatives). Using the cited language semantics, classify each rewrite as behavior-preserving or changes-behavior and give a witness input for every change.
+prompt: |
+  A "simplify" PR rewrites six pure JavaScript functions (originals O1..O6) into shorter forms
+  (proposed P1..P6). Judge each rewrite for FULL semantic equivalence: it is behavior-preserving
+  only if it returns the same value as the original for EVERY input in the parameter's type, with
+  the same numeric result and sign. Do not assume a narrower input domain than the type allows.
+
+  Answer each deliverable using ONLY the supplied artifacts (language-spec, originals, proposed).
+  Cite the artifact id(s) for every claim; ground each edge case in the language-spec.
+
+  For each rewrite below, classify it as exactly one of:
+    - behavior-preserving  (equal to the original for every input)
+    - changes-behavior     (differs on some input; give a concrete witness input and the resulting
+                            two values, and cite the language-spec rule that explains the divergence)
+
+  1. Classify P1 (rewrite of O1).
+  2. Classify P2 (rewrite of O2).
+  3. Classify P3 (rewrite of O3).
+  4. Classify P4 (rewrite of O4).
+  5. Classify P5 (rewrite of O5).
+  6. Classify P6 (rewrite of O6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the language
+  semantics in language-spec applied to the two forms.
+artifacts:
+  - id: language-spec
+    type: spec
+    label: relevant JavaScript evaluation semantics (authoritative for this task)
+    content: |
+      Semantics you must apply (these govern every deliverable):
+
+      A. Logical OR `a || b`  -> returns `a` if `a` is TRUTHY, otherwise returns `b`.
+         The FALSY values are exactly: false, 0, -0, 0n, "", null, undefined, NaN.
+
+      B. Nullish coalescing `a ?? b` -> returns `a` UNLESS `a` is null or undefined, in which case
+         it returns `b`. 0, -0, "", NaN, and false are NOT nullish, so `a ?? b` returns them.
+
+      C. Logical AND `a && b` -> returns `a` if `a` is falsy, otherwise returns `b`.
+         Logical NOT `!x` -> a boolean, true iff `x` is falsy. Consequently the De Morgan identity
+         `!(a && b)` === `!a || !b` holds as booleans for all `a`, `b`.
+
+      D. Left shift `x << k` -> `x` is first converted with ToInt32: any fractional part is
+         truncated toward zero and the value is reduced modulo 2^32 into the signed range
+         [-2147483648, 2147483647]; THEN it is shifted. The result is a 32-bit signed integer.
+
+      E. Bitwise OR with zero `x | 0` -> applies ToInt32 to `x` (truncates the fraction toward zero,
+         reduces modulo 2^32 into the signed 32-bit range). For non-integers it truncates TOWARD
+         ZERO; for |x| >= 2^31 it wraps.
+
+      F. `Math.floor(x)` -> the greatest integer <= x, i.e. it rounds toward -Infinity. For negative
+         non-integers this differs from truncation toward zero (e.g. floor(-1.5) = -2, trunc = -1).
+
+      G. Numbers are IEEE-754 doubles. `*` and `/` round each intermediate result to the nearest
+         representable double; there is no integer wraparound, but a magnitude above
+         Number.MAX_VALUE becomes Infinity. Because each operation rounds independently,
+         `a/2 + b/2` and `(a + b)/2` are NOT guaranteed to be the same double, and `a + b` can be
+         Infinity while `a/2 + b/2` is finite.
+
+      H. Operand evaluation order for `+`, `&&`, `||`, `??` is left-to-right; `&&`, `||`, and `??`
+         short-circuit (do not evaluate the right operand) when the left already determines the
+         result.
+  - id: originals
+    type: code
+    label: original functions (O1..O6), each pure
+    content: |
+      // Each parameter may be ANY value of its annotated type; assume no narrower domain.
+
+      // O1 — choose the configured port, else default 8080
+      function port(p: number): number { return p || 8080; }
+
+      // O2 — should we skip when NOT both a and b hold
+      function shouldSkip(a: unknown, b: unknown): boolean { return !(a && b); }
+
+      // O3 — double an integer count
+      function double(n: number): number { return n * 2; }
+
+      // O4 — first of two values that is truthy, else the second
+      function firstTruthy(a: unknown, b: unknown): unknown {
+        if (a) return a;
+        return b;
+      }
+
+      // O5 — midpoint of two finite numbers
+      function avg(a: number, b: number): number { return a / 2 + b / 2; }
+
+      // O6 — integer half, rounding down
+      function half(n: number): number { return Math.floor(n / 2); }
+  - id: proposed
+    type: code
+    label: proposed simplifications (P1..P6)
+    content: |
+      // P1 — rewrite of O1
+      function port(p: number): number { return p ?? 8080; }
+
+      // P2 — rewrite of O2
+      function shouldSkip(a: unknown, b: unknown): boolean { return !a || !b; }
+
+      // P3 — rewrite of O3
+      function double(n: number): number { return n << 1; }
+
+      // P4 — rewrite of O4
+      function firstTruthy(a: unknown, b: unknown): unknown { return a || b; }
+
+      // P5 — rewrite of O5
+      function avg(a: number, b: number): number { return (a + b) / 2; }
+
+      // P6 — rewrite of O6
+      function half(n: number): number { return (n / 2) | 0; }
+tags: [semantic-equivalence, refactoring, javascript, floating-point, edge-cases]

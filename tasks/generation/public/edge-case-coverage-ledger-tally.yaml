@@ -1,0 +1,231 @@
+id: edge-case-coverage-ledger-tally
+version: 1.0.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: tally — Which Submission Handles Every Required Edge Case
+summary: A ledger-tally spec enumerates six mandatory edge cases (empty input, duplicate-id last-wins, Unicode NFC grouping, integer overflow, blank-account skipping, zero-amount boundary). Six submissions are under review; exactly one handles all six while each of five decoys misses exactly one. Classify all six and pin the failing edge for each near-miss.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (tally-spec, edge-vectors,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent edge cases the spec omits and do not overlook one it requires. The verdict
+  vocabulary is exactly: conforms / violates. A submission `conforms` only if it handles EVERY
+  required edge case E1..E6 in tally-spec.
+
+  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
+  handles all six edges. Each candidate accumulates per-account totals and returns them as a plain
+  object mapping account -> decimal-string total.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single required edge (one of E1..E6) it
+     fails and cite the edge-vectors input on which its output differs from the expected output.
+     State both the expected output and the candidate's output.
+
+  3. Exactly one candidate `conforms` (handles all six edges). Identify it.
+
+  4. Which candidate(s), if any, drop an account whose only entry has amount "0" — i.e. FAIL E6
+     (zero-amount boundary)? If none do, say so explicitly and explain why.
+
+  5. In reviewer-thread, reviewer @nadia says candidate-4 "is fine because Unicode normalization is
+     a display concern, not an accounting one." Per tally-spec, does candidate-4 conform? Cite the
+     required edge and the edge-vectors input that settles it.
+artifacts:
+  - id: tally-spec
+    type: spec
+    label: tally specification with required edge-case set (complete)
+    content: |
+      tally(entries: Entry[]): Record<string, string>
+
+      type Entry = { entryId: string; account: string; amount: string };
+        - amount is a base-10 INTEGER string (minor units), possibly larger than 2^53, never
+          fractional, never negative in this task's data.
+        - The result maps each surviving account to its total as a decimal string.
+
+      A conforming implementation MUST handle every one of the following required edge cases. This
+      list is COMPLETE — there are no other required edges, and an implementation that mishandles
+      any single one does NOT conform.
+
+      E1  EMPTY INPUT. tally([]) returns {} (an empty object). It must not throw and must not
+          return null/undefined.
+
+      E2  DUPLICATE ID (LAST-WINS). If the same entryId appears more than once in entries, only the
+          LAST occurrence counts; earlier occurrences with that entryId are superseded (they are
+          replays/corrections) and must NOT be added.
+
+      E3  UNICODE GROUPING. Accounts are grouped after Unicode NFC normalization. The composed form
+          "José" (ending U+00E9) and the decomposed form "Jose"+U+0301 (an 'e' followed by the
+          combining acute accent) denote the SAME account and their amounts combine.
+
+      E4  OVERFLOW. Per-account totals must be accumulated with arbitrary-precision integers
+          (BigInt), because a total may exceed Number.MAX_SAFE_INTEGER (9007199254740991). Totals
+          computed with 64-bit floating Number are non-conforming when they lose precision.
+
+      E5  BLANK ACCOUNT SKIP. An entry whose account is the empty string or consists solely of
+          whitespace is skipped entirely — it contributes to no account and creates no key.
+
+      E6  ZERO-AMOUNT BOUNDARY. An amount of exactly "0" is a valid entry. An account whose entries
+          net to 0 (including an account whose only entry is "0") still APPEARS in the result with
+          total "0"; it must not be dropped.
+
+      This is the entire required edge-case set.
+  - id: edge-vectors
+    type: table
+    label: authoritative edge-case input/output vectors
+    content: |
+      One authoritative vector per required edge, computed from tally-spec. A conforming
+      implementation reproduces every expected output exactly.
+
+      EV-E1 (empty):
+        input:    []
+        expected: {}
+
+      EV-E2 (duplicate id, last-wins):
+        input:    [ { entryId: "t1", account: "alice", amount: "100" },
+                    { entryId: "t1", account: "alice", amount: "250" } ]
+        expected: { "alice": "250" }        # last occurrence of t1 wins; NOT "350"
+
+      EV-E3 (unicode NFC grouping):
+        input:    [ { entryId: "u1", account: "Jos"+U+00E9,  amount: "10" },   # composed "José"
+                    { entryId: "u2", account: "Jose"+U+0301, amount: "5"  } ]  # decomposed "José"
+        expected: { "José": "15" }           # one account after NFC; total 10 + 5
+
+      EV-E4 (overflow):
+        input:    [ { entryId: "o1", account: "vault", amount: "9007199254740993" },  # 2^53 + 1
+                    { entryId: "o2", account: "vault", amount: "2" } ]
+        expected: { "vault": "9007199254740995" }
+        note: 64-bit Number rounds "9007199254740993" to 9007199254740992, then +2 gives
+              9007199254740994 -> "9007199254740994" (WRONG). BigInt gives the exact
+              "9007199254740995".
+
+      EV-E5 (blank account skip):
+        input:    [ { entryId: "b1", account: "",    amount: "50" },
+                    { entryId: "b2", account: "   ", amount: "70" },
+                    { entryId: "b3", account: "bob", amount: "5"  } ]
+        expected: { "bob": "5" }             # "" and "   " skipped; no "" or "   " key
+
+      EV-E6 (zero-amount boundary):
+        input:    [ { entryId: "z1", account: "zed", amount: "0" } ]
+        expected: { "zed": "0" }             # account still appears with total "0"
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function candidate1(entries: Entry[]): Record<string, string> {
+        const dedup = new Map<string, Entry>();
+        for (const e of entries) dedup.set(e.entryId, e);        // last occurrence wins
+        const totals = new Map<string, bigint>();
+        for (const e of dedup.values()) {
+          if (e.account.trim() === '') continue;                 // skip blank accounts
+          const name = e.account.normalize('NFC');               // NFC grouping
+          totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = sum.toString();
+        return out;                                              // [] -> {}
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(entries: Entry[]): Record<string, string> {
+        if (entries.length === 0) throw new Error('tally: no entries');   // throws on empty input
+        const dedup = new Map<string, Entry>();
+        for (const e of entries) dedup.set(e.entryId, e);
+        const totals = new Map<string, bigint>();
+        for (const e of dedup.values()) {
+          if (e.account.trim() === '') continue;
+          const name = e.account.normalize('NFC');
+          totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = sum.toString();
+        return out;
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(entries: Entry[]): Record<string, string> {
+        const totals = new Map<string, bigint>();
+        for (const e of entries) {                               // no dedup by entryId
+          if (e.account.trim() === '') continue;
+          const name = e.account.normalize('NFC');
+          totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = sum.toString();
+        return out;
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(entries: Entry[]): Record<string, string> {
+        const dedup = new Map<string, Entry>();
+        for (const e of entries) dedup.set(e.entryId, e);
+        const totals = new Map<string, bigint>();
+        for (const e of dedup.values()) {
+          if (e.account.trim() === '') continue;
+          const name = e.account;                                // no NFC normalization
+          totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = sum.toString();
+        return out;
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(entries: Entry[]): Record<string, string> {
+        const dedup = new Map<string, Entry>();
+        for (const e of entries) dedup.set(e.entryId, e);
+        const totals = new Map<string, number>();                // Number, not BigInt
+        for (const e of dedup.values()) {
+          if (e.account.trim() === '') continue;
+          const name = e.account.normalize('NFC');
+          totals.set(name, (totals.get(name) ?? 0) + Number(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = String(sum);
+        return out;
+      }
+
+      // ---- candidate-6 ----
+      function candidate6(entries: Entry[]): Record<string, string> {
+        const dedup = new Map<string, Entry>();
+        for (const e of entries) dedup.set(e.entryId, e);
+        const totals = new Map<string, bigint>();
+        for (const e of dedup.values()) {
+          const name = e.account.normalize('NFC');               // no blank-account skip
+          totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
+        }
+        const out: Record<string, string> = {};
+        for (const [name, sum] of totals) out[name] = sum.toString();
+        return out;
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the six submissions
+    content: |
+      Review thread for tally (PR #6033).
+
+      @nadia: "I'd approve candidate-4. NFC normalization is a display concern, not an accounting
+      one — the totals are still numerically correct."
+
+      @owen: "The acceptance bar is E1..E6 all handled. Feed each submission the six edge-vectors
+      and compare byte-for-byte. 'Numerically correct on ASCII inputs' isn't the bar."
+
+      QA-207 (untriaged): "One submission throws instead of returning {} on an empty list. Another
+      double-counts a replayed entryId. A third produces the wrong grand total on a very large
+      amount. These may be different submissions." Note: a zero-amount account MUST still appear in
+      the output per E6.
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for tally: candidate-1, candidate-2, candidate-3, candidate-4,
+      candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being
+      considered.
+
+      Acceptance rule: exactly one submission handles ALL six required edge cases (E1..E6) and is to
+      be accepted. Each of the other five mishandles exactly one required edge. The process assumes
+      precisely one such all-edges-correct submission exists in this set.
+tags: [generation, edge-case-coverage, unicode, bigint, code-review]

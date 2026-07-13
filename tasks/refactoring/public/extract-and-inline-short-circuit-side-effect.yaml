@@ -1,0 +1,120 @@
+id: extract-and-inline-short-circuit-side-effect
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Inlining hasFunds — Short-Circuit Side Effects, the >= Boundary, and Meets-Goal vs Fails-Goal
+summary: >-
+  A validator delegates to hasFunds, whose only side effect (a funds_check metric) fires only when a
+  && short-circuit reaches it. The task is to inline hasFunds and remove it. One rewrite preserves
+  behavior and meets the goal; one increments the metric unconditionally; one flips >= to >; one
+  preserves behavior but never actually inlines. Classify each against both behavior and goal.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (validate-original, order-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to INLINE hasFunds into canCheckout and REMOVE the hasFunds function,
+  while preserving observable behavior exactly: the boolean canCheckout returns for every order, AND
+  the number of times metrics.inc('funds_check') fires (see order-note — the && short-circuit means it
+  fires only when order.itemsValid is true).
+
+  1. Classify rewrite-a against BOTH dimensions (behavior vs validate-original, and whether it meets
+     the inline goal). Justify by tracing the itemsValid=false and itemsValid=true paths.
+
+  2. Classify rewrite-b. If it changes behavior, name the observable difference and give the exact
+     order shape that reveals it, stating how many funds_check increments validate-original vs
+     rewrite-b produce on that order.
+
+  3. Classify rewrite-c. Give the exact order field values (itemsValid, balance, total) on which its
+     return value differs from validate-original, and state both return values.
+
+  4. Classify rewrite-d against BOTH dimensions. If its behavior matches validate-original, say so, and
+     separately state whether it satisfies the transformation goal, with the reason.
+
+  5. Exactly one rewrite both preserves behavior AND meets the inline goal. Name it. Then, for
+     validate-original, state the ground truth: when order.itemsValid is false, how many times does
+     metrics.inc('funds_check') fire, and what does canCheckout return?
+artifacts:
+  - id: validate-original
+    type: code
+    label: checkout/validate.ts — shipped validator (the reference behavior)
+    content: |
+      // checkout/validate.ts — the shipped validator.
+      import { metrics } from './metrics';
+      import type { Order } from './order';
+
+      function hasFunds(order: Order): boolean {
+        metrics.inc('funds_check');                  // the ONLY producer of the funds_check counter
+        return order.balance >= order.total;
+      }
+
+      export function canCheckout(order: Order): boolean {
+        return order.itemsValid && hasFunds(order);  // && short-circuits: hasFunds skipped if !itemsValid
+      }
+  - id: order-note
+    type: note
+    label: checkout — observability, the complete call surface, and the goal
+    content: |
+      checkout — observability and the complete call surface.
+
+      Order fields itemsValid (boolean), balance (number), total (number) are plain data properties:
+      reading them has no getter and no side effect. metrics.inc('funds_check') is the ONLY side
+      effect anywhere in this flow; the funds_check counter is watched on the ops dashboard.
+
+      hasFunds is the ONLY function that calls metrics.inc('funds_check'), and canCheckout is the ONLY
+      caller of hasFunds. So the number of funds_check increments per canCheckout call is fully
+      determined by canCheckout's control flow. This is the complete surface.
+
+      Reference behavior of canCheckout (validate-original): because `&&` short-circuits, hasFunds —
+      and therefore metrics.inc('funds_check') — runs if and only if order.itemsValid is true. When
+      itemsValid is true, canCheckout returns (order.balance >= order.total); when itemsValid is
+      false, it returns false and funds_check is NOT incremented. The comparison is `>=`, so an order
+      whose balance equals its total counts as funded.
+
+      The transformation goal is to INLINE hasFunds into canCheckout and remove the hasFunds function,
+      preserving that behavior exactly.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — inline with an early return
+    content: |
+      // rewrite-a — inline hasFunds, guard with an early return.
+      export function canCheckout(order: Order): boolean {
+        if (!order.itemsValid) return false;
+        metrics.inc('funds_check');
+        return order.balance >= order.total;
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — compute the funds check, then AND it in
+    content: |
+      // rewrite-b — "compute the funds check up front, then AND it with itemsValid."
+      export function canCheckout(order: Order): boolean {
+        metrics.inc('funds_check');
+        const funded = order.balance >= order.total;
+        return order.itemsValid && funded;
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — inline with an early return, tightened comparison
+    content: |
+      // rewrite-c — inline hasFunds, guard with an early return.
+      export function canCheckout(order: Order): boolean {
+        if (!order.itemsValid) return false;
+        metrics.inc('funds_check');
+        return order.balance > order.total;
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — rewrite the caller as a ternary
+    content: |
+      // rewrite-d — "tidy the expression with a ternary."
+      function hasFunds(order: Order): boolean {
+        metrics.inc('funds_check');
+        return order.balance >= order.total;
+      }
+
+      export function canCheckout(order: Order): boolean {
+        return order.itemsValid ? hasFunds(order) : false;
+      }
+tags: [refactoring, extract-and-inline, inline, short-circuit, side-effect]

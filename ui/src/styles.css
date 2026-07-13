@@ -109,7 +109,8 @@ h3 {
   padding: 10px 0;
   display: flex;
   align-items: center;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
   background: oklch(0.155 0.015 265 / 0.94);
   border-bottom: 1px solid var(--line);
 }
@@ -173,6 +174,8 @@ h3 {
    the brand tint so "which arena am I in" reads at a glance. */
 .category-nav {
   margin: 0 0 0 18px;
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 .category-nav button.is-active {
   background: var(--brand-tint);

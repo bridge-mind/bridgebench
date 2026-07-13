@@ -1,0 +1,30 @@
+id: speed-slugify-helper
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Implement a URL-Safe Slugify Helper With a Small Test
+summary: >-
+  Write a single TypeScript function that turns an arbitrary title string into a URL-safe slug
+  following the given rules, plus three assertion-style examples proving the edge cases.
+prompt: |
+  Implement the function described in [slug-spec] in TypeScript, then give three example calls with
+  their expected outputs that together exercise the accent, punctuation, and collapse rules.
+
+  1. The complete `slugify` function, typed, with no external dependencies.
+  2. Three `expect(slugify(input)).toBe(output)` lines covering: a title with accented characters, a
+     title with leading/trailing/duplicate separators, and a title that is only punctuation.
+artifacts:
+  - id: slug-spec
+    type: spec
+    label: Slug rules
+    content: |
+      slugify(title: string): string
+      - lowercase the whole string
+      - transliterate common accented Latin letters to ASCII (a-acute -> a, e-acute -> e,
+        n-tilde -> n, u-umlaut -> u, c-cedilla -> c)
+      - replace any run of non-alphanumeric characters with a single hyphen
+      - strip leading and trailing hyphens
+      - never emit two consecutive hyphens
+      - if the result is empty after stripping, return the literal string "n-a"
+tags: [typescript, strings, utility]

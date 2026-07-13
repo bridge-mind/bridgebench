@@ -71,10 +71,14 @@ async function consumeStream(
   let finishReason: string | null = null;
   let usage: NonNullable<StreamChunk['usage']> = {};
   let lastDeltaEmit = 0;
+  // Time-to-first-token: stamped on the first non-empty content delta, before
+  // (and independent of) the throttle that governs onDelta emission.
+  let firstTokenAt = 0;
 
   for await (const chunk of stream) {
     if (chunk.id) generationId ||= chunk.id;
     const delta = chunk.choices?.[0]?.delta?.content ?? '';
+    if (delta && firstTokenAt === 0) firstTokenAt = Date.now();
     content += delta;
     finishReason = chunk.choices?.[0]?.finish_reason ?? finishReason;
     if (chunk.usage) usage = chunk.usage;
@@ -87,6 +91,7 @@ async function consumeStream(
   content = content.trim();
   if (!content) throw new Error('OpenRouter returned an empty completion');
 
+  const completedAt = Date.now();
   return {
     generationId,
     content,
@@ -96,9 +101,12 @@ async function consumeStream(
       ? (usage.completion_tokens_details.reasoning_tokens ?? 0)
       : undefined,
     costUsd: usage.cost ?? 0,
-    latencyMs: Date.now() - startedAt,
+    latencyMs: completedAt - startedAt,
     finishReason: finishReason ?? 'unknown',
     attempts: attempt,
+    // Non-empty content above guarantees firstTokenAt was stamped.
+    ttftMs: firstTokenAt - startedAt,
+    totalMs: completedAt - startedAt,
   };
 }
 

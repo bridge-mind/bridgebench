@@ -1,5 +1,6 @@
 import { applyEloWin, ELO_INITIAL } from './elo.js';
 import { runIdFromManifest, runManifestHash, type RunManifest } from './run-manifest.js';
+import { isLiveResponse, speedMetricFor, speedWinner } from './speed.js';
 import {
   METHODOLOGY_VERSION,
   competitorCost,
@@ -7,6 +8,8 @@ import {
   type EloState,
   type MatchResult,
   type PanelDecision,
+  type SpeedMetric,
+  type SpeedMetrics,
 } from './types.js';
 
 const LEGACY_METHODOLOGY_VERSION = 'reasoning-arena-v0.2.0';
@@ -103,6 +106,52 @@ function verifyPanel(panel: PanelDecision, modelA: string, modelB: string): stri
   return expected.winnerModelId;
 }
 
+function assertSpeedMetric(actual: SpeedMetric, expected: SpeedMetric, side: 'a' | 'b'): void {
+  equalNumber(actual.ttftMs, expected.ttftMs, `speedMetrics.${side}.ttftMs`);
+  equalNumber(actual.totalMs, expected.totalMs, `speedMetrics.${side}.totalMs`);
+  equalNumber(actual.outputTokens, expected.outputTokens, `speedMetrics.${side}.outputTokens`);
+  equalNumber(actual.tps, expected.tps, `speedMetrics.${side}.tps`);
+}
+
+/**
+ * Re-derive a speed match's outcome and winner offline. A speed line is decided
+ * by liveness and latency, never by a panel, so this replaces the judged/forfeit
+ * logic entirely for the speed category. Two live competitors must record
+ * speedMetrics that match the responses' own timings, and the winner must be the
+ * one with the lower recorded totalMs.
+ */
+function expectedSpeedOutcome(
+  match: MatchResult,
+  modelA: string,
+  modelB: string,
+): { expectedOutcome: MatchResult['outcome']; expectedWinner: string | null } {
+  const { responseA, responseB } = match.competitors;
+  if (isLiveResponse(responseA) && isLiveResponse(responseB)) {
+    if (!match.speedMetrics) {
+      fail('a speed-decided match must record speedMetrics for both competitors');
+    }
+    const derived: SpeedMetrics = {
+      a: speedMetricFor(responseA),
+      b: speedMetricFor(responseB),
+    };
+    assertSpeedMetric(match.speedMetrics.a, derived.a, 'a');
+    assertSpeedMetric(match.speedMetrics.b, derived.b, 'b');
+    return {
+      expectedOutcome: 'speed-decided',
+      expectedWinner: speedWinner(derived, modelA, modelB),
+    };
+  }
+  if (match.speedMetrics != null) {
+    fail('a speed forfeit or no-contest must not record speedMetrics');
+  }
+  const aLive = isLiveResponse(responseA);
+  const bLive = isLiveResponse(responseB);
+  if (aLive !== bLive) {
+    return { expectedOutcome: 'forfeit', expectedWinner: aLive ? modelA : modelB };
+  }
+  return { expectedOutcome: 'no-contest', expectedWinner: null };
+}
+
 function verifyOutcome(match: MatchResult): void {
   const { modelA, modelB, responseA, responseB } = match.competitors;
   if (modelA === modelB) fail('a competitor cannot face itself');
@@ -112,7 +161,10 @@ function verifyOutcome(match: MatchResult): void {
 
   let expectedWinner: string | null = null;
   let expectedOutcome: MatchResult['outcome'];
-  if (responseA.success !== responseB.success) {
+  if (match.task.category === 'speed') {
+    if (match.panel !== null) fail('a speed match must not contain a judge panel');
+    ({ expectedOutcome, expectedWinner } = expectedSpeedOutcome(match, modelA, modelB));
+  } else if (responseA.success !== responseB.success) {
     expectedOutcome = 'forfeit';
     expectedWinner = responseA.success ? modelA : modelB;
     if (match.panel !== null) fail('forfeit must not contain a judge panel');

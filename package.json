@@ -1,7 +1,7 @@
 {
   "name": "bridgebench",
-  "version": "3.1.0-alpha.1",
-  "description": "BridgeBench V3 — autonomous pairwise arenas: reasoning and hallucination",
+  "version": "3.1.0-alpha.2",
+  "description": "BridgeBench V3 — autonomous arenas for vibe-coding models: reasoning, hallucination, security, bullshit, refactoring, debugging, generation, and a latency speed arena",
   "type": "module",
   "packageManager": "npm@10.9.8",
   "bin": {
@@ -86,8 +86,9 @@
     "build": "tsup",
     "build:ui": "vite build --config ui/vite.config.ts",
     "prepack": "npm run contamination:check && npm run build",
-    "check": "npm run contamination:check && npm run tasks -- validate && npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run build:ui && npm run test:pack && npm run test:ui",
+    "check": "npm run contamination:check && npm run docs:check && npm run tasks -- validate && npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run build:ui && npm run test:pack && npm run test:ui",
     "contamination:check": "node --import tsx src/contamination-check.ts",
+    "docs:check": "node --import tsx scripts/check-docs.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
@@ -98,6 +99,7 @@
     "test:ui": "playwright test --config playwright.config.ts",
     "test:watch": "vitest",
     "models": "node --import tsx src/cli.ts models",
+    "review": "npm run docs:check && npm run tasks -- validate && npm run arena -- verify --category reasoning --journal test/fixtures/journals/valid.jsonl",
     "tasks": "node --import tsx src/cli.ts tasks",
     "tasks:verify-reasoning": "node --import tsx scripts/verify-reasoning-pack.ts",
     "arena": "node --import tsx src/cli.ts arena",

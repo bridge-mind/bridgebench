@@ -1,0 +1,42 @@
+id: speed-api-diff-changelog
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: hard
+title: Write a Changelog Entry From an API Schema Diff
+summary: >-
+  Compare two versions of an API response schema, classify each field change as breaking or
+  non-breaking, and write a migration-focused changelog entry.
+prompt: |
+  Compare [schema-v1] and [schema-v2] for the same endpoint and produce a changelog entry.
+
+  1. A bulleted list of every field-level change, each tagged (BREAKING) or (non-breaking) with a
+     one-clause reason.
+  2. A short "Migration" paragraph telling integrators exactly what they must change before upgrading.
+artifacts:
+  - id: schema-v1
+    type: spec
+    label: Response schema v1
+    content: |
+      GET /users/{id} -> 200 UserV1
+      UserV1 = {
+        id: string,
+        name: string,
+        email: string,
+        role: "admin" | "member",
+        createdAt: string   // unix seconds encoded as a numeric string
+      }
+  - id: schema-v2
+    type: spec
+    label: Response schema v2
+    content: |
+      GET /users/{id} -> 200 UserV2
+      UserV2 = {
+        id: string,
+        fullName: string,                         // renamed from name
+        email: string,
+        roles: ("admin" | "member" | "billing")[], // was a single role
+        createdAt: string,                         // now ISO-8601 date-time
+        avatarUrl: string | null                   // new, nullable
+      }
+tags: [api, changelog, versioning]

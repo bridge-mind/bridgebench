@@ -1,0 +1,125 @@
+id: dead-code-plugin-registry-reflection
+version: 1.0.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Auditing a plugin cleanup PR where classes are constructed by name at Solstice Export
+summary: A cleanup PR deletes six items from an export service whose plugins are constructed by string name from a registry. One exporter is enabled at startup, one is reachable only through a request-format allow-list, one is truly dead, and a core plugin is constructed directly. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
+prompt: |
+  Solstice Export constructs its plugins by string name from REGISTRY. A cleanup PR (removal-pr)
+  deletes six items, each labelled "unused." Reachability is fully determined by three
+  self-declared-complete artifacts: plugin-config (the exact enabled plugins and allowed request
+  formats), the registry (every class the loader can resolve), and the bootstrap manifest (the only
+  three plugin-construction sites and the no-other-reflection guarantee). The classes and helpers
+  are in module-source.
+
+  Answer each deliverable using ONLY the supplied artifacts (plugin-config, registry, bootstrap,
+  module-source, removal-pr). Cite the artifact id(s) for every claim. Note that a class with no
+  literal `new ClassName()` anywhere can still be constructed via REGISTRY[name]; grepping for
+  direct constructor calls is not sufficient.
+
+  For removals P1..P6, classify each as exactly one of:
+    - behavior-preserving  (the item is never constructed / never called on any path; deleting it
+                            changes nothing observable)
+    - changes-behavior     (the item is constructed or called on some path — startup, a request
+                            format, or a core site; deleting it removes live behavior)
+
+  1. Classify P1 (remove AuthPlugin).
+  2. Classify P2 (remove YamlExporter and its registry entry).
+  3. Classify P3 (remove XmlExporter and its registry entry).
+  4. Classify P4 (remove deprecatedThumbnailer).
+  5. Classify P5 (remove JsonExporter and its registry entry).
+  6. Classify P6 (remove warmCache).
+  7. GOAL. Taking the elimination goal as "remove all and only truly-dead code," does this PR
+     meet-goal or fails-goal? If fails-goal, name every reachable item it wrongly removes AND any
+     truly-dead item it leaves behind.
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, name the construction/call path (startup, request format, or
+  core) that keeps the item alive.
+artifacts:
+  - id: plugin-config
+    type: config
+    label: plugin configuration (baked at build, complete, immutable at runtime)
+    content: |
+      # plugins.config.yaml — baked at build time; COMPLETE and immutable at runtime.
+
+      enabledPlugins: [JsonExporter, CsvExporter]   # exactly these are constructed at startup
+      allowedFormats: [json, csv, yaml]             # the request path accepts exactly these formats
+
+      # A request's format is validated against allowedFormats BEFORE any plugin is constructed;
+      # a format outside this list is rejected and never reaches the registry.
+      # A class is constructed ONLY IF its name is in enabledPlugins, OR its name equals
+      # <Capitalized-format>Exporter for some format in allowedFormats (e.g. yaml -> YamlExporter).
+      # No other plugin is enabled and no other format is accepted.
+  - id: registry
+    type: code
+    label: plugin registry (every resolvable class)
+    content: |
+      // plugins/registry.ts
+      import { JsonExporter, CsvExporter, YamlExporter, XmlExporter } from './exporters';
+
+      // The loader resolves classes by name from this object; these are all it can resolve.
+      export const REGISTRY = { JsonExporter, CsvExporter, YamlExporter, XmlExporter };
+
+      // AuthPlugin is NOT in REGISTRY: it is constructed directly by bootstrap (see that artifact),
+      // not resolved by name.
+  - id: bootstrap
+    type: spec
+    label: plugin construction sites (complete)
+    content: |
+      // plugins/bootstrap.ts — the COMPLETE set of plugin construction sites. There are exactly
+      // three, and no other code constructs a plugin.
+
+      // (core) constructed directly at startup, unconditionally:
+      new AuthPlugin().init();
+
+      // (startup) one instance per enabled plugin name:
+      for (const name of config.enabledPlugins) new REGISTRY[name]().run(seed);
+
+      // (request) per export request, chosen by the already-validated format:
+      export function handleExport(req: ExportReq) {
+        // req.format has already been checked to be in config.allowedFormats.
+        const cls = REGISTRY[capitalize(req.format) + 'Exporter'];  // e.g. 'yaml' -> YamlExporter
+        return new cls().run(req.data);
+      }
+
+      // REGISTRY is indexed ONLY by (a) a name in config.enabledPlugins or (b)
+      // <Capitalized-format>Exporter for a format in config.allowedFormats. Apart from these
+      // sites there is NO `new` of any plugin, NO eval, and NO dynamic import in the service.
+  - id: module-source
+    type: code
+    label: plugin classes and helper functions
+    content: |
+      // plugins/exporters.ts
+
+      export class AuthPlugin { init() { session.attach(); } }         // core plugin
+
+      export class JsonExporter { run(d: Data) { return JSON.stringify(d); } }
+      export class CsvExporter  { run(d: Data) { return toCsv(d); } }
+      export class YamlExporter { run(d: Data) { return toYaml(d); } }
+      export class XmlExporter  { run(d: Data) { warmCache(); return toXml(d); } }
+
+      // Called ONLY from XmlExporter.run above; no other caller.
+      function warmCache(): void { cache.preload(); }
+
+      // No caller anywhere; not in REGISTRY; not a core plugin.
+      function deprecatedThumbnailer(img: Image): Buffer { return render(img, 64); }
+
+      // No caller anywhere; not in REGISTRY; not a core plugin.
+      function legacyManifestWriter(pkg: Pkg): string { return `MANIFEST ${pkg.id}`; }
+  - id: removal-pr
+    type: diff
+    label: proposed cleanup PR
+    content: |
+      PR #440 "delete unused plugin code". Proposed deletions:
+
+      P1  delete class AuthPlugin                       (reason: "not in plugins.config enabledPlugins")
+      P2  delete class YamlExporter + its registry entry (reason: "no `new YamlExporter()` anywhere")
+      P3  delete class XmlExporter + its registry entry   (reason: "no `new XmlExporter()` anywhere")
+      P4  delete function deprecatedThumbnailer           (reason: "no callers")
+      P5  delete class JsonExporter + its registry entry  (reason: "no `new JsonExporter()` anywhere")
+      P6  delete function warmCache                       (reason: "only used by XmlExporter")
+
+      The PR does NOT touch legacyManifestWriter (the author did not notice it).
+tags: [dead-code-elimination, refactoring, plugin-registry, reflection, reachability]

@@ -9,7 +9,7 @@ import {
   BenchmarkCategorySchema,
   METHODOLOGY_VERSION,
   type ArenaRunConfig,
-  type CompleteArenaTask,
+  type ArenaTask,
   type ModelRegistryEntry,
 } from './types.js';
 import { ENGINE_VERSION } from './version.js';
@@ -70,7 +70,8 @@ export const RunManifestSchema = z.object({
       id: z.string().min(1),
       version: z.string().min(1),
       publicHash: z.string().min(1),
-      privateHash: z.string().min(1),
+      // Null for public-only packs (e.g. the speed arena); judged packs bind a real hash.
+      privateHash: z.string().min(1).nullable(),
     }),
   ),
   promptPolicyHashes: z.object({
@@ -116,7 +117,8 @@ export function runIdFromManifest(manifest: RunManifest): string {
 
 export function createRunManifest(
   config: Pick<ArenaRunConfig, 'category' | 'seed' | 'matches' | 'competitorIds'>,
-  tasks: CompleteArenaTask[],
+  // Public-only packs (speed) carry a null privateHash; judged packs carry a real one.
+  tasks: readonly ArenaTask[],
   resolvedCompetitors: readonly ModelRegistryEntry[] = resolveCompetitorRoster(
     config.competitorIds,
   ),

@@ -1,0 +1,261 @@
+id: api-contract-adherence-idempotent-charges
+version: 1.0.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: POST /v1/charges — Which Handler Obeys Every Idempotency And Status Term
+summary: A declared HTTP contract for an idempotent charge endpoint fixes create-vs-replay status codes, idempotency-conflict handling, amount and currency validation with 422 semantics, and a required idempotency-key header. Six handler submissions are under review; exactly one obeys every term while each decoy breaks exactly one. Classify all six against the contract and its canonical request scenarios.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (api-contract, error-code-table,
+  request-scenarios, handlers-a, handlers-b, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent contract terms and do not overlook one that is stated. The verdict
+  vocabulary is exactly: conforms / violates. A handler `conforms` only if it satisfies EVERY term
+  T1..T5 in api-contract.
+
+  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
+  obeys every term. No code is executed; reason about each handler's response for the canonical
+  request-scenarios.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single contract term (one of T1..T5) it
+     breaks and cite the request-scenarios request that exposes it. State the contract-correct
+     response (HTTP status + error code / body) and the candidate's response.
+
+  3. Exactly one candidate `conforms`. Identify it.
+
+  4. In submission-manifest's review note, a reviewer argues candidate-2 conforms because "it
+     returns 409 idempotency_key_reuse when a key is reused with a different body, and 201 for a
+     fresh charge." State candidate-2's verdict and cite the term and the request-scenarios request
+     that refutes the reviewer.
+
+  5. For scenario S5 (currency "jpy"), which single candidate creates a charge and returns 201
+     instead of 422 unsupported_currency? Name it and the term it breaks.
+artifacts:
+  - id: api-contract
+    type: spec
+    label: POST /v1/charges contract (frozen, complete)
+    content: |
+      POST /v1/charges  (application/json)
+        Header:  Idempotency-Key: <string>   (required)
+        Body:    { "amount": integer, "currency": string }
+
+      The endpoint's behavior is fully specified by the terms below. This is the COMPLETE contract;
+      a handler conforms only if it satisfies every term. Terms are evaluated in the stated order.
+
+      T5  IDEMPOTENCY-KEY REQUIRED. If the Idempotency-Key header is absent, respond 400 with error
+          "idempotency_key_required". No charge is created. (Checked first.)
+
+      T3  AMOUNT VALIDATION. `amount` must be an integer >= 1. If it is missing, not an integer,
+          zero, or negative, respond 422 with error "invalid_amount". No charge is created.
+
+      T4  CURRENCY VALIDATION. `currency` must be one of exactly {"usd", "eur", "gbp"}. Any other
+          value responds 422 with error "unsupported_currency". No charge is created.
+
+      T2  IDEMPOTENCY CONFLICT. If the Idempotency-Key was seen before with a DIFFERENT request body
+          (different amount or currency), respond 409 with error "idempotency_key_reuse". No new
+          charge is created and the stored charge is not returned.
+
+      T1  CREATE VS REPLAY STATUS.
+          - First use of an Idempotency-Key with a valid body: create the charge and respond 201
+            with the new charge object.
+          - Replay: the SAME Idempotency-Key with an IDENTICAL body responds 200 with the SAME
+            previously-created charge (same id). A replay must NOT create a new charge and must NOT
+            respond 201.
+
+      Success bodies are the charge object { "id": string, "amount": integer, "currency": string,
+      "status": "succeeded" }. The only status codes this endpoint ever returns are 200, 201, 400,
+      409, and 422 (see error-code-table).
+  - id: error-code-table
+    type: table
+    label: error-code / HTTP-status mapping (exhaustive)
+    content: |
+      This mapping is exhaustive for POST /v1/charges. No other error code or status is emitted.
+
+      error code                | http | condition
+      --------------------------|------|-----------------------------------------------
+      (success: created)        | 201  | first use of a key with a valid body
+      (success: replay)         | 200  | same key, identical body (returns the same charge)
+      idempotency_key_required  | 400  | Idempotency-Key header absent
+      idempotency_key_reuse     | 409  | same key, different request body
+      invalid_amount            | 422  | amount missing / non-integer / < 1
+      unsupported_currency      | 422  | currency not in {usd, eur, gbp}
+
+      There is no 400-for-validation and no 500 in this contract: amount and currency failures are
+      422, and the endpoint does not emit 500 for the conditions above.
+  - id: request-scenarios
+    type: log
+    label: canonical request scenarios with contract-correct responses
+    content: |
+      Applied in order against a fresh store. Each line: request -> contract-correct response.
+
+      S1  POST /v1/charges  Idempotency-Key: k1  body {"amount":500,"currency":"usd"}
+          -> 201  { "id":"ch_1","amount":500,"currency":"usd","status":"succeeded" }
+      S2  POST /v1/charges  Idempotency-Key: k1  body {"amount":500,"currency":"usd"}   (identical replay)
+          -> 200  { "id":"ch_1", ... }        # SAME charge ch_1; not 201, no new charge
+      S3  POST /v1/charges  Idempotency-Key: k1  body {"amount":700,"currency":"usd"}   (different body, same key)
+          -> 409  { "error":"idempotency_key_reuse" }
+      S4  POST /v1/charges  Idempotency-Key: k2  body {"amount":0,"currency":"usd"}
+          -> 422  { "error":"invalid_amount" }
+      S5  POST /v1/charges  Idempotency-Key: k3  body {"amount":500,"currency":"jpy"}
+          -> 422  { "error":"unsupported_currency" }
+      S6  POST /v1/charges  (no Idempotency-Key header)  body {"amount":500,"currency":"usd"}
+          -> 400  { "error":"idempotency_key_required" }
+  - id: handlers-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      const VALID = new Set(['usd', 'eur', 'gbp']);
+      const store = new Map();  // idemKey -> { hash, charge }   (fresh per handler)
+      const bodyHash = (b) => JSON.stringify({ amount: b.amount, currency: b.currency });
+
+      // ---- candidate-1 ----
+      function candidate1(req) {
+        const key = req.headers['idempotency-key'];
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };   // T5
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)                                      // T3
+          return { status: 422, body: { error: 'invalid_amount' } };
+        if (!VALID.has(currency))                                                         // T4
+          return { status: 422, body: { error: 'unsupported_currency' } };
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior) {
+          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };  // T2
+          return { status: 200, body: prior.charge };                                    // T1 replay
+        }
+        const charge = createCharge(amount, currency);
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };                                            // T1 create
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(req) {
+        const key = req.headers['idempotency-key'];
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)
+          return { status: 422, body: { error: 'invalid_amount' } };
+        if (!VALID.has(currency))
+          return { status: 422, body: { error: 'unsupported_currency' } };
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior && prior.hash !== h)
+          return { status: 409, body: { error: 'idempotency_key_reuse' } };
+        const charge = createCharge(amount, currency);   // identical replay re-creates the charge
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };            // always 201, even on identical replay
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(req) {
+        const key = req.headers['idempotency-key'];
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)
+          return { status: 422, body: { error: 'invalid_amount' } };
+        if (!VALID.has(currency))
+          return { status: 422, body: { error: 'unsupported_currency' } };
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior) return { status: 200, body: prior.charge };   // replays regardless of body diff
+        const charge = createCharge(amount, currency);
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };
+      }
+  - id: handlers-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // (reuse VALID, store, bodyHash, createCharge from handlers-a; each handler has its own store)
+
+      // ---- candidate-4 ----
+      function candidate4(req) {
+        const key = req.headers['idempotency-key'];
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)
+          return { status: 400, body: { error: 'invalid_amount' } };   // 400 instead of 422
+        if (!VALID.has(currency))
+          return { status: 422, body: { error: 'unsupported_currency' } };
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior) {
+          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
+          return { status: 200, body: prior.charge };
+        }
+        const charge = createCharge(amount, currency);
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(req) {
+        const key = req.headers['idempotency-key'];
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)
+          return { status: 422, body: { error: 'invalid_amount' } };
+        // no currency validation
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior) {
+          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
+          return { status: 200, body: prior.charge };
+        }
+        const charge = createCharge(amount, currency);   // accepts any currency, e.g. "jpy"
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };
+      }
+
+      // ---- candidate-6 ----
+      function candidate6(req) {
+        const key = req.headers['idempotency-key'];
+        // no idempotency-key-required check
+        const { amount, currency } = req.body;
+        if (!Number.isInteger(amount) || amount < 1)
+          return { status: 422, body: { error: 'invalid_amount' } };
+        if (!VALID.has(currency))
+          return { status: 422, body: { error: 'unsupported_currency' } };
+        const h = bodyHash(req.body);
+        const prior = store.get(key);
+        if (prior) {
+          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
+          return { status: 200, body: prior.charge };
+        }
+        const charge = createCharge(amount, currency);   // creates a charge even with no key
+        store.set(key, { hash: h, charge });
+        return { status: 201, body: charge };
+      }
+  - id: submission-manifest
+    type: note
+    label: submission manifest, acceptance rule, and a review note
+    content: |
+      Submissions under review for POST /v1/charges: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
+      being considered.
+
+      Acceptance rule: exactly one submission satisfies ALL terms T1..T5 (it reproduces the
+      contract-correct response for every request-scenarios line) and is to be accepted. Each of the
+      other five breaks exactly one term. The process assumes precisely one such all-terms-correct
+      submission exists.
+
+      Review note (@theo): "I'd approve candidate-2 — it returns 409 idempotency_key_reuse when a
+      key is reused with a different body, and 201 for a fresh charge. Both idempotency behaviors
+      look right to me." (Evaluate this claim against the identical-replay case, not only the
+      different-body case.)
+  - id: idempotency-primer
+    type: note
+    label: idempotency semantics primer (background)
+    content: |
+      Background on idempotency for this endpoint (informational; the binding rules are in
+      api-contract).
+
+      An idempotent create means retrying the SAME request (same Idempotency-Key, byte-identical
+      body) yields the SAME outcome as the first attempt without producing a duplicate side effect.
+      The industry convention this contract adopts: the first attempt returns 201 Created; a retry
+      returns 200 OK echoing the original resource (NOT a second 201, NOT a new id). Reusing a key
+      with a materially different body is a client bug and must be rejected (409), never silently
+      mapped onto the original resource. Missing the key entirely removes the safety guarantee, so
+      the request is refused (400) rather than processed.
+tags: [generation, api-contract-adherence, idempotency, http, code-review]

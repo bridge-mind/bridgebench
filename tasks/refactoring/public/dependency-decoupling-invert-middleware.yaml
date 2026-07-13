@@ -1,0 +1,177 @@
+id: dependency-decoupling-invert-middleware
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Inverting the Middleware Chain — Registration Order, a Shared Registry, and Import Cycles
+summary: >-
+  A hard-coded middleware chain (auth, rateLimit, log) is to be inverted so each middleware
+  self-registers via an imported register(). Exactly one inversion preserves the execution order and
+  the single shared registry with no import cycle. The decoys import the middleware in the wrong
+  order, hand out a fresh registry per call, or make a middleware import app and close a cycle.
+  Classify each and name the observable difference on the final context.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (pipeline-original, registry-note,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to invert control so each middleware self-registers via register(), while
+  preserving: the CANONICAL execution order auth -> rateLimit -> log (registry-note), the single shared
+  registry so all three run against the same ctx passed to run(ctx), and an acyclic import graph. The
+  observable outcome of handle(ctx) is the final ctx (ctx.user, ctx.rateBucket, ctx.log).
+
+  1. Classify rewrite-a. Justify against execution order, shared registry, and the acyclic-import
+     requirement.
+
+  2. Classify rewrite-b. If it changes behavior, give the resulting execution order and the concrete
+     final value of ctx.log after handle(ctx), and compare to pipeline-original.
+
+  3. Classify rewrite-c. State which middlewares actually run against ctx and what the final ctx
+     (ctx.user, ctx.rateBucket, ctx.log) looks like, and name the mechanism.
+
+  4. Classify rewrite-d. Name the exact import cycle (the edges) and state what happens at startup and
+     why, per registry-note's load-order rule.
+
+  5. Exactly one inversion preserves order, keeps one shared registry, and stays acyclic. Name it.
+     Then, for pipeline-original, state the ground truth: the execution order and the final ctx.log and
+     ctx.rateBucket after handle(ctx).
+artifacts:
+  - id: pipeline-original
+    type: code
+    label: app/context.ts + app/app.ts — original inline chain (the reference behavior)
+    content: |
+      // app/context.ts — the shared request Context.
+      export interface Context {
+        user?: string;
+        rateBucket?: string;
+        log: string[];
+      }
+
+      // app/app.ts — ORIGINAL: the middleware chain is built inline, in a fixed order.
+      import { Context } from './context';
+
+      function auth(ctx: Context): void { ctx.user = 'u-42'; }
+      function rateLimit(ctx: Context): void { ctx.rateBucket = ctx.user ?? 'anon'; } // reads ctx.user
+      function log(ctx: Context): void { ctx.log.push(`user=${ctx.user ?? 'none'}`); } // reads ctx.user
+
+      export function handle(ctx: Context): void {
+        auth(ctx);       // 1
+        rateLimit(ctx);  // 2
+        log(ctx);        // 3
+        // ...then the route handler runs
+      }
+  - id: registry-note
+    type: note
+    label: pipeline module graph — canonical order, registry sharing, load order (complete)
+    content: |
+      pipeline module graph — canonical order, registry sharing, and load order (complete).
+
+      The request pipeline runs three middlewares in this CANONICAL execution order:
+        1. auth       -> sets ctx.user = 'u-42'
+        2. rateLimit  -> sets ctx.rateBucket = ctx.user ?? 'anon'   (reads ctx.user)
+        3. log        -> pushes `user=${ctx.user ?? 'none'}` to ctx.log   (reads ctx.user)
+      Then the route handler runs. These are the COMPLETE set of middlewares, and app is the ONLY
+      place they are wired. The observable outcome of handle(ctx) is the final ctx (ctx.user,
+      ctx.rateBucket, ctx.log).
+
+      The inversion introduces registry.ts. In an acceptable inversion:
+        - registry.ts is a LEAF module (imports nothing) exposing a SINGLE shared list; register(fn)
+          appends to it and run(ctx) invokes the registered fns in registration (insertion) order.
+        - Each middleware module calls register(...) at import, and app.ts imports the middleware
+          modules so that registration order equals the CANONICAL execution order above, then calls
+          run(ctx).
+        - No import cycle: middleware -> registry, app -> middleware + registry, registry -> nothing.
+
+      A circular import here means a middleware imports app (or app is otherwise re-entered) so that a
+      value is read before it is initialized. run(ctx) invokes handlers in the order they were
+      registered, which is the order app.ts imports the middleware modules.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — shared registry, imports in canonical order
+    content: |
+      // app/registry.ts — a LEAF module (imports nothing); ONE shared chain.
+      import type { Context } from './context';
+      type Middleware = (ctx: Context) => void;
+      const chain: Middleware[] = [];
+      export function register(fn: Middleware): void { chain.push(fn); }
+      export function run(ctx: Context): void { for (const fn of chain) fn(ctx); } // insertion order
+
+      // app/auth.ts
+      import { register } from './registry';
+      register((ctx) => { ctx.user = 'u-42'; });
+      // app/rateLimit.ts
+      import { register } from './registry';
+      register((ctx) => { ctx.rateBucket = ctx.user ?? 'anon'; });
+      // app/log.ts
+      import { register } from './registry';
+      register((ctx) => { ctx.log.push(`user=${ctx.user ?? 'none'}`); });
+
+      // app/app.ts — import order equals the canonical execution order.
+      import './auth';
+      import './rateLimit';
+      import './log';
+      import { run } from './registry';
+      export function handle(ctx) { run(ctx); }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — shared registry, imports reordered
+    content: |
+      // app/registry.ts, app/auth.ts, app/rateLimit.ts, app/log.ts — identical to rewrite-a
+      // (single shared chain; each middleware self-registers at import).
+
+      // app/app.ts — import order differs from the canonical execution order.
+      import './log';
+      import './auth';
+      import './rateLimit';
+      import { run } from './registry';
+      export function handle(ctx) { run(ctx); }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — a fresh registry per call
+    content: |
+      // app/registry.ts — hands out a NEW registry instance on every call.
+      import type { Context } from './context';
+      type Middleware = (ctx: Context) => void;
+      export class Registry {
+        private fns: Middleware[] = [];
+        register(fn: Middleware): void { this.fns.push(fn); }
+        run(ctx: Context): void { for (const fn of this.fns) fn(ctx); }
+      }
+      export function getRegistry(): Registry { return new Registry(); } // new instance each call
+
+      // app/auth.ts
+      import { getRegistry } from './registry';
+      getRegistry().register((ctx) => { ctx.user = 'u-42'; });
+      // app/rateLimit.ts
+      import { getRegistry } from './registry';
+      getRegistry().register((ctx) => { ctx.rateBucket = ctx.user ?? 'anon'; });
+      // app/log.ts
+      import { getRegistry } from './registry';
+      getRegistry().register((ctx) => { ctx.log.push(`user=${ctx.user ?? 'none'}`); });
+
+      // app/app.ts — canonical import order.
+      import './auth';
+      import './rateLimit';
+      import './log';
+      import { getRegistry } from './registry';
+      export function handle(ctx) { getRegistry().run(ctx); }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — auth imports a constant from app
+    content: |
+      // app/registry.ts, app/rateLimit.ts, app/log.ts — identical to rewrite-a (shared chain).
+
+      // app/auth.ts — reads a constant from app at import.
+      import { register } from './registry';
+      import { DEFAULT_USER } from './app';        // NEW edge: auth.ts -> app.ts
+      const u = DEFAULT_USER;                       // read at import (top-level)
+      register((ctx) => { ctx.user = u; });
+
+      // app/app.ts — imports the middleware (app.ts -> auth.ts), then declares the constant.
+      import './auth';
+      import './rateLimit';
+      import './log';
+      import { run } from './registry';
+      export const DEFAULT_USER = 'u-42';
+      export function handle(ctx) { run(ctx); }
+tags: [refactoring, dependency-decoupling, inversion-of-control, import-cycle, ordering]

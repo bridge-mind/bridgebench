@@ -11,6 +11,7 @@ import { sanitizeError } from './openrouter.js';
 import { writeReports } from './report.js';
 import { createRunManifest, runIdFromManifest, runManifestHash } from './run-manifest.js';
 import { scheduleMatches } from './scheduler.js';
+import { decideSpeedMatch } from './speed.js';
 import { ArenaStore } from './store.js';
 import { buildCompetitorPrompt } from './tasks.js';
 import { detectResponseAnomalies } from './triage.js';
@@ -19,18 +20,20 @@ import {
   competitorCost,
   competitorOutputTokens,
   competitorReasoningTokens,
+  isCompleteArenaTask,
   type ArenaExecutionOptions,
   type ArenaEventInput,
   type ArenaEventSink,
   type ArenaRunConfig,
   type ArenaRunResult,
-  type CompleteArenaTask,
+  type ArenaTask,
   type CompetitorFailure,
   type CompetitorResponse,
   type MatchResult,
   type ModelRegistryEntry,
   type OpenRouterGateway,
   type ScheduledMatch,
+  type SpeedMetrics,
 } from './types.js';
 
 /** Matches with at least one failed response at or past this rate halt the run. */
@@ -49,7 +52,7 @@ interface PreparedRun {
   manifestHash: string;
   competitors: ModelRegistryEntry[];
   schedule: ScheduledMatch[];
-  tasksById: Map<string, CompleteArenaTask>;
+  tasksById: Map<string, ArenaTask>;
   completedIds: Set<string>;
   progress: RunProgress;
 }
@@ -141,7 +144,7 @@ export class ArenaRunner {
 
   private async prepareRun(
     config: ArenaRunConfig,
-    tasks: CompleteArenaTask[],
+    tasks: ArenaTask[],
     signal?: AbortSignal,
   ): Promise<PreparedRun> {
     const competitors = resolveCompetitorRoster(config.competitorIds);
@@ -191,9 +194,12 @@ export class ArenaRunner {
     };
 
     if (signal?.aborted) return prepared;
+    // Speed matches never invoke the judge panel, so their liveness check
+    // validates competitors only — no need to reach judges that never run.
+    const judgesToValidate = config.category === 'speed' ? [] : listModels('judge');
     try {
       await Promise.all(
-        [...competitors, ...listModels('judge')].map((model) =>
+        [...competitors, ...judgesToValidate].map((model) =>
           this.gateway.validateModel(model, signal),
         ),
       );
@@ -208,7 +214,7 @@ export class ArenaRunner {
 
   async run(
     config: ArenaRunConfig,
-    tasks: CompleteArenaTask[],
+    tasks: ArenaTask[],
     execution: ArenaExecutionOptions = {},
   ): Promise<ArenaRunResult> {
     const { signal, onMatchResult } = execution;
@@ -369,7 +375,7 @@ export class ArenaRunner {
 
   private async runMatch(
     match: ScheduledMatch,
-    task: CompleteArenaTask,
+    task: ArenaTask,
     manifestHash: string,
     competitorIds: readonly string[],
     signal?: AbortSignal,
@@ -414,11 +420,26 @@ export class ArenaRunner {
     let outcome: MatchResult['outcome'] = 'no-contest';
     let winnerModelId: string | null = null;
     let panel: MatchResult['panel'] = null;
+    let speedMetrics: SpeedMetrics | null = null;
 
-    if (responseA.success !== responseB.success) {
+    if (task.public.category === 'speed') {
+      // Speed arena: no judge panel. The liveness gate handles forfeit /
+      // no-contest, and two live competitors are decided deterministically by
+      // lower total wall-clock time. This is a completion check with a latency
+      // tiebreak — there is no quality judgment.
+      const decision = decideSpeedMatch(responseA, responseB, match.modelA, match.modelB);
+      outcome = decision.outcome;
+      winnerModelId = decision.winnerModelId;
+      speedMetrics = decision.speedMetrics;
+    } else if (responseA.success !== responseB.success) {
       outcome = 'forfeit';
       winnerModelId = responseA.success ? match.modelA : match.modelB;
     } else if (responseA.success && responseB.success) {
+      if (!isCompleteArenaTask(task)) {
+        throw new Error(
+          `A judged ${task.public.category} match requires a task with its hidden reference`,
+        );
+      }
       this.emit({
         id: `${match.id}-judging-started`,
         type: 'judging.started',
@@ -464,6 +485,7 @@ export class ArenaRunner {
       outcome,
       winnerModelId,
       panel,
+      speedMetrics,
       eloBefore,
       eloAfter,
       pointAwarded: winnerModelId !== null,

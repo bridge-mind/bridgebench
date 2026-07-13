@@ -1,0 +1,42 @@
+id: speed-rest-client-module
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: hard
+title: Generate a Typed Fetch Client Module for a Small Orders API
+summary: >-
+  Produce a complete, self-contained TypeScript module wrapping four documented REST endpoints, with
+  typed inputs and outputs, a shared request helper, and structured error handling.
+prompt: |
+  Write a single TypeScript module `ordersClient.ts` that wraps the endpoints in [orders-api] using the
+  global `fetch`. Follow [client-rules]. Emit the full file.
+
+  1. Interfaces for `Order`, `CreateOrderInput`, and `Page<T>`.
+  2. A private `request<T>()` helper that sets JSON headers, throws `OrdersApiError` carrying the status
+     and parsed body on any non-2xx response, and parses JSON on success.
+  3. The four exported functions: `listOrders`, `getOrder`, `createOrder`, `cancelOrder`.
+artifacts:
+  - id: orders-api
+    type: spec
+    label: Orders API
+    content: |
+      Base URL comes from the factory argument `baseUrl`.
+      GET  /orders?cursor=&limit=      -> 200 Page<Order>
+      GET  /orders/{id}                -> 200 Order | 404
+      POST /orders  {items,currency}   -> 201 Order | 422 {message}
+      POST /orders/{id}/cancel         -> 200 Order | 409 {message}
+
+      Order            = { id: string; status: "open" | "cancelled" | "fulfilled"; total: number; currency: string }
+      Page<T>          = { data: T[]; nextCursor: string | null }
+      CreateOrderInput = { items: { sku: string; qty: number }[]; currency: string }
+  - id: client-rules
+    type: spec
+    label: Client rules
+    content: |
+      - export one factory: createOrdersClient(baseUrl: string, token: string)
+      - every request sends `Authorization: Bearer <token>` and `Accept: application/json`
+      - POST requests send `Content-Type: application/json` and a JSON body
+      - non-2xx responses throw `OrdersApiError` with a `.status` number and the parsed body
+        (fall back to raw text when the body is not JSON)
+      - no third-party dependencies; use the global fetch and standard DOM/Node types
+tags: [typescript, http, api-client]

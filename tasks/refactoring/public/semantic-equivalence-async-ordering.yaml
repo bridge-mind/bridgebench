@@ -1,0 +1,157 @@
+id: semantic-equivalence-async-ordering
+version: 1.0.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Are these six async refactors behavior-preserving under Promise ordering and error semantics?
+summary: Six async functions each get a rewrite that changes how promises are sequenced. Some are equivalent; others diverge on ordering of observable side effects, how many metered calls run on the error path, whether a non-idempotent write always fires, or whether rejections still propagate. Using the cited Promise semantics and the declared side effects, classify each rewrite as behavior-preserving or changes-behavior.
+prompt: |
+  A refactor PR rewrites six async functions (originals A1..A6) into forms that sequence their
+  promises differently (proposed B1..B6). Judge each rewrite for FULL observable equivalence across
+  BOTH the success path and the error path, accounting for the declared side effects.
+
+  Answer each deliverable using ONLY the supplied artifacts (async-spec, side-effects, originals,
+  proposed). Cite the artifact id(s) for every claim; ground each divergence in async-spec and in
+  the observable side effect declared in side-effects.
+
+  For each rewrite below, classify it as exactly one of:
+    - behavior-preserving  (same observable behavior as the original on every path: same results,
+                            same ordering of observable side effects, same set of calls actually
+                            made, same rejection/throw behavior)
+    - changes-behavior     (differs on some path; name the single divergence and a condition that
+                            witnesses it)
+
+  1. Classify B1 (rewrite of A1).
+  2. Classify B2 (rewrite of A2).
+  3. Classify B3 (rewrite of A3).
+  4. Classify B4 (rewrite of A4).
+  5. Classify B5 (rewrite of A5).
+  6. Classify B6 (rewrite of A6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the async
+  semantics and the declared side effects.
+artifacts:
+  - id: async-spec
+    type: spec
+    label: Promise / async semantics (authoritative for this task)
+    content: |
+      Semantics you must apply:
+
+      A. `await x` suspends the async function until x settles. Statements after it run ONLY after x
+         resolves. If x rejects, execution stops there as if `throw` were reached and the function's
+         returned promise rejects; later statements do not run.
+
+      B. Sequential awaits `await f(); await g();` invoke g() only AFTER f() has resolved. If f()
+         rejects, g() is never invoked.
+
+      C. `Promise.all([e1, e2, ...])`: the array is built EAGERLY, so every expression e1, e2, ...
+         is invoked immediately (all underlying operations start concurrently, before any awaiting).
+         It resolves to results in INPUT ORDER once all resolve. It rejects as soon as ANY input
+         rejects, with that first rejection; the other already-started promises keep running (their
+         side effects still occur) and their results are discarded.
+
+      D. `Promise.allSettled([...])` NEVER rejects; it resolves once all inputs settle, to an array
+         of { status, value | reason }.
+
+      E. `arr.map(fn)` invokes fn for every element eagerly during the map; for an async fn, all
+         calls start concurrently.
+
+      F. Operand order of `+` is left-to-right: in `(await f()) + (await g())`, f() is invoked and
+         its await fully resolves BEFORE g() is invoked — identical ordering to two sequential
+         `const` awaits.
+
+      G. `p.then(cb)` returns a promise that resolves to cb's return value, or rejects if p rejects
+         or cb throws. `const u = await p; return cb(u);` has the SAME settle behavior (same
+         resolution value, same rejection).
+  - id: side-effects
+    type: note
+    label: observable side effects of the helper calls (authoritative)
+    content: |
+      What is observable about each helper (this determines what "same behavior" requires):
+
+      - log(x): appends x to an append-only audit stream. The server assigns each entry a sequence
+        number BY ARRIVAL ORDER, so the order in which log() calls arrive is OBSERVABLE. log()
+        returns nothing meaningful.
+      - fetchOne(id): a METERED network GET. Each invocation consumes one unit of a rate quota and
+        is recorded, so the NUMBER of fetchOne() invocations is OBSERVABLE. It may reject.
+      - exists(id): a read with no observable side effect. create(id): INSERTS a row; it is
+        non-idempotent — a second create for an id that already exists is an observable duplicate/
+        error. Whether create() runs is OBSERVABLE.
+      - save(item): a write that may reject. Whether the enclosing function THROWS to its caller is
+        OBSERVABLE.
+      - getBase(id), getBonus(id), getUser(id): pure reads; no ordering-sensitive side effects.
+  - id: originals
+    type: code
+    label: original async functions (A1..A6)
+    content: |
+      // A1 — write two audit entries in order
+      async function audit(a: string, b: string): Promise<void> {
+        await log(a);
+        await log(b);
+      }
+
+      // A2 — sum of two fetched amounts
+      async function total(id: string): Promise<number> {
+        return (await getBase(id)) + (await getBonus(id));
+      }
+
+      // A3 — load every record; stop at the first failure
+      async function loadAll(ids: string[]): Promise<Rec[]> {
+        const out: Rec[] = [];
+        for (const id of ids) out.push(await fetchOne(id));
+        return out;
+      }
+
+      // A4 — fetch a user's name
+      function fetchName(id: string): Promise<string> {
+        return getUser(id).then((u) => u.name);
+      }
+
+      // A5 — create the record only if it does not already exist
+      async function ensure(id: string): Promise<void> {
+        if (await exists(id)) return;
+        await create(id);
+      }
+
+      // A6 — persist every item; fail if any save fails
+      async function saveAll(items: Item[]): Promise<void> {
+        await Promise.all(items.map(save));
+      }
+  - id: proposed
+    type: code
+    label: proposed async rewrites (B1..B6)
+    content: |
+      // B1 — rewrite of A1
+      async function audit(a: string, b: string): Promise<void> {
+        await Promise.all([log(a), log(b)]);
+      }
+
+      // B2 — rewrite of A2
+      async function total(id: string): Promise<number> {
+        const base = await getBase(id);
+        const bonus = await getBonus(id);
+        return base + bonus;
+      }
+
+      // B3 — rewrite of A3
+      async function loadAll(ids: string[]): Promise<Rec[]> {
+        return Promise.all(ids.map((id) => fetchOne(id)));
+      }
+
+      // B4 — rewrite of A4
+      async function fetchName(id: string): Promise<string> {
+        const u = await getUser(id);
+        return u.name;
+      }
+
+      // B5 — rewrite of A5
+      async function ensure(id: string): Promise<void> {
+        const [present] = await Promise.all([exists(id), create(id)]);
+        if (present) return;
+      }
+
+      // B6 — rewrite of A6
+      async function saveAll(items: Item[]): Promise<void> {
+        await Promise.allSettled(items.map(save));
+      }
+tags: [semantic-equivalence, refactoring, async, promises, ordering]

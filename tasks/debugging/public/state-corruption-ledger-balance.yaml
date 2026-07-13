@@ -1,0 +1,170 @@
+id: state-corruption-ledger-balance
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Coinpurse Wallet Shows a Cached Balance Higher Than Its Ledger Sum
+summary: A wallet account reports a cached balance that exceeds the sum of its ledger entries. A reconciliation job flags the drift, a transfer-out path let a payment through on the inflated number, and a statement job printed it. Find the one writer that first breaks the balance invariant, separate it from the downstream observers that only saw already-bad state, and state the adequate versus the shallow fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (invariant-spec,
+  ledger-schema, writers-code, interest-diff, event-trace, recon-report, oncall-note).
+  Cite the artifact id(s) for every claim. Use this vocabulary for verdicts:
+  root-cause, red-herring, adequate-fix, shallow-fix.
+
+  Account A-42 in the "coinpurse" wallet service shows cached_balance = 61.50 while the
+  sum of its ledger_entries is 60.00. Do not stop at where the drift is reported; trace
+  to the writer where the invariant is FIRST violated.
+
+  1. State the balance invariant precisely, and list the COMPLETE set of functions that
+     are permitted to write accounts.cached_balance, per the artifacts.
+
+  2. ROOT CAUSE. Name the single writer whose execution first makes cached_balance
+     disagree with SUM(ledger_entries.amount) for A-42, and cite the exact expression and
+     the trace point where the two quantities first diverge. Explain why that write
+     violates the invariant.
+
+  3. RED HERRINGS. Classify the reconciliation job, the transfer-out path, and the
+     statement builder. For each, explain whether it corrupts state or only observes and
+     propagates state that was already corrupt, citing the trace.
+
+  4. Explain whether reverseEntry's `cachedBalance += -original.amount` is the defect or
+     is invariant-preserving, and justify with the trace numbers.
+
+  5. FIX ADEQUACY. Two fixes are on the table: (a) a nightly job recomputes cached_balance
+     from SUM(ledger_entries) for every account; (b) the offending writer records its
+     amount in ledger_entries like every other balance-changing writer. Classify each as
+     adequate-fix or shallow-fix and justify which durably restores the invariant.
+
+  6. BLAST RADIUS. State exactly which accounts can be corrupted and by how much, tying it
+     to the change in interest-diff.
+artifacts:
+  - id: invariant-spec
+    type: spec
+    label: coinpurse balance invariant and the complete writer set
+    content: |
+      coinpurse balance model (authoritative).
+
+      INVARIANT (B1): for every account, accounts.cached_balance MUST always equal
+      SUM(ledger_entries.amount) over that account's rows. ledger_entries is the source of
+      truth; cached_balance is a denormalized running total kept in step with it. Every
+      function that changes cached_balance MUST, in the same operation, insert a matching
+      row into ledger_entries carrying the same signed amount. A function that moves
+      cached_balance without an equal ledger_entries row breaks B1.
+
+      COMPLETE WRITER SET: exactly four functions may write accounts.cached_balance —
+      postEntry, reverseEntry, applyInterest, and applyHold. There are no other writers of
+      cached_balance anywhere in the service; triggers and raw SQL updates are prohibited by
+      policy. This is the complete and exhaustive list.
+
+      READERS (never write cached_balance): the reconciliation job, transferOut's
+      sufficiency check, and the statement builder read cached_balance but MUST NOT modify
+      it. applyHold records holds in a separate holds table and does not change
+      cached_balance at all.
+  - id: ledger-schema
+    type: config
+    label: coinpurse tables (excerpt)
+    content: |
+      -- accounts: one row per wallet.
+      --   account_id text primary key
+      --   cached_balance numeric(12,2) not null   -- denormalized running total (B1)
+      -- ledger_entries: append-only source of truth for balance.
+      --   entry_id uuid primary key
+      --   account_id text not null
+      --   amount numeric(12,2) not null            -- signed; credit > 0, debit < 0
+      --   kind text not null                        -- deposit|purchase|reversal|transfer
+      -- interest_log: monthly interest audit rows. NOT summed into the balance invariant;
+      --   this table is outside SUM(ledger_entries.amount).
+      --   log_id uuid primary key
+      --   account_id text not null
+      --   credited numeric(12,2) not null
+      -- holds: pending authorizations; separate from cached_balance entirely.
+  - id: writers-code
+    type: code
+    label: the four cached_balance writers
+    content: |
+      // coinpurse/balance.ts — the only functions permitted to write cached_balance.
+
+      export async function postEntry(acct, amount, kind) {
+        // normal path: debit or credit. Writes ledger row AND moves cached_balance by the
+        // same signed amount, so B1 is preserved.
+        await db.ledger_entries.insert({ account_id: acct, amount, kind });
+        await db.accounts.update(acct, { cached_balance: sql`cached_balance + ${amount}` });
+      }
+
+      export async function reverseEntry(acct, original) {
+        // refund/undo: inserts a compensating ledger row of the opposite sign and moves
+        // cached_balance by that same opposite amount.
+        const comp = -original.amount;                // e.g. original -30.00 -> comp +30.00
+        await db.ledger_entries.insert({ account_id: acct, amount: comp, kind: 'reversal' });
+        await db.accounts.update(acct, { cached_balance: sql`cached_balance + ${-original.amount}` });
+      }
+
+      export async function applyInterest(acct, credited) {
+        // monthly interest. Moves cached_balance up by `credited`.
+        await db.interest_log.insert({ account_id: acct, credited });
+        await db.accounts.update(acct, { cached_balance: sql`cached_balance + ${credited}` });
+      }
+
+      export async function applyHold(acct, amount) {
+        // authorization hold. Recorded in holds; does NOT touch cached_balance.
+        await db.holds.insert({ account_id: acct, amount, state: 'active' });
+      }
+  - id: interest-diff
+    type: diff
+    label: change to applyInterest shipped on 2026-06-30
+    content: |
+      # commit "move interest into its own audit table for finance reporting"
+      # coinpurse/balance.ts  applyInterest
+
+        export async function applyInterest(acct, credited) {
+      -   // v3: interest is a normal ledger credit, summed into the balance.
+      -   await db.ledger_entries.insert({ account_id: acct, amount: credited, kind: 'interest' });
+      +   // v4: interest now audited in interest_log for the finance team.
+      +   await db.interest_log.insert({ account_id: acct, credited });
+          await db.accounts.update(acct, { cached_balance: sql`cached_balance + ${credited}` });
+        }
+      # Only the destination table changed (ledger_entries -> interest_log). The
+      # cached_balance += credited line was left unchanged.
+  - id: event-trace
+    type: log
+    label: account A-42 operation trace with running quantities
+    content: |
+      # columns: time | op | ledger_sum(after) | cached_balance(after) | note
+      09:00 postEntry(+100.00 deposit)   ledger_sum=100.00 cached=100.00  # B1 holds
+      09:05 postEntry(-30.00 purchase)   ledger_sum= 70.00 cached= 70.00  # B1 holds
+      09:10 reverseEntry(original -30.00) ledger_sum=100.00 cached=100.00 # comp +30.00 both sides; B1 holds
+      09:20 applyInterest(+1.50)         ledger_sum=100.00 cached=101.50  # interest_log row written; NO ledger row -> B1 FIRST BROKEN here (+1.50)
+      09:40 transferOut(-40.00)          ledger_sum= 60.00 cached= 61.50  # sufficiency check read cached=101.50, allowed it; postEntry(-40) consistent on both sides
+      10:00 reconciliation run           ledger_sum= 60.00 cached= 61.50  # FLAGS mismatch of +1.50 (first observation, not first cause)
+      10:05 statement build              prints balance 61.50             # read-only; prints the already-wrong number
+  - id: recon-report
+    type: table
+    label: nightly reconciliation output
+    content: |
+      account | cached_balance | sum_ledger_entries | drift  | first_flagged
+      --------|----------------|--------------------|--------|--------------
+      A-42    | 61.50          | 60.00              | +1.50  | 2026-07-01
+      A-19    | 250.00         | 250.00             |  0.00  | -
+      A-88    | 18.25          | 15.25              | +3.00  | 2026-07-01
+      # drift = cached_balance - sum_ledger_entries. Positive drift = cached is too high.
+      # A-42 drift 1.50 equals one interest credit; A-88 drift 3.00 equals two interest
+      # credits since 2026-06-30. Accounts with no interest since then show zero drift.
+  - id: oncall-note
+    type: note
+    label: on-call triage thread
+    content: |
+      Triage guesses during the incident (record only; not all correct):
+      - "The reconciliation job is double-reading and inventing 1.50." — But reconciliation
+        only computes SUM(ledger_entries) and compares; it never writes cached_balance
+        (invariant-spec READERS). It reports the drift; it does not create it.
+      - "transferOut corrupted A-42 when it moved 40.00 out." — transferOut's postEntry
+        wrote -40.00 to BOTH ledger_entries and cached_balance (event-trace 09:40), so it is
+        invariant-preserving; it merely read an already-inflated cached_balance to approve
+        the transfer.
+      - "reverseEntry's double-negative `+= -original.amount` is obviously the bug." — the
+        trace at 09:10 shows both sides moved by +30.00 and B1 still held afterward.
+      - "cached_balance is the real balance; the ledger rows are just stale history." —
+        inverts the invariant; invariant-spec makes ledger_entries the source of truth.
+      Reminder: the only writers of cached_balance are the four in invariant-spec; look for
+      the one that moved cached_balance without an equal ledger_entries row.
+tags: [state-corruption, ledger, invariant, debugging, wallet]

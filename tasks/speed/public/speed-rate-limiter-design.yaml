@@ -1,0 +1,43 @@
+id: speed-rate-limiter-design
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: hard
+title: Implement a Token-Bucket Rate Limiter and Trace Its Behavior
+summary: >-
+  Write a token-bucket rate limiter to a precise spec, then walk a given request timeline step by step
+  to state which requests are allowed or rejected and the tokens remaining.
+prompt: |
+  Using [bucket-spec], implement the limiter and then apply it to [request-trace].
+
+  1. Implement `class TokenBucket` in TypeScript with `tryRemove(now: number, cost = 1): boolean`.
+  2. For the eight timestamped requests in [request-trace], produce a table with columns:
+     request #, time, tokens-before, allowed?, tokens-after. Show the refill arithmetic for at least
+     two of the steps.
+artifacts:
+  - id: bucket-spec
+    type: spec
+    label: Token bucket
+    content: |
+      - capacity = 5 tokens; refillRate = 1 token per 1000 ms
+      - the bucket starts full (5 tokens) at t = 0, with lastRefill = 0
+      - on each call, refill first:
+          stored = min(capacity, stored + (now - lastRefill) / 1000 * refillRate)
+          lastRefill = now
+      - tokens are fractional internally
+      - tryRemove(now, cost): refill, then if stored >= cost subtract cost and return true,
+        otherwise leave stored unchanged and return false
+  - id: request-trace
+    type: table
+    label: Request timeline
+    content: |
+      request # | time(ms) | cost
+      1         | 0        | 3
+      2         | 200      | 2
+      3         | 500      | 1
+      4         | 900      | 1
+      5         | 1500     | 2
+      6         | 1600     | 1
+      7         | 4000     | 5
+      8         | 4200     | 1
+tags: [algorithms, rate-limiting, typescript]

@@ -1,0 +1,160 @@
+id: state-corruption-index-ghost
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Notevault Search Returns a Ghost Note That 404s When Opened
+summary: A note-taking app's search returns a note id that no longer exists, so opening the result 404s. Search looks guilty because it surfaces the bad id, the loader looks guilty because it 404s, and a full rebuild makes the problem vanish. Find the one writer whose ordering first leaves an orphaned index posting, separate it from the readers that only observe the corrupt index, and state the adequate versus the shallow fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (index-invariant, store-code,
+  writers-code, delete-order-diff, event-trace, bug-report). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix,
+  shallow-fix.
+
+  In the "notevault" service, searching for the term "mars" returns note n-7, but opening
+  n-7 returns 404. Do not stop at where the ghost is observed; trace to the writer where
+  the index invariant is FIRST violated.
+
+  1. State the index invariant precisely, and list the COMPLETE set of functions permitted
+     to write the in-memory inverted index, per the artifacts.
+
+  2. ROOT CAUSE. Name the single function whose execution first leaves a posting in the
+     index that points at a note absent from the store, and cite the exact ordering of
+     operations and the trace point where the orphan is created. Explain why that ordering
+     violates the invariant.
+
+  3. RED HERRINGS. Classify search() and the note loader. For each, explain whether it
+     corrupts the index or only reads / reports state that was already corrupt.
+
+  4. Explain whether indexNote's remove-then-add sequence on an update is the defect or is
+     invariant-preserving, and justify with the trace.
+
+  5. FIX ADEQUACY. Two fixes are on the table: (a) run rebuildIndex on a timer to
+     rebuild the whole index from the store periodically; (b) restore the ordering so the
+     note's terms are read and its postings removed BEFORE the note is deleted from the
+     store. Classify each as adequate-fix or shallow-fix and justify which durably restores
+     the invariant.
+
+  6. BLAST RADIUS. State exactly which notes leave ghost postings and which operations are
+     unaffected, tying it to delete-order-diff.
+artifacts:
+  - id: index-invariant
+    type: spec
+    label: notevault index invariant and the complete writer set
+    content: |
+      notevault search index model (authoritative).
+
+      INVARIANT (I1): the in-memory inverted index must stay consistent with the note
+      store. Formally: for every term t and every note id n in index.postings[t], the store
+      must contain a live note n AND that note's terms must include t. Equivalently, a
+      posting may exist only while its note exists and still contains the term. When a note
+      is deleted, all of its postings must be gone before or atomically with the store
+      deletion; a posting outliving its note is a ghost and violates I1.
+
+      COMPLETE WRITER SET: exactly three functions may mutate index.postings — indexNote
+      (on create/update), removeFromIndex (on delete), and rebuildIndex (full rebuild).
+      There are no other index mutators; nothing writes index.postings directly. This is
+      the complete and exhaustive list.
+
+      READERS (never mutate the index): search() reads index.postings to resolve a query.
+      The note loader reads the store by id. Neither writes the index.
+  - id: store-code
+    type: code
+    label: note store and index structures
+    content: |
+      // notevault/store.ts
+      // In-memory note store: id -> note. A note carries its tokenized terms.
+      //   type Note = { id: string; title: string; body: string; terms: string[] }
+      const notes = new Map<string, Note>();
+
+      export const store = {
+        get: (id: string): Note | undefined => notes.get(id),
+        put: (n: Note) => notes.set(n.id, n),
+        delete: (id: string) => notes.delete(id),
+        has: (id: string) => notes.has(id),
+      };
+
+      // Inverted index: term -> set of note ids that contain it.
+      export const index = { postings: new Map<string, Set<string>>() };
+  - id: writers-code
+    type: code
+    label: the three index writers and the delete path
+    content: |
+      // notevault/indexing.ts — the only functions that mutate index.postings.
+
+      export function indexNote(prev: Note | undefined, next: Note) {
+        // create or update: drop the old terms' postings (using prev, which still exists),
+        // then add the new terms' postings. On create, prev is undefined and only adds run.
+        for (const t of prev?.terms ?? []) index.postings.get(t)?.delete(next.id);
+        for (const t of next.terms) {
+          (index.postings.get(t) ?? index.postings.set(t, new Set()).get(t)!).add(next.id);
+        }
+      }
+
+      export function removeFromIndex(id: string) {
+        // reads the note to learn which posting lists to clean, then removes id from each.
+        const note = store.get(id);
+        for (const t of note?.terms ?? []) index.postings.get(t)?.delete(id);
+      }
+
+      export function rebuildIndex() {
+        // full rebuild from the store; O(all notes). Restores I1 for whatever is in the store now.
+        index.postings.clear();
+        for (const n of store.allLive()) for (const t of n.terms) {
+          (index.postings.get(t) ?? index.postings.set(t, new Set()).get(t)!).add(n.id);
+        }
+      }
+
+      export async function deleteNote(id: string) {
+        await store.delete(id);        // (see delete-order-diff for how this line moved)
+        removeFromIndex(id);
+      }
+  - id: delete-order-diff
+    type: diff
+    label: change to deleteNote shipped on 2026-07-02
+    content: |
+      # commit "make deletes durable by removing from the store first"
+      # notevault/indexing.ts  deleteNote
+
+        export async function deleteNote(id: string) {
+      -   // v2: clean the index while the note still exists, THEN delete it.
+      -   removeFromIndex(id);
+      -   await store.delete(id);
+      +   // v3: delete from the durable store first, then clean the index.
+      +   await store.delete(id);
+      +   removeFromIndex(id);
+        }
+      # removeFromIndex was left unchanged. It still calls store.get(id) to learn the note's
+      # terms — but after v3, by the time it runs the note is already gone from the store.
+  - id: event-trace
+    type: log
+    label: lifecycle trace for note n-7 (term "mars")
+    content: |
+      # index.postings["mars"] shown after each step.
+      t0 create n-7 terms=[mars,rover]  indexNote(undefined, n-7)   postings[mars]={n-7}      # I1 holds
+      t1 search "mars"                   -> returns [n-7]; store.get(n-7)=present -> opens OK   # I1 holds
+      t2 deleteNote(n-7)  step A: store.delete(n-7)                 store has no n-7
+      t2 deleteNote(n-7)  step B: removeFromIndex(n-7): store.get(n-7)=undefined -> terms=[] -> loops 0x
+                                   postings[mars]={n-7}  # ORPHAN CREATED: posting survives its note -> I1 FIRST BROKEN
+      t3 search "mars"                   -> returns [n-7]  (reads the orphaned posting)
+      t3 loader open n-7                 -> store.has(n-7)=false -> 404  (note is correctly gone)
+      t4 rebuildIndex()                  postings[mars]={}          # rebuild drops the orphan; masks it until the next delete
+  - id: bug-report
+    type: note
+    label: bug report and triage guesses
+    content: |
+      Report: search result "mars" -> n-7 opens to a 404. Triage guesses (record only):
+      - "search() is returning stale results; fix the search reader." — search() only reads
+        index.postings (index-invariant READERS); it faithfully returns what the index holds,
+        which is an orphaned posting. It does not create the orphan.
+      - "the loader is buggy for returning 404 on a real note." — the loader is correct: the
+        store genuinely no longer has n-7 (event-trace t3), so 404 is the right response.
+      - "indexNote's remove-then-add on updates is dropping/duplicating postings." — on an
+        update indexNote reads prev (which still exists) to remove old postings, so it is
+        consistent; the ghost arises only on the delete path.
+      - "rebuildIndex fixes it, so schedule it every 10 minutes and we are done." — rebuild
+        clears the orphan for whatever is currently in the store, but the very next
+        deleteNote re-creates an orphan (event-trace t2), so it drifts back.
+      Reminder: the only index writers are the three in index-invariant; look for the one
+      whose ordering leaves a posting pointing at a note the store no longer has.
+tags: [state-corruption, search-index, invariant, debugging, ordering]

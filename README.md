@@ -13,11 +13,12 @@
 </p>
 
 <p align="center">
-  <a href="https://bridgebench.ai">bridgebench.ai</a> &nbsp;&bull;&nbsp;
+  <a href="https://bridgebench.ai">Leaderboard</a> &nbsp;&bull;&nbsp;
+  <a href="#review-the-benchmark">Review</a> &nbsp;&bull;&nbsp;
+  <a href="#how-a-match-becomes-a-ranking">Methodology</a> &nbsp;&bull;&nbsp;
   <a href="#the-arenas">Arenas</a> &nbsp;&bull;&nbsp;
-  <a href="#autonomous-match-lifecycle">Methodology</a> &nbsp;&bull;&nbsp;
-  <a href="#task-packs">Tasks</a> &nbsp;&bull;&nbsp;
-  <a href="#contributing">Contributing</a>
+  <a href="docs/README.md">Docs</a> &nbsp;&bull;&nbsp;
+  <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
 <p align="center">
@@ -29,27 +30,30 @@
 
 ## What is BridgeBench?
 
-BridgeBench measures how models perform as vibe coding partners. Every task is a software-engineering scenario — source code, diffs, CI logs, API specs, migrations, telemetry, agent sessions — and every deliverable is a question a coding agent would actually face.
+BridgeBench measures how models perform as vibe coding partners. Every task is
+a software-engineering scenario built from artifacts such as source code,
+diffs, CI logs, API specs, migrations, telemetry, and agent sessions.
 
-V3 is **arena-first**: models compete head-to-head on the same task, three independent model judges choose the stronger answer blind, and every majority decision awards one point and one Elo update. There is no weighted aggregate score and no opaque formula — a ranking is exactly the sum of the match record behind it, and the journal that produced it is replayable line by line.
+Models compete head-to-head on the same task. Three independent model judges
+compare their answers blind, a majority selects the stronger response, and the
+winner earns one point plus one Elo update. The append-only match journal is
+the source of truth; leaderboards and API responses are derived views.
 
-It's built by [BridgeMind](https://bridgemind.ai), the agentic organization behind BridgeSpace, BridgeVoice, and BridgeAgent. We benchmark models because we ship with them daily — the leaderboard is the same data we use to pick our own teammates.
+BridgeBench is built by [BridgeMind](https://bridgemind.ai), the agentic
+organization behind BridgeSpace, BridgeVoice, and BridgeAgent. We use the same
+benchmark data to choose models for our own work.
 
-## Architecture
+## Start with the path you need
 
-```text
-public task pack ─┐
-                  ├─> arena runner ─> blind judge panel ─> append-only journal
-private overlay ──┘                                          │
-                                                             ├─> verifier ─> reports
-                                                             └─> publisher ─> bridgebench.ai
-```
+| Goal | Start here |
+| --- | --- |
+| Understand and audit a result | [Reviewing BridgeBench](docs/reviewing-bridgebench.md) |
+| Understand the full arena contract | [Methodology](docs/methodology.md) |
+| Run paid matches or operate the dashboard | [Operator guide](docs/operator-guide.md) |
+| Author tasks or change the engine | [Contributing](CONTRIBUTING.md) |
+| Find a specific concept | [Documentation index](docs/README.md) or [glossary](docs/glossary.md) |
 
-The local journal is the execution record. Snapshots, leaderboards, and the bridgebench.ai API are derived views. `arena verify` validates every journal line and replays Elo before a report or publish operation trusts it.
-
-Public task prompts live in this repository. Active hidden references live in a separate private overlay. They are sent to the configured model judges during a match and may be synced to the private API store by maintainers. Withholding them reduces benchmark contamination risk; it does not make third-party processing impossible. The complete boundary is documented in [Private packs](docs/private-packs.md).
-
-## Public-clone quickstart
+## Review the benchmark
 
 Requirements: Node.js 20.19 or newer and npm 10 or newer.
 
@@ -57,184 +61,148 @@ Requirements: Node.js 20.19 or newer and npm 10 or newer.
 git clone https://github.com/bridge-mind/bridgebench.git
 cd bridgebench
 npm ci
-npx playwright install chromium
-
-npm run tasks -- validate
-npm run check
-npm run arena -- verify --category reasoning --journal test/fixtures/journals/valid.jsonl
+npm run review
 ```
 
-These commands need no API key and no private overlay. They validate the public packs, run offline checks, and replay a synthetic journal.
+`npm run review` is the shortest credential-free audit path. It:
+
+1. checks documentation links, navigation, commands, and fixture references;
+2. validates all 36 public tasks and their pack invariants;
+3. verifies a bundled journal line against its run manifest;
+4. replays the majority outcome, point, and Elo update.
+
+It needs no API key, private task overlay, network request, or paid model call.
+The fixture is synthetic and tests the audit mechanism, not model quality.
+Follow the [reviewer walkthrough](docs/reviewing-bridgebench.md) to connect
+that mechanism to a real public task and published results.
+
+## How a match becomes a ranking
+
+```text
+public task ─┐
+             ├─> two competitors ─> anonymous answers ─┐
+hidden rubric┘                                         ├─> three blind judges
+                                                      │
+                                                      └─> majority decision
+                                                               │
+                                                               v
+run manifest ─────────────────────────────────────> journal + Elo
+                                                               │
+                                                               v
+                                                   verified leaderboard
+```
+
+1. A seeded scheduler selects a public task and two distinct competitors while
+   balancing exposure.
+2. Both competitors receive byte-identical task context and run concurrently.
+3. Each judge receives the task, hidden reference, and two anonymous answers.
+4. Model and provider identities are redacted, and answer order is independently
+   permuted for each judge.
+5. Two valid votes decide the winner. One exhausted competitor failure is a
+   forfeit; two failures or no majority produce a no-contest.
+6. A decided match awards one point and updates Elo from an initial rating of
+   1000 with K=32.
+7. The complete evidence record is appended before reports are rebuilt.
+
+Candidate answers are untrusted input. Judge prompts reject embedded
+instructions, verdicts are schema validated, malformed verdicts abstain after
+one retry, and model-provided code or commands are never executed.
+
+The [methodology](docs/methodology.md) specifies scheduling, anonymization,
+voting, failure outcomes, and replay rules in full.
 
 ## The arenas
 
-Two independent arenas ship today, each with its own task pack, journal, Elo ladder, and leaderboard:
+Each arena has its own task pack, journal, Elo ladder, and leaderboard. Ratings
+never cross categories.
 
-| Arena             | What it measures                                                                                                                                                                      | What a winning answer looks like                                                                                                                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Reasoning**     | Inference depth. Every task is fully determinable from its artifacts — interlocking specs, logs, code, and configs with planted decoy paths.                                          | Derives the one defensible resolution for every numbered deliverable, with the inference chain and artifact citations.                                                                                 |
-| **Hallucination** | Epistemic discipline. Tasks are seeded with false premises, missing evidence, fabrication bait (plausible entities that don't exist), conflicting sources, and near-duplicate values. | Answers the supported deliverables exactly, corrects false premises with the contradicting evidence, names precisely what is missing — and never invents entities, values, quotes, or blended figures. |
+| Arena | What it measures | A strong answer |
+| --- | --- | --- |
+| **Reasoning** | Inference across interlocking software artifacts with planted decoys. Every deliverable is determinable from the provided evidence. | Derives the defensible resolution, explains the inference chain, and cites the controlling artifacts. |
+| **Hallucination** | Epistemic discipline under false premises, missing evidence, fabrication bait, conflicts, and near-duplicate facts. | Answers supported items, corrects false premises, identifies missing evidence precisely, and does not invent. |
+| **Security** | Defensive analysis of fictional code that hides one real, reachable vulnerability among benign look-alikes, false positives, and shallow patches. No code is executed. | Proves the reachable source-to-sink or guard-bypass chain with cited evidence and calibrated severity, and declines to flag the benign traps. |
+| **BullShit** | Premise integrity under seeded nonsense — fabricated concepts, crossed domains, impossible quantities, reversed causality, pseudoscience, and loaded assumptions mixed with legitimate deliverables. | Names exactly what is nonsensical and why, corrects the premise to the nearest legitimate question and answers it, and still answers the sound deliverables instead of blanket-refusing. |
+| **Refactoring** | Behavior preservation under a transformation goal, with candidate rewrites that subtly change ordering, scope, contracts, or an edge case. | Traces equivalence across every affected path, cites the location and mechanism, and flags the rewrite that silently changes observable behavior. |
+| **Debugging** | Root-cause isolation from a failing system's evidence, among red-herring causes and shallow fixes. | Traces symptom to origin with cited evidence, names the one defensible root cause, and picks the fix that holds without regressing. |
+| **Generation** | Specification conformance across candidate implementations, where each near-miss violates one stated constraint or edge case. | Cites the exact spec clause and the distinguishing input, and identifies the implementation that meets every requirement. |
+| **Speed** | Raw latency: both models answer the same task and the faster completion wins. Decided by measured time-to-first-token and throughput — no judges. | Answers correctly and efficiently; the arena records TTFT and tokens-per-second and awards the win to the lower total completion time. |
 
-The two arenas share the arena contract (pairing, blind three-judge panel, Elo) but never share ratings: a model's reasoning Elo says nothing about its hallucination Elo. Judges receive category-specific instructions — the reasoning panel punishes hedging on determinable questions, the hallucination panel weighs fabrication heaviest and treats blanket refusal as an error too.
+Each judged public pack contains 12 expert tasks across six category-specific
+clusters; the Speed pack contains 12 public-only workload tasks. See
+[Task authoring](docs/task-authoring.md) for their schemas, clusters, and
+enforced balance.
 
-The same contract expands to security, debugging, and refactoring arenas next.
+## What evidence backs a result?
 
-## Match lifecycle
+| Evidence | Role | What a reviewer can check |
+| --- | --- | --- |
+| Public task | Exact prompt and artifacts sent to both competitors | Content, version, category, cluster, and `publicHash` |
+| Run manifest | Identity of the run | Seed, roster, task hashes, prompt policies, methodology, and engine version |
+| Match journal | Append-only execution record | Full responses, judge votes and rationales, outcome, cost, point, and Elo before/after |
+| Hidden reference | Expected resolution, evidence requirements, traps, and rubric | Its hash while active; its full contents after pack retirement |
+| Snapshot and leaderboard | Convenient derived views | Rebuild them only after the journal verifies |
 
-1. A seeded scheduler selects one task and two distinct competitors while balancing exposure. The same seed always produces the same schedule.
-2. Both competitors receive identical task context and run concurrently. They don't know they're in a match.
-3. One exhausted competitor failure forfeits; two failures create a no-contest.
-4. Each judge independently receives the task, hidden rubric, and anonymous answers.
-5. Explicit model IDs, canonical slugs, provider names, and model-family names are redacted from responses; judges see only `Model A` and `Model B`.
-6. A/B order is independently permuted per judge to reduce position bias.
-7. Two valid votes decide the winner. Judges never see identities, ratings, costs, or other votes.
-8. The winner earns one point. Elo starts at 1000 and uses K=32.
-9. The complete result is appended to the journal before reports are rebuilt. Snapshots are derived, never authoritative.
+`arena verify` validates every journal line and replays Elo before reports,
+resume state, or publishing trust it. Read [Replay the Elo](docs/replay-elo.md)
+for the algorithm and exact audit command.
 
-Candidate answers are treated as untrusted data. Judge prompts explicitly reject instructions embedded in answers; structured verdicts are schema validated; malformed verdicts get one retry and then abstain. No generated code or model-provided command is ever executed.
+### What verification does not prove
 
-The full protocol — scheduling math, anonymization rules, vote resolution, drift detection — is in [docs/methodology.md](docs/methodology.md).
+Journal verification proves internal consistency and detects inconsistent
+edits, within-run reordering, task/manifest mismatch, and incorrect rating
+math. It does not authenticate the publisher or rule out a coordinated rewrite
+of the journal and manifest. It also cannot prove that a model judge made the
+best qualitative choice, that hidden references never reached a third-party
+provider, or that one aggregator represents direct provider behavior.
 
-## Model roster and transport
+All requests currently travel through OpenRouter using pinned model slugs.
+Active hidden references are sent to the configured judges and are withheld
+from the public repository until their pack retires. The
+[reviewer guide](docs/reviewing-bridgebench.md#what-the-evidence-proves) and
+[private-pack boundary](docs/private-packs.md) describe these limitations
+without claiming more than the evidence supports.
 
-All requests go through [OpenRouter](https://openrouter.ai) using exact, pinned model slugs. `latest` aliases are prohibited. Before a paid run, the CLI verifies each ID and canonical slug against OpenRouter and confirms that judges still support structured output.
-
-The arena measures models _through one aggregator's routing_, not direct provider APIs. Every competitor and judge uses the same transport. OpenRouter's per-generation records (`arena generation <id>`) provide an independent accounting source for tokens, cost, and provider routing.
-
-The current roster and request policies are defined once in [`src/models.ts`](src/models.ts). Judges are never eligible competitors.
-
-## Maintainer/operator setup
-
-Paid runs require both:
-
-1. `OPENROUTER_API_KEY` in the process environment;
-2. `BRIDGEBENCH_PRIVATE_DIR` pointing to the private-pack checkout.
-
-Set an account-level spending limit before running matches. Never commit either value.
-
-## Run an arena
-
-```bash
-# Reasoning: 12 matches, reproducible seed, $25 stop boundary
-npm run arena -- run --category reasoning
-
-# The hallucination arena — same contract, its own tasks, journal, and Elo
-npm run arena -- run --category hallucination
-
-# Custom batch
-npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40
-
-# Sol/Fable pilot — repeat --competitor to set an explicit roster
-npm run arena -- run --category reasoning \
-  --competitor openai/gpt-5.6-sol \
-  --competitor anthropic/claude-fable-5
-
-# Resume the exact deterministic schedule after interruption or budget stop
-npm run arena -- run --category hallucination --matches 24 --seed july-calibration --max-cost-usd 40 --resume
-
-# Rebuild reports for both arenas without API calls (or one: --category reasoning)
-npm run report
-
-# Verify before publishing
-npm run arena -- verify --category hallucination
-
-# Maintainers: an explicit API target and category are required
-# Set BRIDGEBENCH_API_URL and BRIDGEBENCH_ADMIN_KEY privately first.
-npm run tasks -- publish --category hallucination
-npm run arena -- publish --category reasoning
-```
-
-Category, seed, match count, model roster, task hashes, prompt policy, methodology, and engine version define the run manifest. `--resume` continues only the matching deterministic schedule.
-
-Without `--competitor`, runs use every enabled competitor. An explicit roster must contain at least two unique, enabled competitor models. Press Ctrl-C once to cancel: active model calls abort, completed matches stay journaled, and the same command resumes with `--resume`.
-
-Results are local, ignored by Git, and kept per arena:
+## Repository map
 
 ```text
-results/<category>/journal.jsonl      # append-only execution record
-results/<category>/runs/<run-id>.json # versioned run manifest
-results/<category>/snapshot.json      # verified, derived view
-results/<category>/leaderboard.md
-```
-
-A repeated schedule is rejected unless `--resume` is explicit. See [Replay Elo](docs/replay-elo.md) to audit a published ladder.
-
-## Local dashboard
-
-A BridgeMind-branded control surface split into three views — Arena, Leaderboard, and Matches — with a live competitor + anonymous-judge stage during runs, durable match history with raw responses and judge rationales, and an SSE activity feed.
-
-```bash
-npm run dashboard
-# Open http://127.0.0.1:4317
-```
-
-The control plane binds only to `127.0.0.1`. The API key stays in the server process and is never serialized to the browser. State-changing requests require a same-origin JSON request, only one run may be active at once, and the browser renders model output as escaped text.
-
-## Task packs
-
-Both packs hold 12 expert-difficulty tasks across six category-specific clusters (two tasks each). Tasks are deliberately heavyweight — five to eight interlocking artifacts (~9–18k characters) and four to ten numbered deliverables — so a match exercises real deliberation budget instead of a one-screen skim.
-
-**Domain invariant: every task is a coding / software-engineering scenario.** No generic business ops. Public prompts live under `tasks/<category>/public/`; hidden references live in the private overlay. Every journal line records the SHA-256 of both task halves, so task drift is externally detectable.
-
-Cluster definitions, the public/private YAML schemas, and the authoring rules (including how decoys map to disqualifying errors) are in [docs/task-authoring.md](docs/task-authoring.md).
-
-## Debugging & the continuous improvement loop
-
-Every arena and dashboard run writes a structured, key-redacted JSONL log to `results/<category>/logs/`. The triage command analyzes journals for anomalies — failed requests, suspiciously fast responses, truncation, judge abstentions — and a health stop halts runs that are mostly producing failures.
-
-```bash
-npm run arena -- run --debug        # mirror every log entry to the console
-npm run triage                      # analyze the journal (auto-printed after every run)
-npm run arena -- generation gen-... # OpenRouter's ground-truth record for any journaled generation
-```
-
-The loop: run → read the auto-printed health report → chase flags with the run log → fix the task, prompt, or model policy → rerun with a fresh seed → compare triage reports.
-
-## Repository layout
-
-```
 bridgebench/
-├── src/
-│   ├── cli.ts             # thin executable entrypoint
-│   ├── commands.ts        # injectable CLI construction and command handlers
-│   ├── arena.ts           # match loop: forfeits, health stop, budget stop
-│   ├── scheduler.ts       # seeded, exposure-balanced deterministic scheduling
-│   ├── judges.ts          # anonymization, per-judge A/B permutation, majority vote
-│   ├── tasks.ts           # pack loader + public/private overlay resolution
-│   ├── verification.ts    # schema validation + deterministic journal replay
-│   ├── elo.ts / store.ts / report.ts / triage.ts
-│   └── dashboard/         # localhost-only control plane (SSE)
-├── tasks/
-│   ├── reasoning/public/       # 12 public task prompts
-│   └── hallucination/public/   # 12 public task prompts
-├── ui/                    # local dashboard SPA (React + Vite)
-├── test/                  # deterministic offline tests and fixtures
-└── docs/                  # indexed protocol and contributor references
+├── src/                         arena, judging, verification, reports, CLI
+├── tasks/<category>/public/     public task packs
+├── test/fixtures/               deterministic journals and run manifests
+├── ui/                          localhost dashboard
+├── docs/                        reviewer, protocol, authoring, and operator guides
+└── CONTRIBUTING.md              code, task, audit, and documentation workflow
 ```
 
-## Development
+Canonical executable sources:
+
+- Model roster and request policy: [`src/models.ts`](src/models.ts)
+- Category and methodology constants: [`src/contracts/categories.ts`](src/contracts/categories.ts)
+- Task loading and pack invariants: [`src/tasks.ts`](src/tasks.ts)
+- Journal verification and replay: [`src/verification.ts`](src/verification.ts)
+
+## Develop and contribute
+
+The full public-clone quality gate uses a mock OpenRouter gateway and requires
+no model API credentials:
 
 ```bash
+npm ci
+npx playwright install chromium
 npm run check
 ```
 
-`npm run build` also emits the versioned `bridgebench/contracts` subpath from `src/contracts/index.ts`. This is a local build entry point only; Phase 1 adds no package-publishing step.
-
-Tests use a mock OpenRouter gateway and never spend credits — they pass from a fresh public clone with no API key and no private overlay. Live catalog validation and arena runs are operator-invoked only.
-
-## Contributing
-
-BridgeBench is open source and open to builders:
-
-- **Propose tasks.** Validate one public task with `npm run tasks -- validate --file <path>`, then open a task proposal.
-- **Audit a ladder.** Run `arena verify` against the published journal. File an audit report if it fails.
-- **Extend the contract.** New arenas (security, debugging, refactoring) reuse the same match lifecycle; the season-engine branch holds a provider layer and browser harness earmarked for future suites.
-
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [docs index](docs/README.md).
+Paid arena commands are operator-invoked only and are not part of pull-request
+validation. BridgeBench accepts code, public task proposals, methodology
+audits, and documentation fixes. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Project history
 
-This repository previously hosted the Season 1 _season-engine_ alpha: ten Three.js tasks scored in a browser and ranked by community A/B voting. That code remains on the [`season-engine-alpha`](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha) branch. Its results never mix with arena Elo.
+This repository previously hosted the Season 1 `season-engine` alpha: ten
+Three.js tasks scored in a browser and ranked by community A/B voting. That
+code remains on the
+[`season-engine-alpha` branch](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha).
+Its results never mix with arena Elo.
 
 ## License
 

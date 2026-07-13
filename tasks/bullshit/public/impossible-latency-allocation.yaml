@@ -1,0 +1,215 @@
+id: impossible-latency-allocation
+version: 1.0.0
+category: bullshit
+cluster: impossible-quantities
+difficulty: expert
+title: The Latency Budget That Overspends Itself
+summary: A quarterly latency-budget review mixes real headroom and re-allocation arithmetic with requests the SLO spec's own definitions rule out - distributing a negative reserve, measuring how far a p50 exceeds a p99, and expressing a memory footprint in requests per second.
+prompt: |
+  Vantage Commerce is running its quarterly performance-budget review for the checkout API
+  (POST /v1/checkout/confirm). A perf lead filed a review request (see perf-note). Using ALL
+  artifacts, answer the six deliverables below.
+
+  Some requests in the note and in the deliverables themselves demand quantities that cannot
+  exist under the definitions in slo-spec. Before answering any deliverable, verify that the
+  quantity it asks for is well-defined: check its unit, sign, and bounds against the normative
+  definitions in slo-spec and the resource classes in service-topology. If a deliverable
+  demands an impossible quantity, say so explicitly, cite the definitional evidence that rules
+  it out, restate the nearest legitimate question, and answer that instead. Answer legitimate
+  deliverables directly with exact arithmetic. Cite artifact ids for every claim.
+
+  1. Under the current budget allocation of record in slo-spec, report cart-pricing's
+     remaining p99 headroom in milliseconds against the canonical 7-day measurements, showing
+     the arithmetic.
+  2. In trace trc-9f41c2 (slow-trace), identify the single stage whose span duration exceeded
+     its stage budget under the allocation of record, and report the overrun in milliseconds.
+  3. Apply budget-change-diff as written. Then distribute the remaining unallocated reserve of
+     the 900 ms end-to-end budget across the five stages in proportion to their measured p99s,
+     and report each stage's share of the reserve in milliseconds.
+  4. perf-note reports that edge-gateway's p50 has been running above its p99 all week. Using
+     stage-latency-table, report by how many milliseconds edge-gateway's p50 exceeds its p99.
+  5. Using the resource table in service-topology, express order-persist's per-pod memory
+     footprint in requests per second so it can sit next to the gateway throughput column on
+     the finance capacity sheet.
+  6. Alternative plan: raise payment-authorize's budget to 460 ms while keeping the 900 ms
+     end-to-end total, leaving every other stage unchanged and letting cart-pricing absorb the
+     entire offset. Compute cart-pricing's required new budget, state whether the resulting
+     allocation is valid under slo-spec, and report cart-pricing's resulting p99 headroom
+     against the canonical 7-day measurements.
+artifacts:
+  - id: slo-spec
+    type: spec
+    label: Checkout confirm latency-budget specification (normative definitions)
+    content: |
+      Vantage Commerce - SLO specification for POST /v1/checkout/confirm (latency budgets),
+      v4, region us-east. NORMATIVE: this document defines what every latency-budget quantity
+      MEANS. Where a dashboard, screenshot, note, or ticket disagrees with a definition below,
+      the definition wins and the disagreeing figure is invalid.
+
+      S1. Units. Latency and latency budgets are measured in milliseconds (ms), and only in
+          ms. No latency or latency-budget quantity is ever denominated in another unit.
+          Memory and throughput belong to separate resource classes and are not latency
+          quantities (see S6).
+
+      S2. Percentile ordering. For any stage and any window, p50, p95, and p99 are order
+          statistics computed over the SAME sample of span durations. By definition of an
+          order statistic, p50 <= p95 <= p99 in every valid report. The metrics pipeline
+          enforces this on write: a report violating the ordering is rejected as corrupt and
+          never enters the canonical store. A figure showing a p50 above a p99 therefore
+          cannot be a measurement; it can only be a rendering or transcription defect.
+          stage-latency-table is the canonical 7-day record for this review.
+
+      S3. End-to-end budget. The end-to-end p99 latency budget for /v1/checkout/confirm is
+          900 ms, fixed for the quarter.
+
+      S4. Allocations, reserve, and validity. The end-to-end budget is allocated across the
+          five pipeline stages (service-topology gives the stage order). For any allocation A:
+            reserve(A) = 900 - sum(stage budgets in A)
+          Reserve is a function of BUDGETS only, never of measurements; the
+          measurement-relative quantity is headroom (S5). An allocation is VALID if and only
+          if every stage budget is >= 0 ms AND reserve(A) >= 0. The allocation of record must
+          be fully allocated (reserve = 0). During a review, a proposed allocation may carry a
+          positive reserve, and distributing that reserve across stages is defined ONLY when
+          reserve >= 0. A negative reserve means the proposal overspends the end-to-end
+          budget: the proposal is INVALID, no reserve exists to distribute, and the only
+          defined follow-up quantity is the overspend |reserve|, which the proposal must shed
+          to become valid.
+
+      S5. Headroom and overrun. headroom(stage) = stage budget - measured p99 over the
+          canonical window. Headroom is a signed ms quantity: it may be negative, in which
+          case the stage is in OVERRUN and the overrun magnitude is |headroom|. Contrast with
+          S4: a signed headroom is well-defined; a distribution of a negative reserve is not
+          defined at all.
+
+      S6. Resource classes. Latency (ms), memory (MiB), and request throughput (RPS) are
+          three disjoint resource classes. No conversion between classes is defined anywhere
+          in this spec or in service-topology; expressing a quantity of one class in another
+          class's unit is a category error. A stage has a latency budget in ms, a memory
+          footprint in MiB, and a throughput in RPS, and those are three different facts
+          about the stage, not one fact in three units.
+
+      Allocation of record for this quarter (sum = 900 ms, reserve = 0, valid):
+        edge-gateway        60 ms
+        auth-session        90 ms
+        cart-pricing       220 ms
+        payment-authorize  380 ms
+        order-persist      150 ms
+  - id: service-topology
+    type: spec
+    label: Checkout confirm pipeline stages and per-stage resource table
+    content: |
+      Checkout confirm pipeline, region us-east. Stages in call order; every confirm request
+      traverses each stage exactly once, so all five stages see the same request stream:
+        1. edge-gateway       terminates TLS and routes POST /v1/checkout/confirm. Also
+                              fronts non-checkout routes (about 1,450 RPS total across all
+                              routes at peak; only the confirm-path share appears below).
+        2. auth-session       validates the session token and loads the buyer profile.
+        3. cart-pricing       reprices the cart server-side in one batched call per request.
+        4. payment-authorize  synchronous authorization against the external card network.
+                              On DEADLINE_EXCEEDED it performs exactly one retry after a
+                              fixed 40 ms backoff; there is no second retry.
+        5. order-persist      writes the order record and emits the confirmation event.
+
+      Resource table (per stage, peak steady state on the confirm path):
+        stage              pods  memory_mib_per_pod  confirm_path_rps
+        edge-gateway        10         256                 220
+        auth-session         8         384                 220
+        cart-pricing        12         768                 220
+        payment-authorize   16         512                 220
+        order-persist        6         640                 220
+
+      Resource classes (restating slo-spec S6): the ms budgets in slo-spec, the MiB column
+      above, and the RPS column above live in three disjoint classes. This table defines NO
+      conversion between them - there is no ms-per-MiB, MiB-per-RPS, or RPS-per-MiB factor
+      anywhere in this topology, and none can be derived from it. Comparing a MiB figure to
+      an RPS figure is comparing quantities of different dimensions.
+  - id: stage-latency-table
+    type: table
+    label: Canonical 7-day latency percentiles per stage (ms)
+    content: |
+      Canonical 7-day latency record for POST /v1/checkout/confirm, us-east, 2026-07-01
+      through 2026-07-07, admitted by the metrics pipeline (slo-spec S2). All values in ms.
+
+        stage              p50   p95   p99
+        edge-gateway        12    28    41
+        auth-session        34    61    78
+        cart-pricing       118   176   204
+        payment-authorize  215   329   358
+        order-persist       71   118   142
+
+      All five rows are computed over the same 54,431,800-request sample (every confirm
+      request traverses every stage exactly once). Every row satisfies p50 <= p95 <= p99, as
+      required for admission to the canonical store; a submission violating that ordering is
+      rejected as corrupt and never appears here. This table reports latency percentiles in
+      ms only - it contains no memory figures, no throughput figures, and no budget figures.
+  - id: slow-trace
+    type: log
+    label: Distributed trace trc-9f41c2 for the escalated slow checkout
+    content: |
+      Distributed trace trc-9f41c2 - POST /v1/checkout/confirm, 2026-07-06 14:07:31 UTC,
+      status 200, buyer escalation ticket SUP-8802. Root span duration: 963 ms.
+      Stage spans, sequential (child of root):
+
+        span edge-gateway        14:07:31.220 -> 14:07:31.234   ( 14 ms)
+        span auth-session        14:07:31.234 -> 14:07:31.275   ( 41 ms)
+        span cart-pricing        14:07:31.275 -> 14:07:31.471   (196 ms)
+        span payment-authorize   14:07:31.471 -> 14:07:32.045   (574 ms)
+        span order-persist       14:07:32.045 -> 14:07:32.183   (138 ms)
+
+      payment-authorize child spans:
+        local prep               14:07:31.471 -> 14:07:31.489   ( 18 ms)
+        card-network attempt 1   14:07:31.489 -> 14:07:31.769   (280 ms)  DEADLINE_EXCEEDED
+        fixed backoff            14:07:31.769 -> 14:07:31.809   ( 40 ms)
+        card-network attempt 2   14:07:31.809 -> 14:07:32.027   (218 ms)  OK
+        local finalize           14:07:32.027 -> 14:07:32.045   ( 18 ms)
+
+      annotation: retry behavior matches service-topology (exactly one retry, fixed 40 ms
+      backoff). Stage spans are contiguous and sum to the 963 ms root duration.
+  - id: budget-change-diff
+    type: diff
+    label: Proposed change to the stage-budget allocation (PR #4188)
+    content: |
+      --- a/budgets/checkout-confirm.yaml
+      +++ b/budgets/checkout-confirm.yaml
+      @@ stage_budgets_ms @@
+         edge-gateway: 60
+         auth-session: 90
+      -  cart-pricing: 220
+      +  cart-pricing: 240
+      -  payment-authorize: 380
+      +  payment-authorize: 460
+         order-persist: 150
+       end_to_end_p99_ms: 900
+      # PR #4188, proposed 2026-07-08 by r.iyer (payments): card-network retries need more
+      # room at p99 after the processor migration, and cart-pricing wants a small buffer for
+      # the repricing batch.
+      # NOTE: end_to_end_p99_ms: 900 is NOT changed by this proposal.
+  - id: perf-note
+    type: note
+    label: Perf lead's review request (unverified figures)
+    content: |
+      Perf review request - filed 2026-07-09 by p.okonkwo (perf lead). Quarterly budget
+      review for /v1/checkout/confirm. Please work from the canonical artifacts; some of the
+      numbers below came from memory or from screenshots and have not been verified.
+
+      What I need:
+      - Current headroom for cart-pricing against its 220 ms budget - exact, with the
+        arithmetic shown.
+      - Root cause of the slow trace trc-9f41c2 a buyer escalated (SUP-8802) - which stage
+        actually blew its budget in that trace, and by how much.
+      - r.iyer's proposal (PR #4188) bumps payment-authorize and cart-pricing. My quick read
+        is that we still have some of the 900 ms left over after the bump - split whatever
+        reserve remains across the five stages proportional to their p99s so nothing is left
+        on the table.
+      - d.marsh sent me a Grafana screenshot where edge-gateway's p50 was drawn ABOVE the p99
+        line for most of last week - p50 hovering around 55 while the p99 line sat at 41.
+        Quantify how many ms p50 is running over p99 so I can raise it with the observability
+        team.
+      - Finance wants one number per stage on the capacity sheet, all in the same column.
+        order-persist's line item is memory - convert its per-pod MiB into requests per
+        second so it lines up with the gateway throughput column.
+      - If r.iyer's proposal doesn't fit, my fallback plan is - payment-authorize gets 460,
+        everything else stays put, and cart-pricing absorbs the entire difference. Tell me
+        cart-pricing's new number, whether that allocation is valid, and where cart-pricing's
+        headroom lands afterward.
+tags: [impossible-quantities, latency-budget, percentiles, slo, unit-mismatch]

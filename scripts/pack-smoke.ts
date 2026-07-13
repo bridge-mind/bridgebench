@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 import { z } from 'zod';
 
+import { CATEGORIES } from '../src/contracts/categories.js';
+
 /**
  * Packaging smoke test: packs the tarball exactly as `npm publish` would,
  * asserts its contents (no raw src, no compiled tests, no private task
@@ -41,6 +43,9 @@ function assertContents(paths: readonly string[]): void {
     'dist/client.js',
     'dist/client.cjs',
     'dist/cli.js',
+    'docs/README.md',
+    'docs/operator-guide.md',
+    'docs/reviewing-bridgebench.md',
     'package.json',
     'README.md',
     'LICENSE',
@@ -55,7 +60,7 @@ function assertContents(paths: readonly string[]): void {
       failures.push(`PRIVATE TASK HALF SHIPPED: ${file}`);
     }
   }
-  for (const category of ['reasoning', 'hallucination']) {
+  for (const category of CATEGORIES) {
     const pack = paths.filter(
       (file) => file.startsWith(`tasks/${category}/public/`) && file.endsWith('.yaml'),
     );

@@ -4,6 +4,8 @@ BridgeBench accepts code, task proposals, methodology audits, and documentation 
 
 ## Before you start
 
+- Read [Reviewing BridgeBench](docs/reviewing-bridgebench.md) before auditing a
+  result or changing a public benchmark claim.
 - Read the [methodology](docs/methodology.md) before changing arena behavior.
 - Read [task authoring](docs/task-authoring.md) before proposing benchmark content.
 - Keep active hidden references out of issues, forks, commits, screenshots, and logs.
@@ -19,7 +21,12 @@ npx playwright install chromium
 npm run check
 ```
 
-The complete offline check requires no API key and no private overlay. Do not run paid arena commands as part of a pull request.
+The complete check requires no API key or private overlay and never makes a
+paid model request. Do not run paid arena commands as part of a pull request.
+
+For documentation-only work, `npm run docs:check` provides a fast check for
+broken links, navigation, documented commands, and fixture references. Run the
+full `npm run check` before submitting.
 
 ## Pull requests
 
@@ -52,13 +59,19 @@ Replacing a live task requires a pack-rotation plan so cluster balance stays int
 
 ## Audit a ladder
 
-Download the published journal and run:
+Run `npm run review` once to confirm the local public packs and verifier
+fixture, then download the published journal and run:
 
 ```bash
 npm run arena -- verify --category reasoning --journal ./journal.jsonl
 ```
 
-Use the audit-report issue form for reproducibility failures. Include the failing line number and verifier output; redact credentials and private paths.
+Follow the [reviewer guide](docs/reviewing-bridgebench.md#audit-a-published-ladder)
+for task-hash and qualitative vote checks. Use the
+[audit-report issue form](https://github.com/bridge-mind/bridgebench/issues/new?template=audit-report.yml)
+for reproducibility failures. Include the journal source, first failing line,
+verifier output, and reproduction command; redact credentials, active hidden
+references, and private paths.
 
 ## Report a security issue
 

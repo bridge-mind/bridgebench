@@ -1,0 +1,169 @@
+id: fix-adequacy-idempotency-race
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Duplicate Webhook Deliveries Double-Credit Accounts, With Four Candidate Fixes To Judge
+summary: A payment webhook double-credits accounts when the provider redelivers an event to two of three replicas at once. Four candidate fixes are on the table. Exactly one resolves the check-then-act race across replicas without reintroducing a global lock the team deliberately removed; one dedupes only within a process, one re-adds the removed lock, and one dedupes on a brittle heuristic. Judge each and name the disqualifying over-rejection of the schema-migration fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (requirements, current-code,
+  concurrency-trace, git-history, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix,
+  shallow-fix. A fix is ADEQUATE only if it resolves the root cause AND reintroduces no
+  regression the artifacts describe; any fix that dedupes only within one process, re-adds
+  a removed regression, or relies on a heuristic that can drop or double-count real events
+  is SHALLOW.
+
+  The "paylink" webhook endpoint credits accounts on payment.succeeded. Duplicate
+  deliveries are double-crediting. Judge the root cause and the four candidate fixes.
+
+  1. ROOT CAUSE. Name the single defect in current-code that allows one event to credit an
+     account twice, and explain the mechanism using concurrency-trace.
+
+  2. FIX VERDICTS. Classify EACH of fix-a, fix-b, fix-c, fix-d as adequate-fix or
+     shallow-fix, and for each give the exact mechanism that justifies the verdict (what it
+     dedupes, where it fails, or which described regression it reintroduces).
+
+  3. THE ADEQUATE FIX. Identify the single adequate fix and explain why it is exactly-once
+     across all three replicas AND still lets credits to different accounts proceed
+     concurrently.
+
+  4. WHY B IS NOT ADEQUATE. State which described regression fix-b reintroduces and cite the
+     history that shows it was deliberately removed.
+
+  5. OVER-REJECTION TRAP. State the requirement that makes rejecting the adequate fix
+     "because it needs a database migration / changes the schema" an incorrect
+     disqualification, and quote it.
+artifacts:
+  - id: requirements
+    type: spec
+    label: paylink webhook idempotency and throughput requirements
+    content: |
+      paylink webhook requirements (authoritative, complete):
+
+      G1 — EXACTLY-ONCE EFFECT. The provider delivers at-least-once and WILL redeliver the
+           same event_id, sometimes to different replicas simultaneously. Each unique
+           event_id MUST credit its account at most once across the entire fleet.
+      G2 — CONCURRENCY. Credits to DIFFERENT accounts (and distinct event_ids) MUST be able
+           to proceed concurrently; the endpoint must sustain fleet throughput. A fleet-wide
+           serialization of the handler is prohibited (see git-history).
+      G3 — CHANGE VECTOR. Schema migrations are the standard, supported way to change this
+           service. Adding a column or an index is additive and backward-compatible;
+           requiring a migration is NOT a reason to reject a fix.
+      The service runs 3 stateless replicas (r1, r2, r3) behind a load balancer; replicas
+      share the PostgreSQL database and share NO in-process memory. This is the complete set
+      of constraints on the fix.
+  - id: current-code
+    type: code
+    label: current webhook handler (buggy) and its table
+    content: |
+      // paylink/webhook.ts — current, buggy. check-then-act with no unique gate.
+      async function onPaymentSucceeded(evt) {
+        const seen = await db.query(
+          `SELECT 1 FROM processed_events WHERE event_id = $1`, [evt.eventId]);
+        if (seen.rowCount > 0) return;                       // already processed -> skip
+        await db.query(
+          `INSERT INTO processed_events(event_id) VALUES ($1)`, [evt.eventId]);
+        await db.query(
+          `UPDATE accounts SET balance = balance + $1 WHERE id = $2`,
+          [evt.amount, evt.accountId]);
+      }
+      // Table today (see also git-history):
+      //   processed_events(event_id text, processed_at timestamptz default now())
+      //   -- NOTE: event_id is a plain column. There is NO unique constraint/index on it.
+      // The SELECT and the INSERT are separate statements in autocommit; nothing serializes
+      // two concurrent handlers for the same event_id.
+  - id: concurrency-trace
+    type: log
+    label: two duplicate deliveries of event evt-55 (acct A-3, amount 20.00)
+    content: |
+      # A-3 starts at balance 100.00. evt-55 is delivered twice (at-least-once), to r1 and r2.
+      t=0.000 r1 recv payment.succeeded event_id=evt-55 acct=A-3 amount=20.00 (delivery 1)
+      t=0.001 r2 recv payment.succeeded event_id=evt-55 acct=A-3 amount=20.00 (delivery 2, duplicate)
+      t=0.002 r1 SELECT ... WHERE event_id=evt-55 -> 0 rows   (not yet processed)
+      t=0.003 r2 SELECT ... WHERE event_id=evt-55 -> 0 rows   (also sees not processed)
+      t=0.004 r1 INSERT processed_events(evt-55) -> ok; UPDATE accounts +20 -> balance 100->120
+      t=0.005 r2 INSERT processed_events(evt-55) -> ok (NO unique constraint, so it succeeds);
+                 UPDATE accounts +20 -> balance 120->140   ## DOUBLE CREDIT: 40 for one 20 payment
+      # Both handlers passed the SELECT before either INSERT committed (check-then-act race),
+      # and the missing unique constraint let both INSERTs land.
+  - id: git-history
+    type: note
+    label: relevant change history for the handler
+    content: |
+      Handler history (most recent first):
+      - 2026-05-02 "remove fleet-wide handler lock; it capped throughput at one webhook at a
+        time across all replicas and caused a 90s backlog during a payout burst (INC-4471).
+        Different accounts must process in parallel." The removed code was
+        `SELECT pg_advisory_lock(42)` at the top of the handler and an unlock at the end.
+        Re-introducing any fleet-wide/global lock re-creates INC-4471.
+      - 2026-04-10 "add processed_events audit table (event_id text, processed_at)". The
+        table was added WITHOUT a unique index on event_id; the idempotency check was left as
+        a SELECT-then-INSERT. This is the state current-code runs today.
+  - id: fix-a
+    type: diff
+    label: candidate fix A
+    content: |
+      # fix A: in-process dedup cache of seen event ids.
+        // paylink/webhook.ts
+      + const seenIds = new Set<string>();                 // per-process, in-memory
+        async function onPaymentSucceeded(evt) {
+      +   if (seenIds.has(evt.eventId)) return;
+      +   seenIds.add(evt.eventId);
+          const seen = await db.query(`SELECT 1 FROM processed_events WHERE event_id=$1`, [evt.eventId]);
+          if (seen.rowCount > 0) return;
+          await db.query(`INSERT INTO processed_events(event_id) VALUES ($1)`, [evt.eventId]);
+          await db.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`, [evt.amount, evt.accountId]);
+        }
+      # Each replica has its OWN seenIds set; replicas share no memory.
+  - id: fix-b
+    type: diff
+    label: candidate fix B
+    content: |
+      # fix B: take a global advisory lock around the whole handler.
+        async function onPaymentSucceeded(evt) {
+      +   await db.query(`SELECT pg_advisory_lock(42)`);     // one constant key for all events
+      +   try {
+            const seen = await db.query(`SELECT 1 FROM processed_events WHERE event_id=$1`, [evt.eventId]);
+            if (seen.rowCount > 0) return;
+            await db.query(`INSERT INTO processed_events(event_id) VALUES ($1)`, [evt.eventId]);
+            await db.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`, [evt.amount, evt.accountId]);
+      +   } finally { await db.query(`SELECT pg_advisory_unlock(42)`); }
+        }
+      # Key 42 is a single constant, so every webhook across the fleet serializes on it.
+  - id: fix-c
+    type: diff
+    label: candidate fix C
+    content: |
+      # fix C: make the INSERT the idempotency gate via a UNIQUE constraint.
+      # migration: CREATE UNIQUE INDEX processed_events_event_id_uq ON processed_events(event_id);
+        async function onPaymentSucceeded(evt) {
+      +   await db.tx(async (t) => {
+      +     const ins = await t.query(
+      +       `INSERT INTO processed_events(event_id) VALUES ($1)
+      +        ON CONFLICT (event_id) DO NOTHING`, [evt.eventId]);
+      +     if (ins.rowCount === 0) return;                  // duplicate: someone already inserted
+      +     await t.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`,
+      +       [evt.amount, evt.accountId]);
+      +   });
+        }
+      # The unique index makes exactly one INSERT win fleet-wide; the credit runs only for the
+      # winner, in the same transaction. No SELECT-then-INSERT gap; no global lock.
+  - id: fix-d
+    type: diff
+    label: candidate fix D
+    content: |
+      # fix D: heuristic dedup on (account, amount, minute bucket).
+        async function onPaymentSucceeded(evt) {
+      +   const bucket = Math.floor(Date.now() / 60000);
+      +   const dup = await db.query(
+      +     `SELECT 1 FROM credits WHERE account_id=$1 AND amount=$2 AND minute_bucket=$3`,
+      +     [evt.accountId, evt.amount, bucket]);
+      +   if (dup.rowCount > 0) return;                       // "looks like a repeat"
+          await db.query(`INSERT INTO processed_events(event_id) VALUES ($1)`, [evt.eventId]);
+          await db.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`, [evt.amount, evt.accountId]);
+      +   await db.query(`INSERT INTO credits(account_id, amount, minute_bucket) VALUES ($1,$2,$3)`,
+      +     [evt.accountId, evt.amount, bucket]);
+        }
+      # Dedup key is account+amount+minute, not event_id.
+tags: [fix-adequacy, idempotency, webhook, debugging, concurrency]

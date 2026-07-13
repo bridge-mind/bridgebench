@@ -154,6 +154,35 @@ export interface EloState {
   points: Record<string, number>;
 }
 
+/** Per-competitor latency measurements the speed arena decides matches by. */
+export interface SpeedMetric {
+  /** Time to first token: ms from request start to the first non-empty content delta. */
+  ttftMs: number;
+  /** Output tokens per second over the generation window: outputTokens / max(1e-3, (totalMs - ttftMs)/1000). */
+  tps: number;
+  /** Total wall-clock ms from request start to stream completion — the value that decides the winner. */
+  totalMs: number;
+  outputTokens: number;
+}
+
+/** Present only on 'speed-decided' matches; `a` is modelA's measurement, `b` is modelB's. */
+export interface SpeedMetrics {
+  a: SpeedMetric;
+  b: SpeedMetric;
+}
+
+const SpeedMetricSchema: z.ZodType<SpeedMetric> = z.object({
+  ttftMs: z.number().finite().nonnegative(),
+  tps: z.number().finite().nonnegative(),
+  totalMs: z.number().finite().nonnegative(),
+  outputTokens: z.number().finite().nonnegative(),
+});
+
+export const SpeedMetricsSchema: z.ZodType<SpeedMetrics> = z.object({
+  a: SpeedMetricSchema,
+  b: SpeedMetricSchema,
+});
+
 export interface MatchResult {
   methodologyVersion: string;
   runId: string;
@@ -170,7 +199,8 @@ export interface MatchResult {
     category?: BenchmarkCategory;
     cluster: string;
     publicHash: string;
-    privateHash: string;
+    /** Null for public-only packs (e.g. the speed arena), which have no hidden half. */
+    privateHash: string | null;
   };
   competitors: {
     modelA: string;
@@ -178,9 +208,11 @@ export interface MatchResult {
     responseA: CompetitorResponse;
     responseB: CompetitorResponse;
   };
-  outcome: 'judged' | 'forfeit' | 'no-contest';
+  outcome: 'judged' | 'forfeit' | 'no-contest' | 'speed-decided';
   winnerModelId: string | null;
   panel: PanelDecision | null;
+  /** Present only when outcome is 'speed-decided'; null (or absent) otherwise. */
+  speedMetrics?: SpeedMetrics | null;
   eloBefore: Record<string, number>;
   eloAfter: Record<string, number>;
   pointAwarded: boolean;
@@ -224,7 +256,7 @@ export const MatchResultSchema: z.ZodType<MatchResult> = z.object({
     category: BenchmarkCategorySchema.optional(),
     cluster: z.string().min(1),
     publicHash: z.string().min(1),
-    privateHash: z.string().min(1),
+    privateHash: z.string().min(1).nullable(),
   }),
   competitors: z.object({
     modelA: z.string().min(1),
@@ -232,9 +264,10 @@ export const MatchResultSchema: z.ZodType<MatchResult> = z.object({
     responseA: CompetitorResponseSchema,
     responseB: CompetitorResponseSchema,
   }),
-  outcome: z.enum(['judged', 'forfeit', 'no-contest']),
+  outcome: z.enum(['judged', 'forfeit', 'no-contest', 'speed-decided']),
   winnerModelId: z.string().min(1).nullable(),
   panel: PanelDecisionSchema.nullable(),
+  speedMetrics: SpeedMetricsSchema.nullable().optional(),
   eloBefore: NumericRecordSchema,
   eloAfter: NumericRecordSchema,
   pointAwarded: z.boolean(),

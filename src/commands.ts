@@ -134,7 +134,9 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
   const dependencies: CliDependencies = { ...defaultDependencies, ...overrides };
   const program = new Command()
     .name(PACKAGE_NAME)
-    .description('Autonomous BridgeBench arenas for reasoning and hallucination')
+    .description(
+      'Autonomous BridgeBench arenas: reasoning, hallucination, security, bullshit, refactoring, debugging, generation, and speed',
+    )
     .version(ENGINE_VERSION)
     .showHelpAfterError()
     .configureHelp({ sortOptions: true, sortSubcommands: true })
@@ -258,9 +260,12 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
       try {
         dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
         const store = dependencies.createStore(config.category);
+        // The speed arena is public-only: it has no hidden reference to load,
+        // and its matches are decided by latency, not by a judge panel.
+        const requirePrivate = config.category !== 'speed';
         const loaded = await dependencies
           .createTaskLoader(config.category)
-          .loadAll({ requirePrivate: true });
+          .loadAll(requirePrivate ? { requirePrivate: true } : {});
         const progressOutput: ArenaEventSink = (event) => {
           if (event.type !== 'match.completed') return;
           dependencies.stdout(

@@ -1,0 +1,149 @@
+id: event-envelope-wire-compat
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Which Event Producer Emits an Envelope the Frozen Signed-JSON Consumer Accepts
+summary: A frozen consumer accepts a signed Event envelope whose signature covers a canonical key order. Five producers are proposed; decoys break compatibility subtly — renaming ts to timestamp, emitting traceId as null instead of omitting it, or signing over insertion order not canonical order. One conformer shuffles the WIRE key order yet signs correctly. Classify each conforms/violates, separating the order that matters (signed bytes) from the one that does not (wire keys).
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (consumer-contract,
+  producer-a, producer-b, producer-c, producer-d, producer-e, judging-notes). Cite the
+  artifact id(s) for every claim. Do not compute any HMAC — per `judging-notes`, compare
+  each producer's emitted fields and its SIGNED key order against the consumer's declared
+  requirements.
+
+  Verdict vocabulary: a producer CONFORMS if the envelope it emits is ACCEPTED by the
+  frozen consumer (all required fields present with the right names/types/nullability, and
+  the signature verifies because it was computed over the declared canonical key order);
+  it VIOLATES otherwise.
+
+  1. For EACH producer (producer-a … producer-e), give a verdict: conforms or violates
+     (accepted or rejected by the consumer).
+
+  2. For every producer you mark VIOLATES, name the exact incompatibility (field-name,
+     nullability, or signed-key-order) and cite the specific consumer-contract requirement
+     it breaks.
+
+  3. State the complete set of producers whose envelopes the consumer accepts.
+
+  4. producer-e emits its JSON keys in a different ORDER than the canonical key order.
+     Does that break compatibility? Justify from the consumer-contract's statement about
+     wire key order versus signed key order.
+
+  5. A reviewer rejects producer-e and accepts producer-d, reasoning "the bytes on the
+     wire should be in canonical order." Correct them: of producer-e and producer-d, which
+     one's signature actually verifies, and why?
+artifacts:
+  - id: consumer-contract
+    type: spec
+    label: frozen consumer acceptance rules
+    content: |
+      The consumer is FROZEN. It accepts an Event envelope (a single JSON object) iff ALL
+      of the following hold. These rules are complete.
+
+      Required fields (must be present, with these EXACT names and types):
+        v      number, and it MUST equal 3 (the protocol version)
+        id     string
+        type   string, non-empty
+        ts     integer epoch milliseconds   (the field name is exactly "ts")
+        data   object, REQUIRED and non-null (may be an empty object {}, never null,
+               never omitted)
+        sig    string (the signature, see below)
+      Optional field:
+        traceId  MAY be present or omitted. If present it MUST be a string. It MUST NOT be
+                 null. (Absent trace => OMIT the key entirely; do not send traceId: null.)
+
+      Signature check:
+        sig must be HMAC-SHA256 over the CANONICAL serialization of the envelope with `sig`
+        excluded. The canonical serialization lists keys in this FIXED order (ascending
+        lexicographic), joined as key=value with `|`:
+            data | id | traceId | ts | type | v
+        traceId is included in the canonical string ONLY when it is present. The consumer
+        reconstructs this canonical string itself and verifies the HMAC.
+
+      Wire order vs signed order (read carefully):
+        - The order in which keys physically appear in the TRANSMITTED JSON object is
+          IRRELEVANT to acceptance. The consumer parses the JSON into a map and rebuilds
+          the canonical string in the fixed order above before verifying. Any wire key
+          order is fine.
+        - What MUST match is the order used to compute the SIGNATURE. A producer that signs
+          over a different key order than the canonical `data|id|traceId?|ts|type|v` will
+          produce an HMAC that does not verify, and the envelope is rejected.
+  - id: producer-a
+    type: code
+    label: producer-a
+    content: |
+      // producer-a — hmac(KEY, canonicalString); J = deterministic JSON of an object.
+      signedString() {
+        return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
+      }
+      // emitted envelope (no trace on this event, so traceId is omitted):
+      // {"v":3,"id":"e-1","type":"order.created","ts":1699999999000,
+      //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
+  - id: producer-b
+    type: code
+    label: producer-b
+    content: |
+      // producer-b — signs over the canonical order, but renames a wire field.
+      signedString() {
+        return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
+      }
+      // emitted envelope:
+      // {"v":3,"id":"e-2","type":"order.created","timestamp":1699999999000,
+      //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
+      // (the epoch-ms field is emitted as "timestamp")
+  - id: producer-c
+    type: code
+    label: producer-c
+    content: |
+      // producer-c — no trace on this event; still emits a traceId key.
+      signedString() {
+        return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
+      }
+      // emitted envelope:
+      // {"v":3,"id":"e-3","type":"order.created","ts":1699999999000,"traceId":null,
+      //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
+  - id: producer-d
+    type: code
+    label: producer-d
+    content: |
+      // producer-d — signs over the producer's own field-insertion order.
+      signedString() {
+        return `v=${this.v}|id=${this.id}|type=${this.type}|ts=${this.ts}|data=${J(this.data)}`;
+      }
+      // emitted envelope:
+      // {"v":3,"id":"e-4","type":"order.created","ts":1699999999000,
+      //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
+  - id: producer-e
+    type: code
+    label: producer-e
+    content: |
+      // producer-e — signs over the canonical order; emits keys in a different wire order.
+      signedString() {
+        return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
+      }
+      // emitted envelope (note the physical key order differs from canonical):
+      // {"sig":"<hmac over signedString()>","type":"order.created","v":3,
+      //  "data":{"amount":50},"id":"e-5","ts":1699999999000}
+  - id: judging-notes
+    type: note
+    label: how to judge (no HMAC computation needed; scope)
+    content: |
+      Scope: producer-a … producer-e are the COMPLETE set of proposals. Judge each against
+      the frozen consumer-contract only.
+
+      You do NOT need to compute any HMAC. Two checks decide each producer:
+        1. FIELDS ON THE WIRE: does the emitted envelope carry every required field under
+           its exact name (v, id, type, ts, data, sig), with data non-null present, v = 3,
+           and no traceId: null? A renamed field (e.g. timestamp for ts) means the required
+           field is absent. A traceId: null violates the optional-field nullability rule.
+        2. SIGNED KEY ORDER: read each producer's signedString(). If its key order equals
+           the canonical order data | id | (traceId) | ts | type | v, the signature will
+           verify; if the signedString() uses any other key order, the consumer's
+           recomputed canonical string differs, so the HMAC will not verify and the
+           envelope is rejected — even if all wire fields are correct.
+
+      Remember the contract's split: the PHYSICAL order of keys in the emitted JSON is
+      irrelevant (the consumer re-canonicalizes), but the order fed to signedString() is
+      what determines whether the signature verifies. Judge accordingly.
+tags: [wire-protocol, serialization, hmac, canonical-json, interface-compatibility, generation]

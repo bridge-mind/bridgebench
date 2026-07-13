@@ -2,6 +2,20 @@
 
 Every ranking BridgeBench publishes is the fold of an append-only match journal. This document specifies the full protocol that produces a journal line, so any published ladder can be audited or reproduced. The engine stamps every line with `methodologyVersion` (currently `arena-v0.3.0`, `src/contracts/categories.ts`); results from different methodology versions never mix silently.
 
+## What this contract establishes
+
+| Control | What it establishes | Deliberate limit |
+| --- | --- | --- |
+| Versioned run manifest and seeded scheduler | The planned roster, tasks, policies, ordering inputs, and schedule are reproducible | Model responses are not expected to be byte-identical across new API calls |
+| Byte-identical public context | Both competitors receive the same task evidence | Provider routing and model runtime behavior remain external dependencies |
+| Redaction, per-judge permutation, and isolated votes | Recorded decisions follow the benchmark's anonymity and position-bias controls | Model judges can still have shared biases or make a poor qualitative choice |
+| Task hashes and append-only journal | Claimed inputs can be tied to each line and inconsistent drift detected | The files do not authenticate the publisher or prevent a coordinated rewrite; active hidden references remain unavailable until retirement |
+| Fail-closed verifier | Schema, ordering, panel outcome, points, costs, manifests, and Elo replay consistently | Internal consistency does not independently prove semantic answer quality |
+
+The benchmark is reproducible at the **evidence and scoring** layer, not by
+promising deterministic model prose. [Reviewing BridgeBench](reviewing-bridgebench.md)
+walks through those guarantees and limitations using the bundled fixtures.
+
 ## Run identity and scheduling
 
 A **run** is deterministic from a versioned manifest:

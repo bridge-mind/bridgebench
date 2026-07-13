@@ -1,0 +1,214 @@
+id: taint-webhook-outbound-fetch
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Relaypoint Webhook Outbound-Fetch Taint Flow
+summary: >-
+  Relaypoint delivers webhooks to tenant-supplied callback URLs behind an
+  allowlist plus private-range guard. Trace every tenant URL to its outbound
+  fetch and classify each path. The primary delivery and icon fetch are guarded,
+  metadataUrl is never fetched, and an unguarded internal preview is loopback-only
+  — but the retry worker re-fetches the callback URL without re-running the guard.
+  Find the single reachable unvalidated fetch. Reachability reasoning only.
+prompt: |
+  You are reviewing "Relaypoint", a webhook delivery service. Tenants register hooks
+  with URLs; the service makes outbound HTTP requests to them. The only SSRF control is
+  url-guard's ensureDeliverableUrl(url), which enforces a callback host allowlist and
+  blocks private / loopback / link-local / metadata address ranges. Every outbound
+  request built from a tenant-supplied URL is supposed to pass that guard first.
+
+  Three tenant-supplied URL fields exist: callbackUrl (delivered to), iconUrl (fetched
+  for the dashboard), metadataUrl (stored for display). Answer each deliverable using
+  ONLY the supplied artifacts (delivery-controller, retry-worker, url-guard, icon-service,
+  deploy-config, route-map, service-note). Cite the artifact id(s) you rely on for every
+  claim. If a path is guarded, not a fetch sink, or not reachable from tenant input, say
+  so explicitly and cite why.
+
+  This is an analysis task: give reachability reasoning only. Do NOT write an SSRF payload,
+  a private-range target list, a working bypass, or step-by-step exploitation. The verdict
+  is the traced reachable path and its precondition, not an exploit.
+
+  Classify each source path as exactly one of: validated / unvalidated-reachable /
+  not-a-sink / unreachable — and give the file-to-file chain.
+
+  1. Classify the PRIMARY delivery path's use of `callbackUrl` (POST /hooks/:id/deliver).
+  2. Classify `iconUrl` (the dashboard icon fetch).
+  3. Classify `metadataUrl`.
+  4. Classify the RETRY worker's use of the callback URL.
+  5. The internal preview route fetches its URL without the guard. Rule on whether it is
+     reachable from tenant input, with evidence.
+  6. Name the ONE outbound fetch that is reachable from tenant input AND unvalidated, and
+     state the precondition under which a tenant steers it to a blocked target. Justify.
+  7. Give the fix that closes exactly that path so the retry cannot bypass the guard
+     (validate inside a shared fetch wrapper every path already calls).
+artifacts:
+  - id: delivery-controller
+    type: code
+    label: Relaypoint inbound trigger + primary delivery
+    content: |
+      // relaypoint/delivery.controller.ts — public API: hook CRUD + first delivery.
+      import { ensureDeliverableUrl } from './url-guard';
+      import { fetchOutbound } from './http';
+      import { enqueueRetry } from './retry-worker';
+      import { store } from './store';
+
+      // PATCH /hooks/:id — tenant edits their hook, including callbackUrl.
+      export async function updateHook(req, res) {
+        const hook = await store.updateHook(req.params.id, req.body); // callbackUrl editable
+        res.json({ id: hook.id });
+      }
+
+      // POST /hooks/:id/deliver — public: a tenant triggers delivery of their own hook.
+      export async function deliver(req, res) {
+        const hook = await store.getHook(req.params.id); // hook.callbackUrl is tenant-supplied
+        // PRIMARY PATH: validate before the first outbound request.
+        ensureDeliverableUrl(hook.callbackUrl);          // allowlist + private-range block
+        const result = await fetchOutbound(hook.callbackUrl, buildPayload(hook));
+        if (!result.ok) {
+          // Delivery failed: schedule a retry by hook id (no URL snapshot is stored).
+          await store.savePendingDelivery({ hookId: hook.id, attempts: 1 });
+          await enqueueRetry(hook.id);
+        }
+        res.json({ delivered: result.ok });
+      }
+
+      // GET /hooks/:id — dashboard detail. metadataUrl is echoed back as a plain
+      // string for display; it is never passed to fetchOutbound.
+      export async function getHookDetails(req, res) {
+        const hook = await store.getHook(req.params.id);
+        res.json({ id: hook.id, callbackUrl: hook.callbackUrl, metadataUrl: hook.metadataUrl });
+      }
+
+      // INTERNAL ONLY — mounted on the internal loopback listener (see deploy-config),
+      // not on the public router. Takes its URL from an ops query param, not tenant input.
+      export async function internalPreview(req, res) {
+        const result = await fetchOutbound(req.query.url, { method: 'GET' }); // no guard
+        res.send(result.body);
+      }
+  - id: retry-worker
+    type: code
+    label: Relaypoint retry worker (drains failed deliveries)
+    content: |
+      // relaypoint/retry-worker.ts — background worker; re-sends failed deliveries.
+      // Runs out-of-band on a timer (not on any HTTP listener). It is triggered only
+      // by enqueueRetry(hookId), which the primary deliver() path calls on failure.
+      import { fetchOutbound } from './http';
+      import { store } from './store';
+
+      export async function runRetry(hookId) {
+        const pending = await store.getPendingDelivery(hookId);   // { attempts }
+        const hook = await store.getHook(hookId);                 // reloads the CURRENT hook
+        // The callback URL was validated when the hook first fired. We re-send to the
+        // hook's current callbackUrl here and do NOT re-run ensureDeliverableUrl.
+        const result = await fetchOutbound(hook.callbackUrl, buildPayload(hook));
+        await store.updateAttempts(hookId, pending.attempts + 1);
+        if (!result.ok && pending.attempts + 1 < MAX_ATTEMPTS) {
+          await enqueueRetry(hookId); // reschedule
+        }
+        return result;
+      }
+  - id: url-guard
+    type: code
+    label: Relaypoint SSRF guard (the only outbound-URL validator)
+    content: |
+      // relaypoint/url-guard.ts — the ONLY SSRF control. Callers MUST invoke
+      // ensureDeliverableUrl(url) before any outbound request built from tenant input.
+      import { GuardError } from './errors';
+
+      export const CALLBACK_ALLOWLIST = [
+        'hooks.acme-tenant.example',
+        '*.callbacks.partner.example',
+      ];
+
+      export function ensureDeliverableUrl(raw: string): void {
+        const u = new URL(raw);
+        if (u.protocol !== 'https:') throw new GuardError('scheme');
+        if (!hostMatchesAllowlist(u.hostname, CALLBACK_ALLOWLIST)) throw new GuardError('host');
+        // Resolve and reject private, loopback, link-local, and metadata ranges.
+        for (const addr of resolveAll(u.hostname)) {
+          if (isPrivate(addr) || isLoopback(addr) || isLinkLocal(addr) || isMetadata(addr)) {
+            throw new GuardError('range');
+          }
+        }
+        // Returns normally only for an allowlisted host that resolves to public space.
+      }
+  - id: icon-service
+    type: code
+    label: Relaypoint dashboard icon fetcher
+    content: |
+      // relaypoint/icon-service.ts — fetches a hook's display icon for the dashboard.
+      import { ensureDeliverableUrl } from './url-guard';
+      import { fetchOutbound } from './http';
+
+      // Called when rendering the dashboard for a hook. iconUrl is tenant-supplied.
+      export async function fetchIcon(hook) {
+        ensureDeliverableUrl(hook.iconUrl);   // SAME guard as primary delivery
+        return fetchOutbound(hook.iconUrl, { method: 'GET' });
+      }
+  - id: deploy-config
+    type: config
+    label: Relaypoint network + worker bindings (production)
+    content: |
+      # relaypoint/deploy-config — listeners, workers, egress (production).
+      # COMPLETE: these are all listeners and workers the service runs. A route or
+      # worker not listed here is not mounted.
+      listeners:
+        public:                         # tenant-facing API, exposed to the internet
+          bind: 0.0.0.0:8443
+          routes: [POST /hooks, PATCH /hooks/:id, POST /hooks/:id/deliver, GET /hooks/:id]
+        internal:                       # ops-only; NOT routable from the internet
+          bind: 127.0.0.1:9090          # loopback; reachable only from the host / ops VPN
+          routes: [GET /internal/preview]
+      workers:
+        retry:
+          concurrency: 8
+          trigger: enqueueRetry         # enqueued only by the primary deliver() path
+          handler: runRetry             # relaypoint/retry-worker.ts
+      egress:
+        # The retry worker and primary delivery share one egress path. There is NO
+        # network-layer policy that re-blocks a callback URL at retry time; the guard
+        # in url-guard is the only control. If a code path skips it, nothing else stops it.
+        policy: none
+  - id: route-map
+    type: table
+    label: Relaypoint route/fetch map (COMPLETE — every path that can fetch a tenant URL)
+    content: |
+      Relaypoint outbound-fetch map — COMPLETE. Every mounted route and background worker
+      is listed, with its listener, handler, whether it makes an outbound request built
+      from a tenant URL, and whether that request is guarded by ensureDeliverableUrl. A
+      path not in this table is not served and makes no tenant-URL fetch.
+
+      path                    | listener | handler                     | outbound fetch?          | guarded?
+      ------------------------|----------|-----------------------------|--------------------------|----------------------------
+      POST /hooks             | public   | createHook                  | no                       | n/a
+      PATCH /hooks/:id        | public   | updateHook (edits callbackUrl) | no                    | n/a
+      POST /hooks/:id/deliver | public   | deliver (primary)           | yes (callbackUrl)        | YES — ensureDeliverableUrl
+      GET  /hooks/:id         | public   | getHookDetails              | no (echoes metadataUrl as text) | n/a
+      GET  /internal/preview  | internal | internalPreview             | yes (ops query url)      | NO — internal loopback listener only
+      (worker) retry          | —        | runRetry (retry-worker)     | yes (callbackUrl)        | NO
+      (dashboard) icon fetch  | —        | fetchIcon (icon-service)    | yes (iconUrl)            | YES — ensureDeliverableUrl
+  - id: service-note
+    type: note
+    label: Relaypoint outbound-fetch policy note
+    content: |
+      Relaypoint outbound-fetch policy — design note.
+
+      Rule: every outbound request built from a tenant-supplied URL MUST pass
+      ensureDeliverableUrl (url-guard) first. It enforces the callback host allowlist and
+      blocks private / loopback / link-local / metadata address ranges. This is the ONLY
+      SSRF control — deploy-config confirms egress policy is "none", so there is no
+      network-layer backstop if a code path forgets the guard.
+
+      Tenant-supplied URL fields are exactly three: callbackUrl (delivered to), iconUrl
+      (fetched for the dashboard), metadataUrl (stored, shown as text, never fetched).
+      route-map is the complete list of served paths and marks, for each, whether it makes
+      an outbound tenant-URL fetch and whether that fetch is guarded.
+
+      callbackUrl is editable after creation via PATCH /hooks/:id. A hook's callback URL at
+      the time the primary attempt runs may differ from its value when a later attempt runs.
+
+      The internal preview route is mounted only on the internal loopback listener
+      (deploy-config listeners.internal, bind 127.0.0.1:9090) and takes its URL from an ops
+      query param, not from tenant input; it is not reachable from the public API.
+tags: [security, taint-flow, ssrf, outbound-fetch, reachability]

@@ -1,0 +1,237 @@
+id: dependency-decoupling-inject-clock
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Decoupling Ledger From the Global Clock — Import Cycles, Singleton Sharing, and Init Order
+summary: >-
+  A Ledger is tightly coupled to a global Date.now(), the shared db singleton, and a config the
+  composition root overrides at startup. Four rewrites inject a Clock. Exactly one decouples the clock
+  while preserving the shared db instance, construction-after-override, and an acyclic import graph.
+  The decoys close an import cycle, construct a second database, or build the ledger before the
+  override. Classify each and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (config-mod, db-mod, ledger-original,
+  module-graph, rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use
+  the verdict vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to decouple Ledger.record from the global Date.now() by injecting a Clock,
+  while preserving all four properties module-graph lists: (1) the single shared `db` instance used
+  app-wide, (2) construction of the ledger AFTER main sets config.currency = 'EUR' (so entries stamp
+  'EUR'), (3) no import cycle among these modules, and (4) in production a timestamp equal to
+  Date.now().
+
+  1. Classify rewrite-a. Justify against all four preservation properties and the injection goal.
+
+  2. Classify rewrite-b. If it changes behavior, name the exact import cycle it introduces (the edges)
+     and state what goes wrong at startup and why, per module-graph's load order.
+
+  3. Classify rewrite-c. Name the observable difference from ledger-original in terms of which
+     Database instance ledger.record writes to, and the consequence for entries written through the
+     ledger.
+
+  4. Classify rewrite-d. State what currency a ledger entry carries and why, tracing the load order
+     from module-graph.
+
+  5. Exactly one rewrite decouples the clock without an import cycle, keeps the shared db singleton,
+     and constructs the ledger after the override. Name it. Then, for ledger-original, state the
+     ground truth: what currency does a ledger entry carry, and does the ledger write to the shared db
+     singleton?
+artifacts:
+  - id: config-mod
+    type: code
+    label: app/config.ts — the mutable config singleton
+    content: |
+      // app/config.ts — a single mutable config object, created at import.
+      export const config = {
+        currency: 'USD', // default; the composition root may override this before wiring services
+        dbUrl: 'postgres://prod/ledger',
+      };
+  - id: db-mod
+    type: code
+    label: app/db.ts — the shared database singleton
+    content: |
+      // app/db.ts — the shared database singleton, connected at import time from config.
+      import { config } from './config';
+
+      export class Database {
+        constructor(public readonly url: string) {}
+        write(entry: unknown): void {
+          /* append the entry to this connection */
+        }
+      }
+
+      export const db = new Database(config.dbUrl); // ONE connection, shared app-wide
+  - id: ledger-original
+    type: code
+    label: app/ledger.ts + app/main.ts — original (the reference behavior)
+    content: |
+      // app/ledger.ts — ORIGINAL: coupled to the db singleton, config, and the global clock.
+      import { db, Database } from './db';
+      import { config } from './config';
+
+      export class Ledger {
+        constructor(
+          private readonly database: Database,
+          private readonly currency: string,
+        ) {}
+        record(amount: number): void {
+          this.database.write({ amount, currency: this.currency, at: Date.now() }); // global clock
+        }
+      }
+
+      // app/main.ts — the composition root (the ONLY one).
+      import { db } from './db';
+      import { config } from './config';
+      import { Ledger } from './ledger';
+
+      config.currency = 'EUR';                        // override BEFORE wiring services
+      export const ledger = new Ledger(db, config.currency); // built after the override -> 'EUR'
+  - id: module-graph
+    type: note
+    label: app module graph — complete modules, import edges, load order, startup
+    content: |
+      app module graph — the complete set of modules, import edges, and load order.
+
+      Modules (the COMPLETE set): config.ts, db.ts, clock.ts (added by the decoupling), ledger.ts,
+      main.ts. main.ts is the ONLY composition root / entry point.
+
+      Original import edges (a DAG, no cycle):
+        db.ts     -> config.ts
+        ledger.ts -> db.ts, config.ts
+        main.ts   -> db.ts, config.ts, ledger.ts
+
+      ES module load order for the original (depth-first from the entry main.ts): config.ts, then
+      db.ts (which constructs the shared `db` singleton), then ledger.ts, then the main.ts body. A
+      module's top-level code runs once, when it is first imported.
+
+      Startup sequence in main.ts (authoritative): main sets config.currency = 'EUR' and THEN
+      constructs the ledger. So in the original the ledger is constructed AFTER the override and
+      stamps currency 'EUR'. The `db` singleton in db.ts is the ONE database connection the whole app
+      shares.
+
+      An acceptable decoupling must keep all of: (1) the single shared `db` instance used app-wide,
+      (2) construction of the ledger AFTER the config.currency override (so entries stamp 'EUR'),
+      (3) no import cycle among these modules, and (4) in production a timestamp equal to Date.now().
+      A circular import here means a module reads another module's export before that export has been
+      initialized.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — Clock leaf module, injected in main
+    content: |
+      // app/clock.ts — a LEAF module (imports nothing).
+      export interface Clock {
+        now(): number;
+      }
+      export const systemClock: Clock = { now: () => Date.now() };
+
+      // app/ledger.ts (rewrite-a) — receives the db and clock; imports types only.
+      import type { Database } from './db';
+      import type { Clock } from './clock';
+      export class Ledger {
+        constructor(
+          private readonly database: Database,
+          private readonly currency: string,
+          private readonly clock: Clock,
+        ) {}
+        record(amount: number): void {
+          this.database.write({ amount, currency: this.currency, at: this.clock.now() });
+        }
+      }
+
+      // app/main.ts (rewrite-a)
+      import { db } from './db';
+      import { config } from './config';
+      import { Ledger } from './ledger';
+      import { systemClock } from './clock';
+      config.currency = 'EUR';
+      export const ledger = new Ledger(db, config.currency, systemClock);
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — clock imported from main
+    content: |
+      // app/clock.ts — same leaf module as rewrite-a.
+      export interface Clock { now(): number; }
+      export const systemClock: Clock = { now: () => Date.now() };
+
+      // app/ledger.ts (rewrite-b) — pulls the clock FROM main and builds the ledger at import.
+      import { db, Database } from './db';
+      import { config } from './config';
+      import { clock } from './main';                 // NEW edge: ledger.ts -> main.ts
+      export class Ledger {
+        constructor(
+          private readonly database: Database,
+          private readonly currency: string,
+          private readonly clock: Clock,
+        ) {}
+        record(amount: number): void {
+          this.database.write({ amount, currency: this.currency, at: this.clock.now() });
+        }
+      }
+      export const ledger = new Ledger(db, config.currency, clock); // runs at import of ledger.ts
+
+      // app/main.ts (rewrite-b)
+      import { Ledger } from './ledger';               // main.ts -> ledger.ts (closes the cycle)
+      import { systemClock } from './clock';
+      export const clock = systemClock;
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — ledger builds its own Database
+    content: |
+      // app/clock.ts — same leaf module as rewrite-a.
+      export interface Clock { now(): number; }
+      export const systemClock: Clock = { now: () => Date.now() };
+
+      // app/ledger.ts (rewrite-c) — clock injected, but the ledger creates its OWN database.
+      import { Database } from './db';
+      import { config } from './config';
+      import type { Clock } from './clock';
+      export class Ledger {
+        private readonly database = new Database(config.dbUrl); // NEW connection, not the shared db
+        constructor(
+          private readonly currency: string,
+          private readonly clock: Clock,
+        ) {}
+        record(amount: number): void {
+          this.database.write({ amount, currency: this.currency, at: this.clock.now() });
+        }
+      }
+
+      // app/main.ts (rewrite-c)
+      import { config } from './config';
+      import { Ledger } from './ledger';
+      import { systemClock } from './clock';
+      config.currency = 'EUR';
+      export const ledger = new Ledger(config.currency, systemClock);
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — ledger constructed at import time
+    content: |
+      // app/clock.ts — same leaf module as rewrite-a.
+      export interface Clock { now(): number; }
+      export const systemClock: Clock = { now: () => Date.now() };
+
+      // app/ledger.ts (rewrite-d) — clock injected and db shared, but the ledger is built at import.
+      import { db } from './db';
+      import { config } from './config';
+      import { systemClock } from './clock';
+      import type { Database } from './db';
+      import type { Clock } from './clock';
+      export class Ledger {
+        constructor(
+          private readonly database: Database,
+          private readonly currency: string,
+          private readonly clock: Clock,
+        ) {}
+        record(amount: number): void {
+          this.database.write({ amount, currency: this.currency, at: this.clock.now() });
+        }
+      }
+      export const ledger = new Ledger(db, config.currency, systemClock); // runs at import of ledger.ts
+
+      // app/main.ts (rewrite-d)
+      import { config } from './config';
+      import './ledger';                               // importing ledger triggers its construction
+      config.currency = 'EUR';                         // override runs AFTER ledger is already built
+      export { ledger } from './ledger';
+tags: [refactoring, dependency-decoupling, dependency-injection, import-cycle, singleton]
