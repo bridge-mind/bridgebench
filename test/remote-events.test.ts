@@ -55,25 +55,23 @@ describe('RemoteArenaEventSink', () => {
     vi.useFakeTimers();
     const delivered: string[] = [];
     let failNext = true;
-    const fetchMock = vi
-      .fn()
-      .mockImplementation(async (_url: string, init: RequestInit) => {
-        if (failNext) {
-          failNext = false;
-          throw new Error('socket hang up');
-        }
-        const body = JSON.parse(String(init.body)) as { events: ArenaEvent[] };
-        delivered.push(...body.events.map((event) => event.id));
-        return {
-          ok: true,
-          text: async () =>
-            JSON.stringify({
-              imported: body.events.length,
-              skipped: 0,
-              cursor: 1,
-            }),
-        };
-      });
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('socket hang up');
+      }
+      const body = JSON.parse(String(init.body)) as { events: ArenaEvent[] };
+      delivered.push(...body.events.map((event) => event.id));
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            imported: body.events.length,
+            skipped: 0,
+            cursor: 1,
+          }),
+      };
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     const failures: boolean[] = [];
