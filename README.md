@@ -199,10 +199,13 @@ audits, and documentation fixes. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Project history
 
 This repository previously hosted the Season 1 `season-engine` alpha: ten
-Three.js tasks scored in a browser and ranked by community A/B voting. That
-code remains on the
+Three.js tasks scored in a browser and ranked by community A/B voting. Most
+of that engine — the other nine tasks and the live-model runner — remains on
+the
 [`season-engine-alpha` branch](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha).
-Its results never mix with arena Elo.
+One task, the lava lamp (`s1-lava-lamp-redux`), has been restored to `main`
+as a working slice — see [UI Bench](docs/ui-bench.md). Its results never mix
+with arena Elo.
 
 ## License
 

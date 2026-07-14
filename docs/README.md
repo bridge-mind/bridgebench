@@ -15,6 +15,13 @@ Choose the path that matches what you are trying to verify or change.
 
 Use the [glossary](glossary.md) whenever a contract term is unfamiliar.
 
+## UI Bench
+
+- [UI Bench](ui-bench.md) — the browser-scored Three.js creative-rendering
+  benchmark, kept separate from arena Elo: qualification vs. probes, how to
+  run and evaluate the restored lava lamp task, and what's still on the
+  `season-engine-alpha` branch.
+
 ## Contribute
 
 - [Task authoring](task-authoring.md) — public/private schemas, arena clusters,

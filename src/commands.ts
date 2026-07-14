@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { Command, InvalidArgumentError } from 'commander';
@@ -11,6 +12,11 @@ import { publishJournal, publishTarget, publishTasks, resolveApiConfig } from '.
 import { runRemoteArena } from './remote-arena.js';
 import { writeReports } from './report.js';
 import { ArenaStore, categoryStoreConfig } from './store.js';
+import { launchEvalBrowser, UiArtifactEvaluator } from './suites/ui/evaluator/index.js';
+import { UiArtifactNormalizer } from './suites/ui/normalizer.js';
+import { assessQualification } from './suites/ui/qualification.js';
+import { UiTaskLoader } from './suites/ui/task-loader.js';
+import { UiArtifactValidator } from './suites/ui/validator.js';
 import { TaskLoader, validatePublicTaskFile } from './tasks.js';
 import { formatTriage, triageJournal } from './triage.js';
 import {
@@ -492,6 +498,99 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
     .action(async (generationId: string) => {
       const data = await dependencies.createOpenRouter().fetchGeneration(generationId);
       dependencies.stdout(JSON.stringify(data, null, 2));
+    });
+
+  const ui = program
+    .command('ui')
+    .description(
+      'Season 1 UI Bench: browser-scored Three.js creative tasks (results never mix with arena Elo)',
+    );
+
+  ui.command('tasks')
+    .description('List UI Bench tasks and validate their public YAML specs')
+    .action(async () => {
+      const loader = new UiTaskLoader();
+      const loaded = await loader.loadAll();
+      dependencies.stdout(
+        `✓ ui: ${loaded.length} task(s) loaded` +
+          (loader.hasPrivateOverlay()
+            ? ''
+            : ' (no private probe overlay — probe diagnostics will be marked partial)'),
+      );
+      for (const task of loaded) {
+        dependencies.stdout(`  ${task.id.padEnd(28)} ${task.title}`);
+      }
+    });
+
+  ui.command('evaluate <file>')
+    .description(
+      'Validate and render one HTML artifact against a UI Bench task and report qualification',
+    )
+    .requiredOption('-t, --id <taskId>', 'UI Bench task id, e.g. s1-lava-lamp-redux')
+    .action(async (file: string, options: { id: string }) => {
+      const task = await new UiTaskLoader().loadById(options.id);
+      const rawHtml = await readFile(path.resolve(file), 'utf8');
+      const html = new UiArtifactNormalizer().normalize(rawHtml, {
+        taskTitle: task.title,
+        modelName: 'reference',
+      });
+      const validation = new UiArtifactValidator().validateHtml(html, task);
+      for (const warning of validation.warnings) dependencies.stderr(`Warning: ${warning}`);
+
+      const report = (qualification: ReturnType<typeof assessQualification>): void => {
+        dependencies.stdout(
+          `${task.id}: ${qualification.qualified ? 'QUALIFIED' : 'DISQUALIFIED'}`,
+        );
+        for (const reason of qualification.reasons) dependencies.stdout(`  - ${reason}`);
+        dependencies.setExitCode(qualification.qualified ? 0 : 1);
+      };
+
+      if (!validation.valid) {
+        for (const error of validation.errors) dependencies.stderr(`Error: ${error}`);
+        report(assessQualification({ task, validation, evaluation: null }));
+        return;
+      }
+
+      const { browser, executablePath } = await launchEvalBrowser();
+      try {
+        const outputDir = path.join(
+          ROOT,
+          'results',
+          'ui',
+          'evaluate',
+          `${task.id}-${path.basename(file, path.extname(file))}`,
+        );
+        const evaluation = await new UiArtifactEvaluator(browser).evaluate({
+          html,
+          task,
+          outputDir,
+          executablePath,
+        });
+        const qualification = assessQualification({ task, validation, evaluation });
+        dependencies.stdout(
+          `webgl=${qualification.diagnostics.webglActive ?? 'none'} fps=${qualification.diagnostics.fps ?? 'n/a'} ` +
+            `animation=${qualification.diagnostics.animationDetected} controls=${qualification.diagnostics.controlsFound}/${qualification.diagnostics.controlsDeclared} ` +
+            `viewportFill=${qualification.diagnostics.viewportFill} determinism=${qualification.diagnostics.determinismOk} ` +
+            `probes=${qualification.diagnostics.probesPartial ? 'partial (no private overlay)' : `${qualification.diagnostics.probesPassed}/${qualification.diagnostics.probesTotal}`}`,
+        );
+        dependencies.stdout(`Diagnostics written to ${displayPath(outputDir)}`);
+        report(qualification);
+      } finally {
+        await browser.close();
+      }
+    });
+
+  ui.command('run')
+    .description('Generate a UI Bench artifact from a live model and evaluate it')
+    .action(() => {
+      dependencies.stderr(
+        "ui run is not implemented on main yet: season-engine-alpha's live-model runner " +
+          "was built against a multi-provider 'providers/' abstraction that no longer exists " +
+          'here (main calls models exclusively through OpenRouter — see src/openrouter.ts). ' +
+          "Use 'ui evaluate <file> -t <taskId>' to qualify a hand- or model-written artifact " +
+          'in the meantime. See docs/ui-bench.md.',
+      );
+      dependencies.setExitCode(1);
     });
 
   program

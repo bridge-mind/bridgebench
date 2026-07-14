@@ -10,3 +10,4 @@ results/
 tasks/
 test-results/
 test/fixtures/**/*.jsonl
+vendor/

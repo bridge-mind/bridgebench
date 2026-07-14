@@ -1,6 +1,6 @@
 {
   "name": "bridgebench",
-  "version": "3.1.0-alpha.6",
+  "version": "3.1.0-alpha.8",
   "description": "BridgeBench V3 — autonomous arenas for vibe-coding models: reasoning, hallucination, security, bullshit, refactoring, debugging, generation, and a latency speed arena",
   "type": "module",
   "packageManager": "npm@10.9.8",
@@ -10,6 +10,8 @@
   "files": [
     "dist",
     "tasks/*/public/**",
+    "tasks/current/**",
+    "vendor/**",
     "docs",
     "CITATION.cff"
   ],
@@ -105,11 +107,16 @@
     "arena": "node --import tsx src/cli.ts arena",
     "triage": "node --import tsx src/cli.ts arena triage",
     "report": "node --import tsx src/cli.ts report",
+    "ui": "node --import tsx src/cli.ts ui",
+    "vendor:three": "node scripts/vendor-three.mjs",
     "dashboard": "node --import tsx src/dashboard/server.ts"
   },
   "dependencies": {
     "commander": "^12.1.0",
     "openai": "^4.76.0",
+    "pixelmatch": "^6.0.0",
+    "playwright-core": "^1.58.2",
+    "pngjs": "^7.0.0",
     "yaml": "^2.6.0",
     "zod": "^3.24.2"
   },
@@ -119,6 +126,8 @@
     "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.2",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
@@ -129,6 +138,7 @@
     "prettier": "^3.9.5",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "three": "^0.182.0",
     "tsup": "^8.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",

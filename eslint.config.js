@@ -10,12 +10,13 @@ export default tseslint.config(
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',
+      'vendor/**',
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['scripts/**/*.ts', 'src/**/*.ts', 'test/**/*.ts', 'ui/**/*.{ts,tsx}'],
+    files: ['scripts/**/*.{ts,mjs}', 'src/**/*.ts', 'test/**/*.ts', 'ui/**/*.{ts,tsx}'],
     languageOptions: {
       globals: {
         ...globals.node,
@@ -30,6 +31,16 @@ export default tseslint.config(
         'error',
         { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
       ],
+    },
+  },
+  {
+    // The evaluator drives a browser page via Playwright's page.evaluate(),
+    // whose callbacks run in a separate (untyped-here) DOM realm — casting
+    // through `any` to reach the harness's custom window globals is the
+    // standard way to cross that boundary.
+    files: ['src/suites/ui/evaluator/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
     },
   },
 );
