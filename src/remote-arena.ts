@@ -173,19 +173,28 @@ export async function runRemoteArena(
 
   const resultsRoot = remoteResultsRoot(config.category, mock);
   const store = new ArenaStore(remoteStoreConfig(config.category, resultsRoot));
-  const eventSink = new RemoteArenaEventSink(apiConfig, runKey, (message, fatal) => {
-    logger.warn(fatal ? 'events.mirror-degraded' : 'events.flush-retry', { message });
-  });
-  const gateway: OpenRouterGateway = mock
-    ? new MockOpenRouterGateway({ judgeWinner: 'MODEL_A' })
-    : new OpenRouterClient(process.env.OPENROUTER_API_KEY ?? '', logger);
-
-  const runner = new ArenaRunner(gateway, store, eventSink.sink, logger);
   const cancellation = new AbortController();
   const requestCancellation = (): void => {
     if (cancellation.signal.aborted) return;
     cancellation.abort();
   };
+  const eventSink = new RemoteArenaEventSink(
+    apiConfig,
+    runKey,
+    (message, fatal) => {
+      logger.warn(fatal ? 'events.mirror-degraded' : 'events.flush-retry', { message });
+    },
+    // An admin cancelled the run on the API; abort exactly as SIGINT would.
+    () => {
+      logger.info('run.cancel-requested-remote', { runId: runKey });
+      requestCancellation();
+    },
+  );
+  const gateway: OpenRouterGateway = mock
+    ? new MockOpenRouterGateway({ judgeWinner: 'MODEL_A' })
+    : new OpenRouterClient(process.env.OPENROUTER_API_KEY ?? '', logger);
+
+  const runner = new ArenaRunner(gateway, store, eventSink.sink, logger);
   process.once('SIGINT', requestCancellation);
 
   // Publish after every match so the leaderboard updates per match instead of
@@ -228,6 +237,19 @@ export async function runRemoteArena(
       cancelled: result.cancelled,
       stoppedForBudget: result.stoppedForBudget,
     };
+  } catch (error) {
+    // The run row on the API only leaves its live status via a terminal
+    // event. A run that dies (health-stop, provider failure, crash) must
+    // report run.failed or the arena shows it as live until the server's
+    // abandoned-run reconciliation eventually times it out.
+    const message = error instanceof Error ? error.message : String(error);
+    eventSink.sink({
+      id: `${runKey}-failed`,
+      type: 'run.failed',
+      timestamp: new Date().toISOString(),
+      data: { error: (message || 'Arena run failed').slice(0, 8_000) },
+    });
+    throw error;
   } finally {
     process.removeListener('SIGINT', requestCancellation);
     await eventSink.close();

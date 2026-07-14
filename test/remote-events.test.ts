@@ -91,6 +91,62 @@ describe('RemoteArenaEventSink', () => {
     expect(failures).toEqual([false]);
   });
 
+  it('fires the cancel callback once even across repeated flagged flushes', async () => {
+    vi.useFakeTimers();
+    let flushCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      flushCount += 1;
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            imported: 1,
+            skipped: 0,
+            cursor: flushCount,
+            cancelRequested: true,
+          }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const cancelRequests = vi.fn();
+    const sink = new RemoteArenaEventSink(
+      config,
+      'run-fixture',
+      () => {},
+      cancelRequests,
+    );
+    sink.sink(makeEvent('delta-1', 0));
+    await vi.advanceTimersByTimeAsync(1_000);
+    sink.sink(makeEvent('delta-2', 1));
+    const closing = sink.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await closing;
+
+    // Both flushes reported cancelRequested; the abort fired exactly once.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cancelRequests).toHaveBeenCalledTimes(1);
+  });
+
+  it('tolerates append responses without the cancel flag', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ imported: 1, skipped: 0, cursor: 1 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const cancelRequests = vi.fn();
+    const sink = new RemoteArenaEventSink(
+      config,
+      'run-fixture',
+      () => {},
+      cancelRequests,
+    );
+    sink.sink(makeEvent('delta-1', 0));
+    await sink.close();
+    expect(cancelRequests).not.toHaveBeenCalled();
+  });
+
   it('close surrenders the mirror instead of throwing when the API stays down', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
