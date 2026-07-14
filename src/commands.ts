@@ -300,6 +300,12 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
               'Stopped at the cost boundary; rerun the same command with --resume.',
             );
           }
+          if (result.stoppedForHealth) {
+            dependencies.stdout(
+              'Stopped early: too many failed competitor responses (failed matches were voided). ' +
+                'Check the provider path, then rerun with --resume.',
+            );
+          }
         }
         const runMatches = store.readAll().filter((match) => match.runId === result.runId);
         if (runMatches.length > 0) {

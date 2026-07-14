@@ -40,12 +40,12 @@ function healthyGateway(costUsd = 0.01): FixtureGateway {
 }
 
 describe('arena outcome contract', () => {
-  it('records a single exhausted competitor as a forfeit without judging', async () => {
+  it('voids a single exhausted competitor as a no-contest without judging or Elo movement', async () => {
     await withTempStore(async (store) => {
       let competitors = 0;
       const gateway = new FixtureGateway((request) => {
         if (request.model.role === 'judge') {
-          throw new Error('judges must not run for a forfeit');
+          throw new Error('judges must not run for a voided match');
         }
         competitors += 1;
         if (competitors === 1) throw new Error('fixture failure');
@@ -63,11 +63,12 @@ describe('arena outcome contract', () => {
       );
       const [match] = store.readAll();
       expect(match).toMatchObject({
-        outcome: 'forfeit',
-        pointAwarded: true,
+        outcome: 'no-contest',
+        pointAwarded: false,
+        winnerModelId: null,
         panel: null,
       });
-      expect(match!.winnerModelId).not.toBeNull();
+      expect(match!.eloAfter).toEqual(match!.eloBefore);
       expect(gateway.requests.filter((request) => request.model.role === 'judge')).toHaveLength(0);
     });
   });

@@ -90,7 +90,7 @@ describe('arena MVP', () => {
     });
   });
 
-  it('halts an unhealthy run instead of journaling a full batch of no-contests', async () => {
+  it('health-stops an unhealthy run gracefully with voided matches journaled', async () => {
     class DeadGateway implements OpenRouterGateway {
       async validateModel(_model: ModelRegistryEntry): Promise<void> {}
 
@@ -99,20 +99,42 @@ describe('arena MVP', () => {
       }
     }
     await withTempStore(async (store) => {
-      const runner = new ArenaRunner(new DeadGateway(), store);
-      await expect(
-        runner.run(
-          {
-            category: 'reasoning',
-            seed: 'health-stop-seed',
-            matches: 12,
-            maxCostUsd: 5,
-            resume: false,
-          },
-          [makeTask()],
+      const events: string[] = [];
+      const runner = new ArenaRunner(new DeadGateway(), store, (event) =>
+        events.push(event.type),
+      );
+      const result = await runner.run(
+        {
+          category: 'reasoning',
+          seed: 'health-stop-seed',
+          matches: 12,
+          maxCostUsd: 5,
+          resume: false,
+        },
+        [makeTask()],
+      );
+
+      // Graceful circuit breaker: no throw, run ends after the threshold with
+      // the failed matches journaled as voided no-contests.
+      expect(result).toMatchObject({
+        completed: 4,
+        stoppedForHealth: true,
+        stoppedForBudget: false,
+        cancelled: false,
+      });
+      const journaled = store.readAll();
+      expect(journaled).toHaveLength(4);
+      expect(
+        journaled.every(
+          (match) =>
+            match.outcome === 'no-contest' &&
+            match.winnerModelId === null &&
+            match.pointAwarded === false,
         ),
-      ).rejects.toThrow(/Run halted after 4 matches/);
-      expect(store.readAll()).toHaveLength(4);
+      ).toBe(true);
+      expect(events).toContain('run.health-stopped');
+      expect(events).toContain('run.completed');
+      expect(events).not.toContain('run.failed');
     });
   });
 

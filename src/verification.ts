@@ -147,7 +147,12 @@ function expectedSpeedOutcome(
   const aLive = isLiveResponse(responseA);
   const bLive = isLiveResponse(responseB);
   if (aLive !== bLive) {
-    return { expectedOutcome: 'forfeit', expectedWinner: aLive ? modelA : modelB };
+    // Current rule: a dead side voids the match. Journals written before
+    // 2026-07-14 recorded these as forfeit wins — still verifiable.
+    if (match.outcome === 'forfeit') {
+      return { expectedOutcome: 'forfeit', expectedWinner: aLive ? modelA : modelB };
+    }
+    return { expectedOutcome: 'no-contest', expectedWinner: null };
   }
   return { expectedOutcome: 'no-contest', expectedWinner: null };
 }
@@ -165,9 +170,16 @@ function verifyOutcome(match: MatchResult): void {
     if (match.panel !== null) fail('a speed match must not contain a judge panel');
     ({ expectedOutcome, expectedWinner } = expectedSpeedOutcome(match, modelA, modelB));
   } else if (responseA.success !== responseB.success) {
-    expectedOutcome = 'forfeit';
-    expectedWinner = responseA.success ? modelA : modelB;
-    if (match.panel !== null) fail('forfeit must not contain a judge panel');
+    if (match.panel !== null) fail('a failed response must not contain a judge panel');
+    // Current rule: a failed response voids the match (no winner, no point,
+    // no Elo). Journals written before 2026-07-14 recorded these as forfeit
+    // wins for the surviving side — that legacy shape still verifies.
+    if (match.outcome === 'forfeit') {
+      expectedOutcome = 'forfeit';
+      expectedWinner = responseA.success ? modelA : modelB;
+    } else {
+      expectedOutcome = 'no-contest';
+    }
   } else if (!responseA.success && !responseB.success) {
     expectedOutcome = 'no-contest';
     if (match.panel !== null) fail('double failure must not contain a judge panel');

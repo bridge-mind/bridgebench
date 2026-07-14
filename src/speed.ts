@@ -83,8 +83,7 @@ export function decideSpeedMatch(
       speedMetrics,
     };
   }
-  if (aLive !== bLive) {
-    return { outcome: 'forfeit', winnerModelId: aLive ? modelA : modelB, speedMetrics: null };
-  }
+  // A dead side voids the match — a provider failure is not a slowness
+  // signal, so nobody scores a point for the other side's outage.
   return { outcome: 'no-contest', winnerModelId: null, speedMetrics: null };
 }

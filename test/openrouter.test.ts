@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { isRetryableError, parseJudgeVerdict, sanitizeError } from '../src/openrouter.js';
+import {
+  isRetryableError,
+  isRetryableFailure,
+  parseJudgeVerdict,
+  sanitizeError,
+} from '../src/openrouter.js';
 import { judgeVerdictJsonSchema } from '../src/openrouter-transport.js';
 
 describe('OpenRouter boundary helpers', () => {
@@ -53,5 +58,25 @@ describe('OpenRouter boundary helpers', () => {
     expect(isRetryableError('401 Unauthorized')).toBe(false);
     expect(isRetryableError('Prompt exceeds 180000 character safety limit')).toBe(false);
     expect(isRetryableError('OpenRouter returned an empty completion')).toBe(false);
+  });
+
+  it('classifies provider outages structurally, not just by message text', () => {
+    // The 2026-07-14 OpenAI outage: SDK APIError with bare status text and no
+    // digits in the message — must retry via the status code.
+    const outage = Object.assign(new Error('Internal Server Error'), { status: 500 });
+    expect(isRetryableFailure(outage, outage.message)).toBe(true);
+    // Bare status-text messages with no structural status retry via the regex.
+    expect(isRetryableFailure(new Error('Internal Server Error'), 'Internal Server Error')).toBe(
+      true,
+    );
+    expect(isRetryableFailure(new Error('Bad Gateway'), 'Bad Gateway')).toBe(true);
+    expect(isRetryableFailure(new Error('Service Unavailable'), 'Service Unavailable')).toBe(true);
+    // Network errors carry a code, not a status.
+    const reset = Object.assign(new Error('read failed'), { code: 'ECONNRESET' });
+    expect(isRetryableFailure(reset, reset.message)).toBe(true);
+    // Real client errors stay permanent even with a structural status.
+    const unauthorized = Object.assign(new Error('Unauthorized'), { status: 401 });
+    expect(isRetryableFailure(unauthorized, unauthorized.message)).toBe(false);
+    expect(isRetryableFailure(new Error('No endpoints found'), 'No endpoints found')).toBe(false);
   });
 });

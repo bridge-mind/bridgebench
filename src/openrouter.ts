@@ -17,10 +17,27 @@ import {
 
 const BASE_URL = 'https://openrouter.ai/api/v1';
 const RETRYABLE =
-  /(?:429|rate.?limit|timeout|timed out|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|overloaded|5\d\d|premature close|invalid response body|socket hang up|other side closed|fetch failed|terminated)/i;
+  /(?:429|rate.?limit|timeout|timed out|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|overloaded|5\d\d|premature close|invalid response body|socket hang up|other side closed|fetch failed|terminated|internal server error|bad gateway|service unavailable|gateway timeout|too many requests)/i;
 
 export function isRetryableError(message: string): boolean {
   return RETRYABLE.test(message);
+}
+
+/**
+ * Retryability decided structurally first, message text second. Provider
+ * errors often surface with bare status text ("Internal Server Error") and
+ * no digits — a 2026-07-14 OpenAI outage was classified permanent because
+ * the message regex never saw a "5xx". SDK errors carry `status`; network
+ * errors carry `code`; the regex remains the fallback for stream errors.
+ */
+export function isRetryableFailure(error: unknown, message: string): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === 'number') {
+    return status === 408 || status === 429 || status >= 500;
+  }
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && isRetryableError(code)) return true;
+  return isRetryableError(message);
 }
 
 export function sanitizeError(error: unknown): string {
@@ -158,14 +175,15 @@ export class OpenRouterClient implements OpenRouterGateway {
         const message = timeoutController.signal.aborted
           ? `OpenRouter request timed out after ${timeoutMs}ms`
           : sanitizeError(error);
-        if (attempt === maxAttempts || !RETRYABLE.test(message)) {
+        const retryable = isRetryableFailure(error, message);
+        if (attempt === maxAttempts || !retryable) {
           this.logger.error('openrouter.failed', {
             model: request.model.id,
             role: request.model.role,
             attempt,
             maxAttempts,
             latencyMs,
-            retryable: RETRYABLE.test(message),
+            retryable,
             error: message,
           });
           throw new Error(

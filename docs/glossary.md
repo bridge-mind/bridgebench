@@ -38,7 +38,7 @@ A verified report derived from a journal replay. Snapshots are replaceable; jour
 
 ## Point
 
-One win awarded for a judged majority or forfeit. No-contests award no point.
+One win awarded for a judged majority (or measured speed win). No-contests — including matches voided by a failed response — award no point. Historical journals may contain `forfeit` wins from before 2026-07-14, when a failed response awarded the survivor the point.
 
 ## Elo
 

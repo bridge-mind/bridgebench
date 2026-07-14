@@ -69,6 +69,12 @@ export interface ArenaEventDataMap {
     costUsd: number;
     maxCostUsd: number;
   };
+  'run.health-stopped': {
+    runId: string;
+    completed: number;
+    matchesWithFailures: number;
+    failureRate: number;
+  };
   'run.cancellation-requested': {
     runId: string;
     completed: number;
@@ -84,6 +90,8 @@ export interface ArenaEventDataMap {
     completed: number;
     costUsd: number;
     stoppedForBudget: boolean;
+    /** Optional for wire-compat with pre-health-stop runners. */
+    stoppedForHealth?: boolean;
   };
   'run.failed': {
     error: string;

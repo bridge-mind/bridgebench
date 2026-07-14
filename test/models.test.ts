@@ -26,7 +26,7 @@ describe('dual-role roster semantics', () => {
     const grok = judges.find((judge) => judge.id === DUAL_ROLE_ID);
     expect(grok?.role).toBe('judge');
     // Judge-side calls use the judge policy, not the competitor one.
-    expect(grok?.request).toEqual(MODEL_REGISTRY[DUAL_ROLE_ID].judgeRequest);
+    expect(grok?.request).toEqual(MODEL_REGISTRY[DUAL_ROLE_ID]?.judgeRequest);
   });
 
   it('resolves judge-view entries only for panel members', () => {

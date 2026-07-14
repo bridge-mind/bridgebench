@@ -31,6 +31,8 @@ export interface ArenaRunResult {
   completed: number;
   costUsd: number;
   stoppedForBudget: boolean;
+  /** True when the failure-rate circuit breaker ended the run early (graceful, not a crash). */
+  stoppedForHealth: boolean;
   cancelled: boolean;
 }
 

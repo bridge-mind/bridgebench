@@ -67,17 +67,17 @@ describe('speed decision rule', () => {
     );
   });
 
-  it('forfeits to the live competitor when the other errors', () => {
+  it('voids the match when one competitor errors — an outage is not a slowness signal', () => {
     const live = makeSuccess('model/a', 'done', { ttftMs: 80, totalMs: 400, outputTokens: 30 });
     const dead = makeFailure('model/b', 'competitor exhausted');
     expect(decideSpeedMatch(live, dead, 'model/a', 'model/b')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/a',
+      outcome: 'no-contest',
+      winnerModelId: null,
       speedMetrics: null,
     });
     expect(decideSpeedMatch(dead, live, 'model/b', 'model/a')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/a',
+      outcome: 'no-contest',
+      winnerModelId: null,
       speedMetrics: null,
     });
   });
@@ -92,8 +92,8 @@ describe('speed decision rule', () => {
     expect(isLiveResponse(empty)).toBe(false);
     expect(isLiveResponse(live)).toBe(true);
     expect(decideSpeedMatch(empty, live, 'model/a', 'model/b')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/b',
+      outcome: 'no-contest',
+      winnerModelId: null,
     });
   });
 
@@ -137,7 +137,7 @@ describe('speed arena runner', () => {
     }, 'speed');
   });
 
-  it('forfeits to the surviving competitor without judging', async () => {
+  it('voids the match for the surviving competitor without judging or Elo movement', async () => {
     await withTempStore(async (store) => {
       const gateway = new FixtureGateway((request) => {
         if (request.model.role === 'judge') throw new Error('no judges in speed');
@@ -155,8 +155,10 @@ describe('speed arena runner', () => {
         [speedTask()],
       );
       const [match] = store.readAll();
-      expect(match!.outcome).toBe('forfeit');
-      expect(match!.winnerModelId).toBe(SOL);
+      expect(match!.outcome).toBe('no-contest');
+      expect(match!.winnerModelId).toBeNull();
+      expect(match!.pointAwarded).toBe(false);
+      expect(match!.eloAfter).toEqual(match!.eloBefore);
       expect(match!.speedMetrics ?? null).toBeNull();
       expect(match!.panel).toBeNull();
     }, 'speed');

@@ -45,6 +45,7 @@ interface RunProgress {
   completed: number;
   matchesWithFailures: number;
   stoppedForBudget: boolean;
+  stoppedForHealth: boolean;
 }
 
 interface PreparedRun {
@@ -138,6 +139,7 @@ export class ArenaRunner {
       completed: progress.completed,
       costUsd: progress.costUsd,
       stoppedForBudget: progress.stoppedForBudget,
+      stoppedForHealth: progress.stoppedForHealth,
       cancelled: true,
     };
   }
@@ -190,6 +192,7 @@ export class ArenaRunner {
         completed: 0,
         matchesWithFailures: 0,
         stoppedForBudget: false,
+        stoppedForHealth: false,
       },
     };
 
@@ -326,18 +329,29 @@ export class ArenaRunner {
           progress.completed >= HEALTH_STOP_MIN_MATCHES &&
           progress.matchesWithFailures / progress.completed >= HEALTH_STOP_FAILURE_RATE
         ) {
+          // Graceful circuit breaker, mirroring the budget stop: failed
+          // matches are already journaled as voided no-contests, so stop
+          // scheduling new ones and end the run cleanly — completed matches
+          // stand, the final journal sweep still runs, and the run records
+          // as health-stopped rather than crashing to `failed`.
+          progress.stoppedForHealth = true;
           this.logger.error('run.health-stopped', {
             runId,
             completed: progress.completed,
             matchesWithFailures: progress.matchesWithFailures,
             failureRate: progress.matchesWithFailures / progress.completed,
           });
-          throw new Error(
-            `Run halted after ${progress.completed} matches: ${progress.matchesWithFailures} had failed competitor responses. ` +
-              `The provider path is unhealthy, so continuing would journal junk matches. ` +
-              `Inspect the run log${this.logger.filePath ? ` at ${this.logger.filePath}` : ''}, fix the cause, ` +
-              `then rerun with --resume (or pass --no-health-stop to override).`,
-          );
+          this.emit({
+            id: `${runId}-health-stopped`,
+            type: 'run.health-stopped',
+            data: {
+              runId,
+              completed: progress.completed,
+              matchesWithFailures: progress.matchesWithFailures,
+              failureRate: progress.matchesWithFailures / progress.completed,
+            },
+          });
+          break;
         }
       }
 
@@ -359,6 +373,7 @@ export class ArenaRunner {
           completed: progress.completed,
           costUsd: progress.costUsd,
           stoppedForBudget: progress.stoppedForBudget,
+          stoppedForHealth: progress.stoppedForHealth,
         },
       });
       return {
@@ -366,6 +381,7 @@ export class ArenaRunner {
         completed: progress.completed,
         costUsd: progress.costUsd,
         stoppedForBudget: progress.stoppedForBudget,
+        stoppedForHealth: progress.stoppedForHealth,
         cancelled: false,
       };
     } finally {
@@ -432,8 +448,12 @@ export class ArenaRunner {
       winnerModelId = decision.winnerModelId;
       speedMetrics = decision.speedMetrics;
     } else if (responseA.success !== responseB.success) {
-      outcome = 'forfeit';
-      winnerModelId = responseA.success ? match.modelA : match.modelB;
+      // A failed response (provider outage, timeout, empty completion) voids
+      // the match: no winner, no point, no Elo movement. Scoring an
+      // infrastructure failure as a loss punished models for their
+      // provider's downtime — the surviving answer is never judged either,
+      // so there is no quality signal to award.
+      outcome = 'no-contest';
     } else if (responseA.success && responseB.success) {
       if (!isCompleteArenaTask(task)) {
         throw new Error(

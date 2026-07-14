@@ -30,7 +30,7 @@ A **run** is deterministic from a versioned manifest:
 
 - Both competitors receive byte-identical context: a category-specific system prompt plus the task title, summary, prompt, and all public artifacts inline (`src/tasks.ts`). They are never told they are in a match, and the system prompt forbids revealing model identity.
 - Requests run concurrently over OpenRouter with pinned slugs (`latest` aliases prohibited). Before any paid run the CLI re-validates the selected competitors and all three judges against the live catalog, and confirms judges still support structured output.
-- Transport is fail-closed: 3 attempts on retryable errors, per-request watchdog timeouts, and a hard prompt-size cap. A competitor that exhausts retries **forfeits** (the survivor wins); two failures make a **no-contest** (no point, no Elo movement).
+- Transport is fail-closed: 3 attempts on retryable errors (classified by HTTP status first, message text second), per-request watchdog timeouts, and a hard prompt-size cap. A failed competitor response — provider outage, timeout, empty completion — **voids the match as a no-contest**: no winner, no point, no Elo movement, and the surviving answer is never judged. An infrastructure failure is not a quality signal, so nobody scores off an opponent's outage. (Runs journaled before 2026-07-14 may contain historical `forfeit` outcomes, which awarded the survivor a win under the old rule.)
 
 ## Blind three-judge panel
 
@@ -48,7 +48,7 @@ The hidden reference is **judging context, not an oracle** — no deterministic 
 
 ## Scoring
 
-- A win awards exactly one point and one Elo update. Elo starts at 1000 with K=32 (`src/elo.ts`). Forfeit wins score identically to judged wins; no-contests change nothing.
+- A win awards exactly one point and one Elo update. Elo starts at 1000 with K=32 (`src/elo.ts`). No-contests — including matches voided by a failed response — change nothing.
 - Each arena keeps its own ladder. Reasoning Elo and hallucination Elo never mix.
 
 ## The journal is the source of truth
