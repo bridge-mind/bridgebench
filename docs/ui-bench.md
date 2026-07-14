@@ -58,6 +58,30 @@ calls models exclusively through OpenRouter; see
 [`src/openrouter.ts`](../src/openrouter.ts)). Porting it means adapting that
 runner to `main`'s provider, not just copying the file.
 
+## Publish results to the API
+
+`ui evaluate --journal` appends the outcome (qualification, validation,
+evaluation diagnostics, artifact sha256) to the local journal at
+`results/ui/journal.jsonl` and copies the evaluated artifact plus its gallery
+screenshots to `results/ui/artifacts/<taskId>/<modelSlug>/`; `-m/--model`
+names the model the result is credited to. `ui publish` then pushes the
+journal to the configured API with the artifact HTML and screenshot bytes
+inlined:
+
+```bash
+npm run ui -- evaluate fixtures/golden-correct.html \
+  -t s1-lava-lamp-redux -m reference --journal
+npm run ui -- publish                                # needs BRIDGEBENCH_API_URL + BRIDGEBENCH_ADMIN_KEY
+```
+
+The local journal is the execution authority; the API
+(`POST /ui-bench/results/import`, admin-key guarded) stores a one-way
+published replica keyed by run — `--run-key` overrides the default
+`ui-s<season>-<yyyymmdd>` identity. Imports are idempotent: re-publishing an
+unchanged journal reports every result as skipped, while changed content for
+an already-published `(run, task, model)` is rejected as a conflict, so
+re-evaluated results belong under a fresh `--run-key`.
+
 ## Task spec
 
 Public task YAML lives at `tasks/current/ui/<id>.yaml` — season-prefixed id,

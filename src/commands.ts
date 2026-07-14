@@ -14,6 +14,7 @@ import { writeReports } from './report.js';
 import { ArenaStore, categoryStoreConfig } from './store.js';
 import { launchEvalBrowser, UiArtifactEvaluator } from './suites/ui/evaluator/index.js';
 import { UiArtifactNormalizer } from './suites/ui/normalizer.js';
+import { journalUiEvaluation, publishUiResults } from './suites/ui/publish.js';
 import { assessQualification } from './suites/ui/qualification.js';
 import { UiTaskLoader } from './suites/ui/task-loader.js';
 import { UiArtifactValidator } from './suites/ui/validator.js';
@@ -527,12 +528,14 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
       'Validate and render one HTML artifact against a UI Bench task and report qualification',
     )
     .requiredOption('-t, --id <taskId>', 'UI Bench task id, e.g. s1-lava-lamp-redux')
-    .action(async (file: string, options: { id: string }) => {
+    .option('-m, --model <modelId>', 'model id credited in the journal', 'reference')
+    .option('--journal', 'append the outcome to results/ui/journal.jsonl for ui publish', false)
+    .action(async (file: string, options: { id: string; model: string; journal: boolean }) => {
       const task = await new UiTaskLoader().loadById(options.id);
       const rawHtml = await readFile(path.resolve(file), 'utf8');
       const html = new UiArtifactNormalizer().normalize(rawHtml, {
         taskTitle: task.title,
-        modelName: 'reference',
+        modelName: options.model,
       });
       const validation = new UiArtifactValidator().validateHtml(html, task);
       for (const warning of validation.warnings) dependencies.stderr(`Warning: ${warning}`);
@@ -545,9 +548,27 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
         dependencies.setExitCode(qualification.qualified ? 0 : 1);
       };
 
+      const journal = async (
+        qualification: ReturnType<typeof assessQualification>,
+        evaluation: Parameters<typeof journalUiEvaluation>[0]['evaluation'],
+      ): Promise<void> => {
+        if (!options.journal) return;
+        const { journalPath } = await journalUiEvaluation({
+          task,
+          modelId: options.model,
+          html,
+          validation,
+          evaluation,
+          qualification,
+        });
+        dependencies.stdout(`Journaled to ${displayPath(journalPath)}`);
+      };
+
       if (!validation.valid) {
         for (const error of validation.errors) dependencies.stderr(`Error: ${error}`);
-        report(assessQualification({ task, validation, evaluation: null }));
+        const qualification = assessQualification({ task, validation, evaluation: null });
+        await journal(qualification, null);
+        report(qualification);
         return;
       }
 
@@ -574,10 +595,31 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
             `probes=${qualification.diagnostics.probesPartial ? 'partial (no private overlay)' : `${qualification.diagnostics.probesPassed}/${qualification.diagnostics.probesTotal}`}`,
         );
         dependencies.stdout(`Diagnostics written to ${displayPath(outputDir)}`);
+        await journal(qualification, evaluation);
         report(qualification);
       } finally {
         await browser.close();
       }
+    });
+
+  ui.command('publish')
+    .description(
+      'Push the local UI Bench journal (artifacts inlined) to the configured API. ' +
+        'Published runs are immutable: re-evaluated results need a fresh --run-key.',
+    )
+    .option('--run-key <runKey>', 'run identity at the API (default ui-s<season>-<yyyymmdd>)')
+    .action(async (options: { runKey?: string }) => {
+      const config = dependencies.resolveApiConfig();
+      dependencies.stdout(`Publishing UI Bench journal to ${publishTarget(config)}`);
+      const outcome = await publishUiResults({ runKey: options.runKey }, config);
+      if (outcome.results === 0) {
+        dependencies.stdout('The UI Bench journal is empty; nothing to publish.');
+        return;
+      }
+      dependencies.stdout(
+        `✓ ui: ${outcome.importedResults} imported, ${outcome.skippedResults} already present ` +
+          `(of ${outcome.results} journaled results; ${outcome.importedArtifacts} new artifact(s))`,
+      );
     });
 
   ui.command('run')
