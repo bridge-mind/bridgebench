@@ -44,11 +44,12 @@ function speedPublicTask(cluster: string, index: number) {
   };
 }
 
-/** A balanced public-only speed pack: 12 tasks, two per cluster. */
+/** A balanced public-only speed pack: 18 tasks, three per cluster. */
 function speedPack() {
   const tasks = CATEGORY_CLUSTERS.speed.flatMap((cluster) => [
     speedPublicTask(cluster, 1),
     speedPublicTask(cluster, 2),
+    speedPublicTask(cluster, 3),
   ]);
   return {
     category: 'speed',
@@ -77,7 +78,7 @@ describe('remote speed run', () => {
       vi.fn(async () => jsonResponse(speedPack())),
     );
     const { tasks } = await fetchExecutionPack(apiConfig, 'speed');
-    expect(tasks).toHaveLength(12);
+    expect(tasks).toHaveLength(18);
     expect(tasks.every((task) => task.private === null && task.privateHash === null)).toBe(true);
   });
 
@@ -108,7 +109,7 @@ describe('remote speed run', () => {
     const config: ArenaRunConfig = {
       category: 'speed',
       seed: 'speed-seed',
-      matches: 12,
+      matches: 18,
       maxCostUsd: 5,
       resume: false,
       competitorIds: SOL_FABLE_PILOT_COMPETITOR_IDS,

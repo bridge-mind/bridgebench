@@ -12,6 +12,7 @@ import { resolveCompetitorRoster } from './models.js';
 import { RemoteArenaEventSink } from './remote-events.js';
 import { createRunManifest, runIdFromManifest, runManifestHash } from './run-manifest.js';
 import { ArenaStore } from './store.js';
+import { TASKS_PER_CATEGORY } from './tasks.js';
 import {
   METHODOLOGY_VERSION,
   type ArenaRunConfig,
@@ -62,7 +63,8 @@ const ExecutionPackSchema = z.object({
   methodologyVersion: z.string(),
   competitors: z.array(z.unknown()),
   judges: z.array(z.unknown()),
-  tasks: z.array(ExecutionPackTaskSchema).length(12),
+  // Pack size follows TASKS_PER_CATEGORY (18 = 6 clusters × 3).
+  tasks: z.array(ExecutionPackTaskSchema).length(TASKS_PER_CATEGORY),
 });
 
 const CreateRunResponseSchema = z.object({
