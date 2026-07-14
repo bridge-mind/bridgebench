@@ -16,12 +16,22 @@
  * connect-src 'none', so anything that fetches at runtime would break anyway.
  */
 
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const threePkg = JSON.parse(readFileSync(join(repoRoot, 'node_modules/three/package.json'), 'utf8'));
+const threePkg = JSON.parse(
+  readFileSync(join(repoRoot, 'node_modules/three/package.json'), 'utf8'),
+);
 const version = threePkg.version;
 
 const srcBuild = join(repoRoot, 'node_modules/three/build');
