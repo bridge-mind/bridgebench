@@ -1,0 +1,208 @@
+id: api-migration-http-retry-client
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrating retryFetch call sites to the http.send client at Kelvin Freight
+summary: Six call sites are being moved from the legacy retryFetch helper to the new http.send client. The two APIs look alike but differ in attempt counting, body serialization, return shape, and error type. Classify each migrated call site as behavior-preserving or changes-behavior, citing the exact mismatch.
+prompt: |
+  The platform team at Kelvin Freight is retiring the legacy `retryFetch` helper in favor
+  of the new `http.send` client. A junior engineer has proposed six migrated call sites
+  (proposed-migrations M1..M6), each replacing an original in call-sites (C1..C6).
+
+  Answer each deliverable using ONLY the supplied artifacts (legacy-api, new-api,
+  mapping-note, call-sites, proposed-migrations). Cite the artifact id(s) for every claim.
+
+  For each migrated call site below, classify it as exactly one of:
+    - behavior-preserving  (the rewrite produces the same observable behavior as the original)
+    - changes-behavior     (the rewrite alters observable behavior; name the single defect)
+
+  "Observable behavior" includes the value/type returned to callers, the bytes and headers
+  sent on the wire, the number of network attempts made, which status codes trigger a retry,
+  and which catch branch fires. Assume the servers behave identically for both clients.
+
+  1. Classify M1 (the migration of C1).
+  2. Classify M2 (the migration of C2).
+  3. Classify M3 (the migration of C3).
+  4. Classify M4 (the migration of C4).
+  5. Classify M5 (the migration of C5).
+  6. Classify M6 (the migration of C6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the
+  artifacts. For every changes-behavior verdict, state the single citable defect and, where
+  relevant, a concrete input or condition that witnesses the difference.
+artifacts:
+  - id: legacy-api
+    type: spec
+    label: legacy retryFetch helper — signature, defaults, semantics
+    content: |
+      // http/legacy.ts — the retryFetch helper being retired.
+      // This is the COMPLETE set of options retryFetch accepts; there are no others.
+
+      function retryFetch<T>(url: string, opts?: {
+        method?: string;                 // default 'GET'
+        headers?: Record<string, string>;// default {}  (NO header is ever added implicitly)
+        body?: string;                   // RAW request body, sent verbatim. retryFetch does
+                                         // NOT serialize and does NOT set Content-Type. If the
+                                         // caller wants JSON, the caller must JSON.stringify AND
+                                         // set the Content-Type header itself.
+        retries?: number;                // number of ADDITIONAL attempts after the first.
+                                         // default 2. Total attempts made = 1 + retries.
+        timeoutMs?: number;              // per-attempt timeout. default 5000
+        retryOn?: number[];              // status codes that trigger a retry. default [502,503,504]
+      }): Promise<T>;
+
+      // Return / error semantics:
+      //  - On a 2xx response, retryFetch parses the body as JSON and RETURNS the parsed value (T).
+      //  - On a non-2xx whose status is in retryOn, it retries (up to `retries` more attempts).
+      //    After attempts are exhausted it throws LegacyHttpError with a numeric `.status` field.
+      //  - On a non-2xx NOT in retryOn, it throws LegacyHttpError immediately (no retry).
+      //  - LegacyHttpError exposes the failing HTTP status on the property `.status`.
+  - id: new-api
+    type: spec
+    label: new http.send client — signature, defaults, semantics
+    content: |
+      // http/client.ts — the replacement client. This is the COMPLETE option set for http.send.
+
+      http.send<T>(req: {
+        url: string;
+        method?: string;                 // default 'GET'
+        headers?: Record<string, string>;// default {}
+        json?: unknown;                  // when present, http.send JSON.stringifies this value AND
+                                         // sets the header Content-Type: application/json. Mutually
+                                         // exclusive with `body`.
+        body?: string;                   // raw body, sent verbatim, NO header added. Use this (not
+                                         // json) for any payload that is not application/json.
+        maxAttempts?: number;            // TOTAL attempts including the first. default 3.
+        timeoutMs?: number;              // per-attempt timeout. default 5000
+        retryStatuses?: number[];        // status codes that trigger a retry. default [502,503,504]
+      }): Promise<{ data: T; status: number }>;
+
+      // Return / error semantics:
+      //  - On a 2xx response, http.send RESOLVES to an envelope { data, status } where `data` is
+      //    the parsed JSON body and `status` is the numeric HTTP status. Callers must read `.data`.
+      //  - On a non-2xx whose status is in retryStatuses, it retries up to maxAttempts total, then
+      //    throws SendError. On a non-2xx not in retryStatuses it throws SendError immediately.
+      //  - SendError exposes the failing HTTP status on the property `.statusCode` (NOT `.status`).
+  - id: mapping-note
+    type: note
+    label: intended migration rules (platform team)
+    content: |
+      How to move a retryFetch call to http.send without changing behavior. These rules are
+      exhaustive for the differences between the two APIs.
+
+      1. RETURN SHAPE. retryFetch returns the parsed body directly; http.send returns
+         { data, status }. Every migrated call must read `.data` (e.g. destructure
+         `const { data } = await http.send(...)`) to recover the old return value.
+
+      2. ATTEMPT COUNT. retryFetch `retries: N` means N attempts AFTER the first, i.e. 1 + N
+         total. http.send `maxAttempts: M` is the TOTAL. So the faithful mapping is
+         maxAttempts = retries + 1. Copying the number across (maxAttempts = retries) drops one
+         attempt.
+
+      3. BODY. Use http.send `json:` ONLY when the original set Content-Type: application/json and
+         passed body: JSON.stringify(x); replace both with `json: x`. For ANY other body (raw text,
+         csv, form data, or a body sent without a Content-Type header) keep `body:` verbatim and
+         carry the original headers, because `json:` both re-serializes the value and forces
+         Content-Type: application/json.
+
+      4. DEFAULTS ALIGN. method ('GET'), timeoutMs (5000), and the retry status set ([502,503,504])
+         have identical defaults in both APIs, and http.send's default maxAttempts (3) equals
+         retryFetch's default total attempts (1 + default retries 2 = 3). Omitting all of these on
+         both sides is behavior-preserving. Only change a default if the original set it explicitly.
+
+      5. ERRORS. A catch block that read `LegacyHttpError.status` must read `SendError.statusCode`
+         after the switch; the property was renamed.
+  - id: call-sites
+    type: code
+    label: original retryFetch call sites (C1..C6)
+    content: |
+      // C1 — read a user, render its email
+      const u1 = await retryFetch<User>('/users/1');
+      renderCard(u1.email);
+
+      // C2 — read a user, render its email
+      const u2 = await retryFetch<User>('/users/2');
+      renderCard(u2.email);
+
+      // C3 — create an order; JSON body with explicit Content-Type; 5 extra retries
+      await retryFetch('/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(order),
+        retries: 5,
+      });
+
+      // C4 — emit an event; JSON body; 2 extra retries; 8s timeout; retry only on 503
+      await retryFetch('/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(evt),
+        retries: 2,
+        timeoutMs: 8000,
+        retryOn: [503],
+      });
+
+      // C5 — ingest a CSV export; raw text body with a text/csv Content-Type
+      await retryFetch('/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/csv' },
+        body: csvRows,           // csvRows is already a CSV string
+      });
+
+      // C6 — charge a card; on HTTP 402 show the payment-required screen, else rethrow
+      try {
+        await retryFetch('/charge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(chg),
+        });
+      } catch (e) {
+        if (e instanceof LegacyHttpError && e.status === 402) showPaymentRequired();
+        else throw e;
+      }
+  - id: proposed-migrations
+    type: code
+    label: proposed http.send rewrites (M1..M6)
+    content: |
+      // M1 — migration of C1
+      const { data: u1 } = await http.send<User>({ url: '/users/1' });
+      renderCard(u1.email);
+
+      // M2 — migration of C2
+      const u2 = await http.send<User>({ url: '/users/2' });
+      renderCard(u2.email);
+
+      // M3 — migration of C3
+      await http.send({
+        url: '/orders',
+        method: 'POST',
+        json: order,
+        maxAttempts: 5,
+      });
+
+      // M4 — migration of C4
+      await http.send({
+        url: '/events',
+        method: 'POST',
+        json: evt,
+        maxAttempts: 3,
+        timeoutMs: 8000,
+        retryStatuses: [503],
+      });
+
+      // M5 — migration of C5
+      await http.send({
+        url: '/ingest',
+        method: 'POST',
+        json: csvRows,
+      });
+
+      // M6 — migration of C6
+      try {
+        await http.send({ url: '/charge', method: 'POST', json: chg });
+      } catch (e) {
+        if (e instanceof SendError && e.status === 402) showPaymentRequired();
+        else throw e;
+      }
+tags: [api-migration, refactoring, http-client, behavior-preservation]

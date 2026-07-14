@@ -5,7 +5,15 @@ import type {
   MatchResult,
 } from '../../src/contracts/index';
 
-export type BenchmarkCategory = 'reasoning' | 'hallucination';
+export type BenchmarkCategory =
+  | 'reasoning'
+  | 'hallucination'
+  | 'security'
+  | 'bullshit'
+  | 'refactoring'
+  | 'debugging'
+  | 'generation'
+  | 'speed';
 
 export interface DashboardModel {
   id: string;

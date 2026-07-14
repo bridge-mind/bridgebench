@@ -1,0 +1,166 @@
+id: array-rotate-left-normalization
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: Which rotateLeft Candidate Normalizes Shift and Preserves the Input on Every Case
+summary: A spec defines rotateLeft(a, k) — rotate an array left by k, where k may be zero, negative (rotate right), or larger than the length, and the input must not be mutated. A complete acceptance vector gives exact expected arrays. Five candidates are submitted; some normalize the shift correctly, some fail on k>=length, some rotate the wrong direction, and one produces correct values but mutates the caller's array. Classify each conforms/violates and cite the disproving case.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector,
+  candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite
+  the artifact id(s) for every claim. Do not execute anything — trace each candidate by
+  hand against the acceptance-vector, which gives the exact expected output array.
+
+  Verdict vocabulary: a candidate CONFORMS if, for every acceptance-vector row, it
+  returns an array equal to the expected array AND it honors every declared property in
+  `spec` (including the no-mutation and new-array requirements); otherwise it VIOLATES.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or
+     violates. State the verdict for all five.
+
+  2. For every candidate you mark VIOLATES because it returns the wrong array, name ONE
+     acceptance-vector row (by its `a` and `k`) it fails, and give the array it returns
+     versus the expected array.
+
+  3. Exactly one candidate returns the correct element values on every row yet still
+     VIOLATES. Identify it, quote the exact construct responsible, and state the precise
+     caller-visible consequence.
+
+  4. candidate-a and candidate-e are written differently (slice/concat vs index copy).
+     State whether candidate-e is behaviorally equivalent to `spec` and justify from the
+     code.
+
+  5. State the complete set of conforming candidates.
+artifacts:
+  - id: spec
+    type: spec
+    label: rotateLeft specification (complete contract)
+    content: |
+      FUNCTION rotateLeft(a, k)
+
+      Inputs:
+        a  an array (of numbers). May be empty.
+        k  an integer. May be 0, negative, or larger in magnitude than a.length.
+
+      Return:
+        A NEW array equal to `a` rotated LEFT by k positions. Rotating left by 1 moves
+        a[0] to the end: rotateLeft([1,2,3], 1) === [2,3,4] ... (example continues in the
+        vector). Formally, let n = a.length. If n === 0, return []. Otherwise let the
+        effective shift s = ((k % n) + n) % n (a value in [0, n-1]); the result is
+        a.slice(s) followed by a.slice(0, s).
+
+      Declared properties (part of the contract, not examples):
+        P1  k is normalized: any integer k must behave as its effective shift s above. In
+            particular k === n (or any multiple of n) returns a copy in original order,
+            and k >= n rotates by k mod n, not by an out-of-range amount.
+        P2  Negative k rotates RIGHT: rotateLeft(a, -1) moves the last element to the
+            front.
+        P3  The input array `a` MUST NOT be mutated. The returned array MUST be a
+            distinct object from `a` (a new array), even when the effective shift is 0.
+
+      This is the complete contract.
+  - id: acceptance-vector
+    type: table
+    label: complete acceptance vector (exact expected arrays)
+    content: |
+      This table is the COMPLETE acceptance set. Each row is (a, k) -> expected result
+      array. "a after" restates that the ORIGINAL array must be unchanged after the call
+      (property P3); every row requires `a after` to equal the input `a`.
+
+      row  a            k    expected result   a after (must equal input)
+      R1   [1,2,3,4]    1    [2,3,4,1]         [1,2,3,4]
+      R2   [1,2,3,4]    0    [1,2,3,4]         [1,2,3,4]
+      R3   [1,2,3,4]    4    [1,2,3,4]         [1,2,3,4]   # full rotation -> copy
+      R4   [1,2,3,4]    6    [3,4,1,2]         [1,2,3,4]   # 6 mod 4 = 2
+      R5   [1,2,3,4]    -1   [4,1,2,3]         [1,2,3,4]   # rotate right by 1
+      R6   []           3    []                []
+      R7   [9]          5    [9]               [9]
+
+      Notes for tracing:
+        R3: k equals the length, so the effective shift is 0 -> the elements come back in
+            original order, but the returned array must still be a NEW array (P3).
+        R4: effective shift s = ((6 % 4) + 4) % 4 = 2 -> slice(2)=[3,4], slice(0,2)=[1,2].
+        R5: effective shift s = ((-1 % 4) + 4) % 4 = 3 -> slice(3)=[4], slice(0,3)=[1,2,3].
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function rotateLeft(a, k) {
+        const n = a.length;
+        if (n === 0) return [];
+        const s = ((k % n) + n) % n;
+        return a.slice(s).concat(a.slice(0, s));
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function rotateLeft(a, k) {
+        const n = a.length;
+        if (n === 0) return [];
+        return a.slice(k).concat(a.slice(0, k));   // no modular normalization of k
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function rotateLeft(a, k) {
+        const n = a.length;
+        if (n === 0) return [];
+        const s = ((k % n) + n) % n;
+        return a.slice(n - s).concat(a.slice(0, n - s));
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function rotateLeft(a, k) {
+        const n = a.length;
+        if (n === 0) return [];
+        const s = ((k % n) + n) % n;
+        for (let i = 0; i < s; i++) a.push(a.shift());   // operates on a
+        return a;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function rotateLeft(a, k) {
+        const n = a.length;
+        if (n === 0) return [];
+        const s = ((k % n) + n) % n;
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(a[(i + s) % n]);
+        return out;
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (scope and JS slice semantics)
+    content: |
+      Scope for this task:
+        - candidate-a … candidate-e are the COMPLETE set of submissions.
+        - acceptance-vector is the COMPLETE acceptance set. A candidate CONFORMS iff for
+          every row it (1) returns an array equal to the expected result AND (2) leaves
+          `a after` equal to the input AND (3) returns a distinct array object (P3). Any
+          row failing any of these makes the candidate VIOLATE.
+
+      JavaScript slice/concat facts you need to trace exactly (no execution required):
+        - a.slice(start): with start >= a.length yields []. With start negative, it
+          counts from the end: a.slice(-1) is the last element.
+        - a.slice(0, end): with end >= a.length yields the whole array; with end negative
+          it stops that many from the end: [1,2,3,4].slice(0, -1) = [1,2,3].
+        - a.slice(...) and a.concat(...) both return NEW arrays and never mutate `a`.
+        - a.shift() removes and returns a[0], mutating `a` in place; a.push(x) appends to
+          `a` in place. A function built from a.shift()/a.push() therefore rewrites the
+          caller's array and, if it returns `a`, returns the same object it was given.
+        - The normalized shift s = ((k % n) + n) % n always lies in [0, n-1].
+
+      Judge each candidate ONLY against this contract and vector, including P3 (no
+      mutation, new array). A candidate whose element values are correct still VIOLATES
+      if it mutates the input or hands back the same array object.
+tags: [algorithm, array, rotation, immutability, algorithmic-correctness, generation]

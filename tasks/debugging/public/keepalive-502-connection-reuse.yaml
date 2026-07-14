@@ -1,0 +1,162 @@
+id: keepalive-502-connection-reuse
+version: 1.0.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Intermittent 502s on a Payments Edge Proxy After Idle Gaps
+summary: >-
+  About 1% of POST /v1/charge requests through the checkoutd edge proxy return 502, always after a
+  lull in traffic. A timeout-tightening deploy shipped 30 minutes earlier and the database CPU spiked
+  during the window. Reconcile the nginx config, the upstream Node server settings, an interleaved
+  error/app log, a metrics table, a deploy diff, and a candidate-fix list to isolate the one root
+  cause, rule out the decoys, and pick the fix that holds without a double-charge.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (nginx-conf, node-server, edge-log,
+  metrics, deploy-diff, fixes). Cite the artifact id(s) for every claim.
+
+  1. ROOT CAUSE. Name the single defect and cite the exact artifact id and the specific setting(s)
+     that contain it. State precisely why it produces 502s only after idle gaps.
+  2. SYMPTOM-TO-CAUSE CHAIN. Using edge-log, trace one 502 from the idle gap to the reset. Cite the
+     specific log lines that establish (a) how long the reused connection had been idle, (b) that the
+     failure was a connection reset, not a read timeout, and (c) that the Node app never received the
+     request.
+  3. RED-HERRING DEPLOY. Explain why deploy d-914 (proxy_read_timeout 60s -> 30s) is NOT the root
+     cause, citing the error class in edge-log and what deploy-diff states was and was not changed.
+  4. RED-HERRING LOAD. Explain why the database CPU spike and rate limiting are not the cause, citing
+     the bucket in metrics where the 502s actually cluster.
+  5. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression,
+     and state the invariant that must hold between the two idle timers.
+  6. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow or
+     harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: nginx-conf
+    type: config
+    label: edge/nginx.conf — checkoutd payments edge proxy (production, current)
+    content: |
+      # This is the COMPLETE upstream + proxy configuration for the /v1/charge route.
+      # No other file overrides keepalive, timeout, or retry behavior for this route.
+
+      upstream charge_api {
+          server 10.0.3.11:8080;
+          server 10.0.3.12:8080;
+          keepalive 64;            # up to 64 idle upstream connections kept for reuse (per worker)
+          keepalive_timeout 60s;   # an IDLE upstream connection is kept and reused for up to 60s
+          keepalive_requests 1000;
+      }
+
+      server {
+          listen 443 ssl;
+          location /v1/charge {
+              proxy_pass http://charge_api;
+              proxy_http_version 1.1;
+              proxy_set_header Connection "";   # enables upstream keepalive reuse
+              proxy_read_timeout 30s;           # was 60s before deploy d-914 (see deploy-diff)
+              proxy_next_upstream off;          # nginx does NOT auto-retry /v1/charge on error
+          }
+      }
+      # With proxy_next_upstream off, a failed upstream attempt is returned to the client as 502;
+      # nginx never silently replays the request on a second upstream.
+  - id: node-server
+    type: code
+    label: charge-api/server.ts — the Node HTTP server behind nginx (both 10.0.3.11 and .12)
+    content: |
+      import http from 'node:http';
+      import { app } from './app';
+
+      const server = http.createServer(app);
+
+      // These two values are the ONLY socket-lifetime settings for this server.
+      // They have been at these values since the service first launched; never tuned.
+      server.keepAliveTimeout = 5000;   // ms — an IDLE keep-alive socket is CLOSED by Node after 5s
+      server.headersTimeout   = 6000;   // ms
+
+      server.listen(8080);
+
+      // app.ts emits "req.start conn=<id> POST /v1/charge" for EVERY request it begins to handle,
+      // and a status line when it finishes. If a connection carries no req.start line, the app never
+      // received a request on it. This logging is unconditional and has no sampling.
+  - id: edge-log
+    type: log
+    label: interleaved nginx error log (E) + charge-api app log (A), 12:00-12:04
+    content: |
+      # conn=<id> is the upstream socket nginx uses. Node closes an idle socket 5s after its last use.
+      # A req.start is emitted for every request the app begins; a 502 with no matching A line means
+      # the app never saw the request.
+
+      12:00:01.010 A req.start conn=c-208 POST /v1/charge -> 200 in 42ms   (fresh conn, first use)
+      12:00:01.402 A req.start conn=c-208 POST /v1/charge -> 200 in 39ms   (reused after 0.4s idle, OK)
+      12:00:02.900 A req.start conn=c-208 POST /v1/charge -> 200 in 41ms   (reused after 1.5s idle, OK)
+      # ---- quiet period: no /v1/charge traffic from 12:00:03 to 12:00:46 ----
+      12:00:47.120 E * upstream prematurely closed connection while reading response header;
+                       conn reused=c-208 upstream 10.0.3.11:8080 request "POST /v1/charge" -> 502
+      12:00:47.121 E * errno reported: 104 (Connection reset by peer). No "upstream timed out (110)".
+      # c-208 was last used 12:00:02.900, i.e. idle 44.2s (>> Node's 5s). There is NO A req.start line
+      # for c-208 at 12:00:47: the app never began this request.
+      12:00:47.640 A req.start conn=c-311 POST /v1/charge -> 200 in 43ms   (client's own retry, fresh conn, OK)
+      12:03:10.005 A req.start conn=c-402 POST /v1/charge -> 200 in 40ms
+      12:03:11.220 A req.start conn=c-402 POST /v1/charge -> 200 in 44ms   (reused after 1.2s idle, OK)
+      # ---- quiet period from 12:03:12 to 12:04:02 ----
+      12:04:03.700 E * recv() failed (104: Connection reset by peer) while reading response header
+                       from upstream; conn reused=c-402 request "POST /v1/charge" -> 502
+      # c-402 last used 12:03:11.220, idle 52.5s. Again no A req.start on c-402 at 12:04:03.
+      # Every 502 in this window is a 104 reset on a connection idle > 5s, with no app-side req.start.
+  - id: metrics
+    type: table
+    label: charge-api + database, 5-minute buckets (11:55-12:15)
+    content: |
+      bucket        req_502  req_total  read_timeouts_110  db_p99_ms  db_cpu%  http_429  tls_errs
+      11:55-12:00   1        4120       0                  38         44       0         0
+      12:00-12:05   3        180        0                  41         46       0         0
+      12:05-12:10   0        5330       0                  39         71       0         0
+      12:10-12:15   0        6010       0                  40         77       0         0
+      # On-call note: the 502s land in the LOW-traffic 12:00-12:05 bucket (only 180 requests), the one
+      # with the longest idle gaps. The HIGH-traffic buckets, where db_cpu peaked at 77%, had ZERO 502s.
+      # read_timeouts_110 (nginx "upstream timed out") = 0 all window. http_429 = 0. tls_errs = 0.
+  - id: deploy-diff
+    type: diff
+    label: deploy d-914 — "tighten edge timeouts" (rolled out 11:30, ~30 min before first 502)
+    content: |
+      # Files changed by d-914: edge/nginx.conf ONLY.
+        location /v1/charge {
+            proxy_pass http://charge_api;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+      -     proxy_read_timeout 60s;
+      +     proxy_read_timeout 30s;
+        }
+      # d-914 did NOT touch: upstream keepalive / keepalive_timeout, proxy_next_upstream, or anything
+      # in charge-api/server.ts. server.keepAliveTimeout has been 5000ms since the service launched;
+      # this deploy did not introduce it.
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Revert d-914 — set proxy_read_timeout back to 60s.
+      F2: Set charge-api server.keepAliveTimeout = 65000 and headersTimeout = 66000, so Node's
+          idle-close window (65s) exceeds nginx's 60s upstream keepalive_timeout.
+      F3: Set nginx upstream keepalive_timeout = 3s, below Node's 5s idle close.
+      F4: Set proxy_next_upstream on with proxy_next_upstream_tries 2, so nginx replays a 502 on a
+          fresh connection.
+
+      Constraints (from runbook R-7):
+        - POST /v1/charge is NOT idempotent: there is no idempotency key on this route. Replaying a
+          charge that the upstream may actually have received risks a DOUBLE CHARGE.
+        - charge-api sits behind mTLS from nginx; each NEW upstream connection costs a full TLS
+          handshake. The upstream accept path sustains at most ~500 handshakes/s; steady state is
+          ~7000 req/s carried over the 64 reused keepalive connections. Connections routinely sit
+          idle 5-40s between the bursts that fill each 5-minute bucket. Do not shrink or disable
+          upstream keepalive reuse.
+  - id: topology
+    type: note
+    label: request path and failure semantics (reference)
+    content: |
+      Path: client -> nginx (edge) -> keepalive pool -> charge-api (Node) -> Postgres.
+      nginx reuses an idle upstream connection if one is available in the pool and within its
+      keepalive_timeout window. Node independently closes any keep-alive socket that has been idle
+      longer than server.keepAliveTimeout. If nginx selects a socket that Node has already closed,
+      Node's side is gone: the first bytes nginx writes draw a TCP RST (errno 104), surfaced to the
+      client as 502 "upstream prematurely closed connection". This is distinct from errno 110
+      ("upstream timed out"), which is what a slow-but-open upstream would produce.
+tags: [debugging, root-cause-isolation, nginx, keepalive, http-502]

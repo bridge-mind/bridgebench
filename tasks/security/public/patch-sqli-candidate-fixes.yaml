@@ -1,0 +1,243 @@
+id: patch-sqli-candidate-fixes
+version: 1.1.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Quarry Catalog Search — Verifying Four Candidate SQL-Injection Fixes
+summary: >-
+  A reported SQL injection in the Quarry catalog search endpoint concatenates a
+  `sort` column name and a `q` search term (and a `limit`) straight into SQL. Four
+  competing candidate patches are submitted. Decide which actually close the
+  declared sinks and which are shallow or fix the wrong context — analysis only, no
+  payloads.
+prompt: |
+  You are reviewing candidate fixes for a reported SQL-injection finding in the
+  "Quarry" catalog service. The endpoint GET /catalog/search builds one SQL string by
+  concatenating request input. Four engineers submitted competing patches (A, B, C, D);
+  exactly one — or some combination — will be merged.
+
+  You are given seven artifacts: original-search (the vulnerable handler), patch-a,
+  patch-b, patch-c, patch-d (four competing candidate diffs), query-shape (the
+  authoritative, exhaustive inventory of every position where request input reaches the
+  SQL string), and vuln-report (the finding).
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If something is not defined or not reachable in the artifacts,
+  say so explicitly. This is analysis only: describe sink CONTEXTS (value context,
+  identifier context, integer context) and the mechanism appropriate to each — do NOT
+  write injection strings, payloads, or working bypasses.
+
+  Definitions you must use:
+  - Verdicts in this task are PER SINK POSITION, not per patch. query-shape declares
+    exactly three positions: S1 (the `q` value context), S2a (the `sort` identifier
+    context), and S2b (the `limit` integer context). For every patch, report the set of
+    positions it CLOSES and the set it LEAVES OPEN.
+  - A patch CLOSES a given sink position only if it applies the mechanism appropriate to
+    THAT position's CONTEXT (as query-shape specifies) to THAT position. It LEAVES a
+    position OPEN otherwise — either because it does not modify that position, or because
+    it applies a mechanism that does not fit that position's context.
+  - query-shape is the exhaustive sink inventory: do not invent injectable positions it
+    does not list, and do not omit ones it does.
+
+  Deliverables:
+
+  1. Patch A (patch-a): for each of the three declared sink positions (S1, S2a, S2b),
+     state whether patch A CLOSES it or LEAVES it OPEN, and give the mechanism-to-context
+     reason for each.
+
+  2. Patch B (patch-b): for each of S1, S2a, S2b, state closed or open with the
+     mechanism-to-context reason. Where its mechanism does not fit a position's context,
+     say so explicitly.
+
+  3. Patch C (patch-c): for each of S1, S2a, S2b, state closed or open with the
+     mechanism-to-context reason. Name the mechanism/context mismatch precisely — which
+     context the mechanism applies to and which context(s) it is inert against.
+
+  4. Patch D (patch-d): for each of S1, S2a, S2b, state closed or open with the
+     mechanism-to-context reason. Patch D changes only the LIMIT input; confirm strictly
+     from query-shape whether the position it touches is a real declared sink or too
+     narrow to matter.
+
+  5. Considering all four patches, which patch or combination of patches fully closes
+     EVERY declared sink in query-shape (S1, S2a, S2b)? Give the minimal set and show,
+     per declared sink, which patch closes it. State whether any single patch suffices.
+
+  6. Residual risk: if a DOES-NOT-CLOSE patch were merged in the belief it resolved the
+     finding, what remains reachable? Address at least (a) merging patch C alone and
+     (b) merging patch A alone without D. For each, name the declared sink positions that
+     remain injectable and describe the resulting risk at the precondition level only —
+     no payloads.
+artifacts:
+  - id: original-search
+    type: code
+    label: Quarry catalog search handler (vulnerable original)
+    content: |
+      // quarry/catalog/search.ts — GET /catalog/search handler (Quarry 2.x).
+      // Builds a single SQL string and runs it via db.query(sql). No ORM, no bound
+      // parameters in this version.
+
+      export async function searchCatalog(req: Request, res: Response) {
+        const q = String(req.query.q ?? '');          // free-text search term
+        const sort = String(req.query.sort ?? 'name'); // column to order by
+        const limit = String(req.query.limit ?? '20'); // page size
+
+        // q is spliced INTO a single-quoted string literal.
+        // sort and limit are spliced in RAW, outside any quotes.
+        const sql =
+          `SELECT id, name, sku, price ` +
+          `FROM catalog_items ` +
+          `WHERE name ILIKE '%${q}%' ` +
+          `ORDER BY ${sort} ASC ` +
+          `LIMIT ${limit}`;
+
+        const rows = await db.query(sql); // db.query(sql) takes a raw string only here
+        return res.json({ items: rows });
+      }
+  - id: query-shape
+    type: spec
+    label: Authoritative, exhaustive sink inventory for GET /catalog/search
+    content: |
+      Quarry catalog search — AUTHORITATIVE sink inventory for GET /catalog/search.
+      This is the COMPLETE list of positions where request input reaches the SQL string.
+      There are no other injectable positions in this handler.
+
+      The handler emits exactly one SQL string of the shape:
+
+        SELECT id, name, sku, price
+        FROM catalog_items
+        WHERE name ILIKE '%<q>%'
+        ORDER BY <sort> ASC
+        LIMIT <limit>
+
+      Declared sinks (exhaustive):
+
+        S1 — VALUE context. The `q` term is emitted INSIDE a single-quoted string
+             literal ( ...ILIKE '%<q>%'... ). One tainted position.
+             Context-appropriate close: bind `q` as a query parameter (preferred), or,
+             at minimum, correctly escape it FOR the string-literal context. A keyword
+             denylist does NOT close a value context.
+
+        S2 — ORDER BY / pagination context. The trailing clause
+             `ORDER BY <sort> ASC LIMIT <limit>` contains TWO tainted positions, BOTH
+             emitted OUTSIDE any string literal:
+
+               S2a — the `sort` IDENTIFIER position: a bare column name after ORDER BY.
+                     Context-appropriate close: an ALLOWLIST mapping the input to one of
+                     a fixed set of known columns. Quoting/escaping is INERT here — an
+                     identifier is not a string literal, so doubling single quotes
+                     changes nothing about this position. A keyword denylist does not
+                     close it either.
+
+               S2b — the `limit` INTEGER position: a bare number after LIMIT.
+                     Context-appropriate close: coerce/validate the input to an integer
+                     (e.g. parseInt, numeric cast). Quoting/escaping is inert here too.
+
+      Grading rule: a candidate patch CLOSES a given position only if it applies the
+      mechanism appropriate to THAT position's context to THAT position. "Fully closes
+      every declared sink" means S1 AND S2a AND S2b are all closed. Naming or filtering a
+      position is not the same as closing it — the mechanism must fit the context.
+  - id: patch-a
+    type: diff
+    label: Patch A — parameterize q, allowlist the sort column
+    content: |
+      // Patch A: bind `q` as a parameter and map `sort` through a fixed allowlist.
+      --- a/quarry/catalog/search.ts
+      +++ b/quarry/catalog/search.ts
+      @@ handler body
+      -  const sql =
+      -    `SELECT id, name, sku, price ` +
+      -    `FROM catalog_items ` +
+      -    `WHERE name ILIKE '%${q}%' ` +
+      -    `ORDER BY ${sort} ASC ` +
+      -    `LIMIT ${limit}`;
+      -
+      -  const rows = await db.query(sql);
+      +  const SORT_COLUMNS: Record<string, string> = {
+      +    name: 'name', price: 'price', sku: 'sku', newest: 'created_at',
+      +  };
+      +  const sortCol = SORT_COLUMNS[sort] ?? 'name'; // anything not in the map -> 'name'
+      +
+      +  const sql =
+      +    `SELECT id, name, sku, price ` +
+      +    `FROM catalog_items ` +
+      +    `WHERE name ILIKE '%' || $1 || '%' ` +  // q is now a bound parameter
+      +    `ORDER BY ${sortCol} ASC ` +            // sortCol is an allowlisted column name
+      +    `LIMIT ${limit}`;
+      +
+      +  const rows = await db.query(sql, [q]);
+  - id: patch-b
+    type: diff
+    label: Patch B — block SQL keywords in q and sort
+    content: |
+      // Patch B: reject inputs containing SQL keywords or comment/terminator markers.
+      --- a/quarry/catalog/search.ts
+      +++ b/quarry/catalog/search.ts
+      @@ handler body
+      +  const BLOCKED = /\b(DROP|DELETE|INSERT|UPDATE|UNION|SELECT)\b|--|;/i;
+      +  if (BLOCKED.test(q) || BLOCKED.test(sort)) {
+      +    return res.status(400).json({ error: 'invalid search input' });
+      +  }
+      +
+         const sql =
+           `SELECT id, name, sku, price ` +
+           `FROM catalog_items ` +
+           `WHERE name ILIKE '%${q}%' ` +
+           `ORDER BY ${sort} ASC ` +
+           `LIMIT ${limit}`;
+      // q, sort, and limit are still concatenated raw into the SQL string.
+  - id: patch-c
+    type: diff
+    label: Patch C — neutralize the search injection by escaping single quotes
+    content: |
+      // Patch C: close the SQL injection by escaping single quotes in user input.
+      --- a/quarry/catalog/search.ts
+      +++ b/quarry/catalog/search.ts
+      @@ handler body
+      -  const sql =
+      +  const qEsc = q.replace(/'/g, "''"); // double single quotes
+      +  const sql =
+           `SELECT id, name, sku, price ` +
+           `FROM catalog_items ` +
+      -    `WHERE name ILIKE '%${q}%' ` +
+      +    `WHERE name ILIKE '%${qEsc}%' ` +
+           `ORDER BY ${sort} ASC ` +   // sort still concatenated raw
+           `LIMIT ${limit}`;           // limit still concatenated raw
+  - id: patch-d
+    type: diff
+    label: Patch D — coerce the LIMIT input to an integer
+    content: |
+      // Patch D: reject non-integer LIMIT values by coercing to an integer.
+      --- a/quarry/catalog/search.ts
+      +++ b/quarry/catalog/search.ts
+      @@ handler body
+      -  const limit = String(req.query.limit ?? '20'); // page size
+      +  const n = parseInt(String(req.query.limit ?? '20'), 10);
+      +  const limit = String(Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20); // integer only
+      @@ (SQL string unchanged; q and sort still concatenated as before)
+         const sql =
+           `SELECT id, name, sku, price ` +
+           `FROM catalog_items ` +
+           `WHERE name ILIKE '%${q}%' ` +
+           `ORDER BY ${sort} ASC ` +
+           `LIMIT ${limit}`;
+  - id: vuln-report
+    type: note
+    label: Quarry security advisory QRY-2026-031 (internal)
+    content: |
+      Advisory QRY-2026-031 (internal, fictional).
+
+      A reporter found that GET /catalog/search builds its SQL by string concatenation
+      and that both the `q` search term and the `sort` column name are attacker
+      controllable. Four candidate patches (A-D) were submitted for review.
+
+      Request to the reviewer:
+        - For each patch, determine whether it CLOSES the injection for the sink context
+          it targets, and give the sink-context reason.
+        - Using the authoritative sink inventory in query-shape, determine which
+          patch(es) TOGETHER close every declared sink.
+
+      Note: the original write-up focused on `q` and `sort`. Treat query-shape as the
+      exhaustive, authoritative sink list for this handler — it additionally covers the
+      LIMIT position. Do not flag positions query-shape does not list, and do not dismiss
+      positions it does.
+tags: [security, patch-verification, sql-injection, sink-context, code-review]

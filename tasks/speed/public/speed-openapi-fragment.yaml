@@ -1,0 +1,38 @@
+id: speed-openapi-fragment
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: hard
+title: Emit an OpenAPI 3.1 Path Fragment for a Documented Endpoint
+summary: >-
+  Produce a valid OpenAPI 3.1 YAML fragment describing one endpoint, its path parameter, request body,
+  and two response codes, matching the written contract exactly.
+prompt: |
+  Given [endpoint-contract], output a single OpenAPI 3.1 YAML fragment containing the `paths` entry for
+  `POST /projects/{projectId}/tasks` and the `components/schemas` it references. Emit only YAML.
+
+  1. The `paths` object for the endpoint, including the path parameter, request body, and the 201 and
+     422 responses.
+  2. `components/schemas` entries `TaskInput` and `Task` matching the field list, with required fields,
+     enums, and formats.
+artifacts:
+  - id: endpoint-contract
+    type: spec
+    label: Endpoint contract
+    content: |
+      POST /projects/{projectId}/tasks
+      - path param projectId: string, format uuid, required
+      - request body (application/json), required: TaskInput
+        TaskInput = {
+          title: string, 1..200 chars, required
+          assigneeId?: string (uuid)
+          priority: one of "low" | "med" | "high", default "med"
+        }
+      - 201 response (application/json): Task
+        Task = {
+          id: string uuid; projectId: string uuid; title: string;
+          assigneeId: string | null; priority: string; createdAt: string date-time
+        }
+      - 422 response (application/json): { message: string; field?: string }
+      - security: bearerAuth
+tags: [openapi, yaml, api-design]

@@ -1,0 +1,155 @@
+id: fidelity-wire-format
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: QMTP Binary Frame Header Extraction
+summary: Extract exact offsets, widths, magic bytes, type codes, flag bits, and a message id from a binary protocol header, a hexdump, a reference struct, and errata dense with near-duplicate offsets, versions, and values.
+prompt: |
+  Extract the following facts EXACTLY from the artifacts about the QMTP binary framing protocol.
+
+  Quote byte values, offsets, widths, and spec sentences character-for-character from the named
+  artifact. Rules:
+    - All offsets are hexadecimal byte offsets from the start of the frame; all multi-byte integer
+      fields are big-endian.
+    - The current wire format is QMTP rev 2.1. Do NOT use rev 2.0 offsets or widths (see errata);
+      they are superseded.
+    - Do not confuse near-duplicate offsets (0x0C vs 0x14), widths (2 vs 4 bytes), type codes
+      (0x03 vs 0x04), or version/revision numbers.
+    - When asked to quote a sentence, reproduce it word-for-word from the spec/errata, not from the
+      informal summary (summary-doc paraphrases and rounds).
+    - The "captured frame" means the specific frame shown in hexdump.
+
+  Deliverables:
+    1. Quote the exact 4-byte magic number (as hex bytes) and state the offset and width of the
+       version field.
+    2. In the current (rev 2.1) header, at what offset and width does the payload_length field
+       sit, and what is its value in the captured frame?
+    3. What is the exact msg_type byte in the captured frame, and what message type does that byte
+       denote per the type-registry?
+    4. Which bit(s) are set in the captured frame's flags byte, and what does each set bit mean?
+    5. Give the exact message_id value (hex) in the captured frame, and the offset and width of the
+       message_id field.
+    6. Quote verbatim the rev 2.1 errata sentence describing what the header_crc covers, then state
+       the exact byte range (offsets) over which the CRC is computed.
+artifacts:
+  - id: header-spec
+    type: spec
+    label: QMTP rev 2.1 frame header layout
+    content: |
+      QMTP frame header layout — revision 2.1 (CURRENT wire format). All offsets are hex byte
+      offsets from the start of the frame. Integers are big-endian.
+
+      offset | width | field           | notes
+      0x00   | 4     | magic           | constant bytes 51 4D 54 50 ("QMTP")
+      0x04   | 1     | version         | protocol major version; 0x02 for QMTP 2.x
+      0x05   | 1     | msg_type        | message type code (see type-registry)
+      0x06   | 1     | flags           | bit flags (see flags-spec)
+      0x07   | 1     | reserved        | must be 0x00
+      0x08   | 4     | payload_length  | uint32, number of payload bytes following the header
+      0x0C   | 8     | message_id      | uint64 message identifier
+      0x14   | 2     | header_crc      | uint16 CRC-16 (see errata for coverage)
+
+      The fixed header is 0x16 (22) bytes long; the payload begins at offset 0x16. Note the
+      easily-confused pairs: payload_length is 4 bytes at 0x08 while header_crc is 2 bytes at 0x14;
+      message_id is 8 bytes at 0x0C.
+  - id: flags-spec
+    type: spec
+    label: QMTP flags byte bit definitions
+    content: |
+      QMTP flags byte (the single byte at offset 0x06). Bit 0 is the least-significant bit.
+
+      bit | mask | name       | meaning
+      0   | 0x01 | DUP        | this frame is a redelivery of a previously sent frame
+      1   | 0x02 | RETAIN     | the broker retains this message for future subscribers
+      2   | 0x04 | COMPRESSED | the payload is compressed
+      3   | 0x08 | ENCRYPTED  | the payload is encrypted
+      4-7 |      | reserved   | reserved, must be 0
+
+      A flags byte is the bitwise OR of the set bits. Watch the near-duplicate masks: DUP is 0x01
+      and RETAIN is 0x02; COMPRESSED is 0x04 and ENCRYPTED is 0x08.
+  - id: type-registry
+    type: table
+    label: QMTP message type registry
+    content: |
+      QMTP msg_type codes (the single byte at offset 0x05). This is the complete registry.
+      code | name
+      0x01 | CONNECT
+      0x02 | CONNACK
+      0x03 | PUBLISH
+      0x04 | PUBACK
+      0x10 | SUBSCRIBE
+      0x11 | SUBACK
+      0x12 | UNSUBSCRIBE
+      0x13 | UNSUBACK
+      0x20 | PINGREQ
+      0x21 | PINGRESP
+      0x30 | DISCONNECT
+      Confusable pairs: 0x03 PUBLISH vs 0x04 PUBACK; 0x11 SUBACK vs 0x13 UNSUBACK; 0x02 CONNACK vs
+      0x20 PINGREQ. The version byte value 0x02 is NOT a msg_type; msg_type is the byte at 0x05.
+  - id: hexdump
+    type: log
+    label: Captured QMTP frame (hexdump)
+    content: |
+      Captured QMTP frame — rev 2.1 wire format (the current format). xxd-style: the left column is
+      the hex byte offset, then 16 bytes per row, then the ASCII rendering.
+      00000000  51 4d 54 50 02 03 04 00  00 00 00 10 00 00 00 00   QMTP............
+      00000010  00 a1 b2 c3 9f 4e 7b 2a  ec 5d 10 08 44 91 6f 33   .....N{*.]..D.o3
+      00000020  1c 90 a7 5e 22 6b                                  ...^"k
+      Frame is 0x26 (38) bytes: a 0x16 (22)-byte header (offsets 0x00..0x15) followed by a 16-byte
+      payload (offsets 0x16..0x25). The payload bytes begin at 0x16 with 7b 2a ec 5d ...
+  - id: reference-impl
+    type: code
+    label: QMTP reference parser constants (rev 2.1)
+    content: |
+      /* qmtp_frame.h — reference constants for QMTP rev 2.1. */
+      #define QMTP_MAGIC          0x514D5450u  /* "QMTP" */
+      #define QMTP_VERSION        0x02u        /* major version 2 */
+      #define QMTP_HEADER_LEN     0x16u        /* 22 bytes; payload starts here */
+
+      /* field offsets (rev 2.1) and widths in bytes */
+      #define OFF_MAGIC           0x00u  /* width 4 */
+      #define OFF_VERSION         0x04u  /* width 1 */
+      #define OFF_MSG_TYPE        0x05u  /* width 1 */
+      #define OFF_FLAGS           0x06u  /* width 1 */
+      #define OFF_RESERVED        0x07u  /* width 1 */
+      #define OFF_PAYLOAD_LENGTH  0x08u  /* width 4, uint32 big-endian */
+      #define OFF_MESSAGE_ID      0x0Cu  /* width 8, uint64 big-endian */
+      #define OFF_HEADER_CRC      0x14u  /* width 2, uint16 big-endian */
+      /* These offsets/widths match header-spec exactly. Do not use the rev 2.0 values in errata. */
+  - id: errata
+    type: note
+    label: QMTP spec errata and revision history
+    content: |
+      QMTP specification errata / revision history.
+
+      rev 2.0 (2026-02-14, SUPERSEDED): payload_length was a 2-byte field at offset 0x06; there
+      were no separate flags or reserved bytes; message_id was at offset 0x0A. These offsets and
+      widths are OBSOLETE — do not use them for current frames.
+
+      rev 2.1 (2026-05-09, CURRENT): "The payload_length field is widened to 4 bytes and relocated
+      to offset 0x08. A 1-byte flags field is inserted at offset 0x06 and a 1-byte reserved field
+      at offset 0x07. The message_id field moves to offset 0x0C." All frames on the wire today
+      conform to rev 2.1.
+
+      rev 2.1 header_crc clarification (verbatim): "The header_crc at offset 0x14 is a CRC-16
+      computed over the 20 header bytes at offsets 0x00 through 0x13 inclusive; it does not cover
+      the header_crc field itself and does not cover the payload." (An earlier draft that stated the
+      CRC covers the entire frame was incorrect and is withdrawn.)
+  - id: summary-doc
+    type: note
+    label: QMTP informal summary (paraphrase)
+    content: |
+      QMTP in a nutshell — informal summary. This is a simplified, rounded overview; for the exact
+      layout always consult header-spec, reference-impl, and errata. Do not quote this summary as if
+      it were the spec.
+
+      - Frames start with the 4-character magic "QMTP", then a version, a type byte, and a flags
+        byte.
+      - The fixed header is about 20 bytes, and then the payload follows.
+      - Every frame carries a message id and a checksum that protects the header.
+      - The payload_length tells you how many payload bytes come after the header.
+
+      (Reminder: "about 20 bytes" and "protects the header" are loose paraphrases — the precise
+      header length and CRC coverage are in header-spec and errata.)
+tags: [hallucination, citation-fidelity, binary-protocol, wire-format, exact-value]

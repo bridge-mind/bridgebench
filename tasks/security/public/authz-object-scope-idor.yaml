@@ -1,0 +1,228 @@
+id: authz-object-scope-idor
+version: 1.0.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Vellum Multi-Tenant Document API — Object-Scope Isolation Analysis
+summary: >-
+  In the multi-tenant "Vellum" document API, every by-id read of an org-owned row
+  must carry an org_id predicate. Several by-id endpoints look suspicious; some are
+  scoped in a service layer, some are cross-org by design. Exactly one is a real
+  cross-tenant IDOR. Classify five endpoints, name the single defect, and locate
+  the fix — using only the artifacts.
+prompt: |
+  You are reviewing tenant isolation on "Vellum," a multi-tenant document API.
+  Rows in documents/folders belong to one organization via an org_id column, and
+  the caller's organization arrives as ctx.orgId. You are given seven artifacts:
+  documents-controller, folders-controller, document-service, shares-service,
+  db-queries, tenancy-spec, and design-note.
+
+  Answer each item using ONLY the supplied artifacts. Cite the artifact id(s) you
+  rely on for every claim. If something is not defined/reachable/exploitable in
+  the artifacts, say so explicitly. Do NOT write exploit code, requests, or
+  enumeration payloads — this is an analysis-only task.
+
+  For items 1–5, classify each endpoint as exactly one of: PROPERLY-SCOPED (tenant
+  isolation enforced), CROSS-TENANT IDOR (an org-owned row is loaded without an
+  org predicate), or INTENDED CROSS-ORG / GLOBAL (unscoped access is by design).
+  Justify each answer by citing the query's actual WHERE predicate (db-queries),
+  the code path that builds it, and the relevant tenancy rule or design decision.
+
+  1. GET   /documents/:id     (DocumentsController.getDocument)
+  2. GET   /folders/:id       (FoldersController.getFolder)
+  3. GET   /shares/:token     (SharesService.resolveShare)
+  4. GET   /templates/:id     (template catalog read)
+  5. PATCH /documents/:id     (DocumentsController.updateDocument) — is this a
+     broken-tenant-isolation or a mass-assignment defect, or neither?
+
+  6. Exactly one endpoint is a genuine cross-tenant IDOR (broken object-level
+     authorization). Name that single endpoint and state the precondition an
+     attacker needs for it to be exploitable. Ground the claim in the query
+     predicate and the tenancy rule it violates.
+
+  7. State where and how to fix the IDOR from item 6 — the exact predicate to add
+     and the layer it belongs in — and explain why a fix at that layer is correct
+     while a controller-level check is not the right place.
+artifacts:
+  - id: documents-controller
+    type: code
+    label: vellum-api/src/documents/documents.controller.ts
+    content: |
+      // Every route requires a valid session (global AuthGuard) and receives the
+      // caller's tenant context as `ctx` (ctx.orgId = the caller's organization).
+      // This file lists every route on the /documents controller.
+
+      @Controller('documents')
+      @UseGuards(AuthGuard)
+      export class DocumentsController {
+        // Read a single document by id. For latency this reads through the
+        // repository DIRECTLY rather than DocumentService; the SQL it runs is
+        // db-queries q_get_document.
+        @Get(':id')
+        getDocument(@Ctx() ctx: TenantCtx, @Param('id') id: string) {
+          return this.documentsRepo.findById(id);
+        }
+
+        // List the caller's documents (through DocumentService).
+        @Get()
+        listDocuments(@Ctx() ctx: TenantCtx) {
+          return this.documentService.listDocuments(ctx);
+        }
+
+        // Update a document. The body is bound to UpdateDocumentDto, which is
+        // `strict`: only `title` and `body` are accepted; unknown keys (including
+        // org_id) are stripped and rejected. Persists via DocumentService.
+        @Patch(':id')
+        updateDocument(
+          @Ctx() ctx: TenantCtx,
+          @Param('id') id: string,
+          @Body() dto: UpdateDocumentDto,
+        ) {
+          return this.documentService.updateDocument(ctx, id, dto);
+        }
+
+        // Soft-delete a document (through DocumentService).
+        @Delete(':id')
+        deleteDocument(@Ctx() ctx: TenantCtx, @Param('id') id: string) {
+          return this.documentService.deleteDocument(ctx, id);
+        }
+      }
+  - id: folders-controller
+    type: code
+    label: vellum-api/src/folders/folders.controller.ts
+    content: |
+      // This file lists every route on the /folders controller. Note the
+      // controller does not itself add any tenant filter — folder scoping lives in
+      // DocumentService (see document-service).
+
+      @Controller('folders')
+      @UseGuards(AuthGuard)
+      export class FoldersController {
+        @Get(':id')
+        getFolder(@Ctx() ctx: TenantCtx, @Param('id') id: string) {
+          return this.documentService.getFolder(ctx, id);
+        }
+
+        @Get(':id/documents')
+        listFolderDocuments(@Ctx() ctx: TenantCtx, @Param('id') id: string) {
+          return this.documentService.listFolderDocuments(ctx, id);
+        }
+      }
+  - id: document-service
+    type: code
+    label: vellum-api/src/documents/document.service.ts
+    content: |
+      // Tenant scoping for folder reads, list reads, updates, and deletes lives
+      // HERE: each method injects ctx.orgId into the query it builds. The raw SQL
+      // for each is catalogued in db-queries.
+
+      @Injectable()
+      export class DocumentService {
+        getFolder(ctx: TenantCtx, id: string) {
+          // q_get_folder: WHERE id = :id AND org_id = :orgId
+          return this.foldersRepo.findScoped(id, ctx.orgId);
+        }
+
+        listFolderDocuments(ctx: TenantCtx, folderId: string) {
+          // q_list_folder_docs: WHERE folder_id = :id AND org_id = :orgId
+          return this.documentsRepo.findByFolderScoped(folderId, ctx.orgId);
+        }
+
+        listDocuments(ctx: TenantCtx) {
+          // q_list_documents: WHERE org_id = :orgId AND deleted_at IS NULL
+          return this.documentsRepo.findAllScoped(ctx.orgId);
+        }
+
+        updateDocument(ctx: TenantCtx, id: string, dto: UpdateDocumentDto) {
+          // q_update_document: WHERE id = :id AND org_id = :orgId
+          return this.documentsRepo.updateScoped(id, ctx.orgId, dto);
+        }
+
+        deleteDocument(ctx: TenantCtx, id: string) {
+          // q_delete_document: WHERE id = :id AND org_id = :orgId
+          return this.documentsRepo.softDeleteScoped(id, ctx.orgId);
+        }
+
+        // NOTE: single-document-by-id reads are NOT served here.
+        // DocumentsController.getDocument calls documentsRepo.findById(id)
+        // directly (see documents-controller), bypassing this scoping layer.
+      }
+  - id: shares-service
+    type: code
+    label: vellum-api/src/shares/shares.service.ts
+    content: |
+      // Public share links. A document owner mints an unguessable 256-bit token;
+      // anyone holding the token — INCLUDING users in other organizations — may
+      // read the shared document. This cross-org access is intentional (design-note).
+      // GET /shares/:token routes straight to resolveShare().
+
+      @Injectable()
+      export class SharesService {
+        // q_get_share: WHERE share_token = :token AND revoked_at IS NULL
+        resolveShare(token: string) {
+          return this.sharesRepo.findByToken(token);
+        }
+      }
+  - id: db-queries
+    type: table
+    label: Vellum data-access catalog (per-endpoint WHERE predicates — complete)
+    content: |
+      The WHERE predicate of every by-id / by-token read and write in Vellum. This
+      catalog is COMPLETE: every endpoint that loads or mutates a row by an
+      identifier appears here with the EXACT predicate its query uses. If a
+      predicate is not shown for an endpoint, that endpoint does not exist.
+
+      endpoint                     | query id           | table     | WHERE predicate
+      -----------------------------|--------------------|-----------|----------------------------------------------
+      GET    /documents/:id        | q_get_document     | documents | id = :id
+      GET    /documents            | q_list_documents   | documents | org_id = :orgId AND deleted_at IS NULL
+      PATCH  /documents/:id        | q_update_document  | documents | id = :id AND org_id = :orgId
+      DELETE /documents/:id        | q_delete_document  | documents | id = :id AND org_id = :orgId
+      GET    /folders/:id          | q_get_folder       | folders   | id = :id AND org_id = :orgId
+      GET    /folders/:id/documents| q_list_folder_docs | documents | folder_id = :id AND org_id = :orgId
+      GET    /shares/:token        | q_get_share        | shares    | share_token = :token AND revoked_at IS NULL
+      GET    /templates/:id        | q_get_template     | templates | id = :id
+  - id: tenancy-spec
+    type: spec
+    label: Vellum multi-tenancy rules (authoritative)
+    content: |
+      Authoritative tenant-isolation rules.
+
+      1. Every row in `documents`, `folders`, and `document_versions` belongs to
+         exactly one organization via its `org_id` column. A caller in org A must
+         never read, update, or delete a row whose org_id != A.
+
+      2. Therefore every query that loads such a row by its primary key MUST include
+         `AND org_id = :orgId`, where :orgId is the caller's organization from the
+         tenant context. A by-id read of an org-owned row that omits this predicate
+         is a cross-tenant isolation defect (IDOR): document ids are UUIDv7 and
+         appear in URLs, export bundles, and webhook payloads, so an id belonging to
+         org B is readily observable by a user in org A.
+
+      3. EXCEPTIONS — rows that are intentionally NOT org-scoped:
+         - `templates`: a single GLOBAL catalog shared by all organizations.
+           Template rows have no org_id column; GET /templates/:id is global by
+           design and correctly omits an org predicate.
+         - Share links (`shares`): access is granted by possession of an unguessable
+           256-bit `share_token`, not by org membership. A cross-org read via a
+           valid token is an intended product feature (see design-note).
+
+      4. Write endpoints MUST bind the request body to a strict DTO that whitelists
+         updatable columns. `org_id` is never an updatable column.
+  - id: design-note
+    type: note
+    label: Vellum design notes — cross-org sharing and the update path
+    content: |
+      Share links are meant to cross tenant boundaries. When a document owner
+      creates a share we mint a 256-bit random token; anyone holding the link can
+      read that one document regardless of their organization. Enumeration is not a
+      concern: the token space is unguessable and resolveShare() looks up STRICTLY
+      by token (db-queries q_get_share), returning nothing for an unknown or revoked
+      token. This is a feature, not a leak.
+
+      The update path (PATCH /documents/:id) once accepted a raw body, which looked
+      like a mass-assignment risk. It now binds to UpdateDocumentDto, which
+      whitelists only `title` and `body`; unknown fields (including org_id) are
+      stripped and rejected. Combined with the org predicate on q_update_document
+      (id AND org_id), a caller can only ever update documents in their own org.
+tags: [authz, idor, multi-tenant, tenant-isolation, authz-boundary, security]

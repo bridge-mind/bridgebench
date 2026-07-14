@@ -1,0 +1,176 @@
+id: lower-bound-insertion-point
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: Which Candidate Computes the Leftmost Insertion Point on Every Declared Input
+summary: A specification defines lowerBound(a, target) — the leftmost sorted-insertion index — with a complete acceptance vector of inputs and exact expected outputs. Five candidate implementations are submitted; some are correct, some carry a classic off-by-one, wrong-branch, or wrong-contract defect. Classify each candidate conforms/violates by tracing it against the declared vector, and name the exact input that disproves each violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector,
+  candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite
+  the artifact id(s) for every claim. Do not execute anything — trace each candidate by
+  hand against the acceptance-vector rows, which give the exact expected output.
+
+  Verdict vocabulary: a candidate CONFORMS if it returns the exact expected value on
+  every acceptance-vector row and honors the full contract in `spec`; otherwise it
+  VIOLATES.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or
+     violates. State the verdict for all five.
+
+  2. For every candidate you mark VIOLATES, name ONE acceptance-vector row (by its `a`
+     and `target`) that the candidate fails, and give the value it returns versus the
+     value `spec`/acceptance-vector requires. One row per violator is enough.
+
+  3. candidate-a and candidate-e are written very differently (iterative vs recursive).
+     State whether candidate-e is behaviorally equivalent to `spec` on the declared
+     input domain, and justify it from the code rather than from its resemblance to
+     candidate-a.
+
+  4. Of the violators, which single one would a careless reviewer most likely wave
+     through as correct, and what is the exact input that disproves it? Explain why it
+     survives the "easy" rows but fails.
+
+  5. State the complete set of conforming candidates.
+artifacts:
+  - id: spec
+    type: spec
+    label: lowerBound specification (complete contract)
+    content: |
+      FUNCTION lowerBound(a, target)
+
+      Inputs:
+        a       an array of numbers sorted in ASCENDING order. May contain duplicate
+                values. May be empty. a is NOT to be mutated.
+        target  a number.
+
+      Return:
+        The smallest index i in the CLOSED range [0, a.length] such that a[i] >= target.
+        Equivalently: the leftmost position at which `target` could be inserted to keep
+        `a` sorted, placing `target` BEFORE any elements equal to it.
+
+      Declared behavior on the boundaries (these are part of the contract, not examples):
+        - If a is empty, return 0.
+        - If every element of a is < target, no such i exists inside the array, so the
+          function returns a.length (the insertion point is the end).
+        - If target is <= a[0], return 0.
+        - If a contains values equal to target, return the index of the FIRST (leftmost)
+          such value.
+        - The return value is always an integer in [0, a.length]. The function NEVER
+          returns -1 or any sentinel; "not found" is not a concept here — every target
+          has an insertion point.
+
+      This is the complete contract. There is no separate "exact match" mode.
+  - id: acceptance-vector
+    type: table
+    label: complete acceptance vector (exact expected outputs)
+    content: |
+      This table is the COMPLETE acceptance set. A candidate conforms only if it returns
+      the exact expected value for EVERY row. Each row is (a, target) -> expected index.
+
+      row  a                target  expected
+      R1   []               5       0        # empty array -> 0
+      R2   [1,2,3]          0       0        # target below all -> 0
+      R3   [1,2,3]          5       3        # target above all -> a.length (end insert)
+      R4   [1,2,2,2,3]      2       1        # duplicates -> leftmost equal index
+      R5   [1,3]            2       1        # gap: first index with value >= 2 is index 1 (value 3)
+      R6   [2,4,6]          4       1        # exact match present once -> its index
+      R7   [1,2,3]          3       2        # exact match, leftmost >= 3 is index 2
+
+      Cross-check of the tricky rows:
+        R3: no element of [1,2,3] is >= 5, so the answer is the length, 3.
+        R4: [1,2,2,2,3], the first element >= 2 sits at index 1; indices 2 and 3 also
+            equal 2 but are NOT leftmost.
+        R7: [1,2,3], the first element >= 3 sits at index 2 (the value 3 itself).
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function lowerBound(a, target) {
+        let lo = 0, hi = a.length;
+        while (lo < hi) {
+          const mid = lo + ((hi - lo) >> 1);
+          if (a[mid] < target) lo = mid + 1;
+          else hi = mid;
+        }
+        return lo;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function lowerBound(a, target) {
+        let lo = 0, hi = a.length;
+        while (lo < hi) {
+          const mid = lo + ((hi - lo) >> 1);
+          if (a[mid] <= target) lo = mid + 1;   // note the comparison
+          else hi = mid;
+        }
+        return lo;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function lowerBound(a, target) {
+        let lo = 0, hi = a.length - 1;           // note the initializer
+        while (lo < hi) {
+          const mid = lo + ((hi - lo) >> 1);
+          if (a[mid] < target) lo = mid + 1;
+          else hi = mid;
+        }
+        return lo;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function lowerBound(a, target) {
+        let lo = 0, hi = a.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (a[mid] === target) return mid;     // returns on any equal element
+          if (a[mid] < target) lo = mid + 1;
+          else hi = mid - 1;
+        }
+        return -1;                               // returned when no equal element exists
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function lowerBound(a, target) {
+        const go = (lo, hi) => {
+          if (lo >= hi) return lo;
+          const mid = lo + Math.floor((hi - lo) / 2);
+          return a[mid] < target ? go(mid + 1, hi) : go(lo, mid);
+        };
+        return go(0, a.length);
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (scope and exhaustiveness)
+    content: |
+      Scope for this task:
+        - The five candidates above (candidate-a … candidate-e) are the COMPLETE set of
+          submissions. There are no other candidates.
+        - The acceptance-vector is the COMPLETE acceptance set: a candidate CONFORMS iff
+          it returns the exact expected index on every one of R1..R7 AND respects the
+          `spec` contract (never returns a sentinel, treats duplicates leftmost, inserts
+          at the end when target exceeds all elements). A candidate VIOLATES iff any row
+          fails or the contract is broken.
+        - `>> 1` is integer halving of a non-negative value; `mid = lo + ((hi - lo) >> 1)`
+          is the usual overflow-safe midpoint. All arithmetic here is on small arrays, so
+          you can trace exactly.
+        - JavaScript array indexing: reading a[i] for i >= a.length yields undefined, and
+          any comparison `undefined < x` or `undefined <= x` is false. You will not need
+          this for the conforming candidates, but note it when a loop bound is wrong.
+
+      Judge each candidate ONLY against this stated contract and vector. Do not credit a
+      candidate for being "close" or for passing the easy rows if it fails any row.
+tags: [algorithm, binary-search, correctness, algorithmic-correctness, generation]

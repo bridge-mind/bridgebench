@@ -1,0 +1,187 @@
+id: api-migration-orm-query-builder
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrating findAll queries to repo.query at Larkspur Analytics
+summary: Six data-access call sites are moving from the legacy findAll query builder to the new repo.query builder. Null handling, sort-direction casing, pagination argument names, and soft-delete flags differ between the two. Classify each migrated query as behavior-preserving or changes-behavior, citing the exact mismatch.
+prompt: |
+  Larkspur Analytics is replacing its legacy `db.findAll` query builder with the new
+  `repo.query` builder. A migration PR rewrites six queries (proposed-queries Q1..Q6), each
+  replacing an original in legacy-queries (Q1..Q6).
+
+  Answer each deliverable using ONLY the supplied artifacts (legacy-builder, new-builder,
+  mapping-note, legacy-queries, proposed-queries). Cite the artifact id(s) for every claim.
+
+  For each migrated query below, classify it as exactly one of:
+    - behavior-preserving  (the rewrite selects the same rows in the same order as the original)
+    - changes-behavior     (the rewrite alters the result set or ordering; name the single defect)
+
+  "Same behavior" means the same rows (same filter, same soft-delete inclusion), the same page
+  (same limit/offset window), and the same ordering. Assume identical table contents for both
+  builders.
+
+  1. Classify Q1.
+  2. Classify Q2.
+  3. Classify Q3.
+  4. Classify Q4.
+  5. Classify Q5.
+  6. Classify Q6.
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the
+  artifacts. For every changes-behavior verdict, name the single citable defect and, where
+  relevant, the rows or ordering that differ.
+artifacts:
+  - id: legacy-builder
+    type: spec
+    label: legacy db.findAll query builder — options and semantics
+    content: |
+      // orm/legacy.ts — the findAll builder being retired.
+      // This is the COMPLETE option set findAll accepts; there are no others.
+
+      db.findAll(model, {
+        where?: Record<string, unknown>; // field -> value equality. A value of null generates
+                                         // "field IS NULL". Omitting a field adds no constraint.
+        limit?: number;                  // max rows returned. default: no limit
+        offset?: number;                 // rows skipped before the window. default 0
+        order?: [string, 'ASC' | 'DESC'][]; // e.g. [['createdAt','DESC']]. default []: the
+                                         // database's natural (unspecified) order.
+        include?: string[];              // relations to eager-load. default []
+        paranoid?: boolean;              // default TRUE. When true, findAll AUTOMATICALLY adds
+                                         // "deletedAt IS NULL", i.e. soft-deleted rows are excluded.
+                                         // false -> soft-deleted rows are included.
+      }): Promise<Row[]>
+  - id: new-builder
+    type: spec
+    label: new repo.query builder — options and semantics
+    content: |
+      // orm/repo.ts — the replacement builder. This is the COMPLETE option set for repo.query.
+
+      repo.query({
+        model: Model;
+        filter?: Record<string, unknown>;// field -> value equality. IMPORTANT: a value of null is
+                                         // IGNORED (treated as "no constraint on this field"). To
+                                         // match SQL NULL you must write { field: { is: null } }.
+        take?: number;                   // max rows returned. default: no limit
+        skip?: number;                   // rows skipped before the window. default 0
+        sort?: Record<string, 'asc' | 'desc'>; // directions are LOWERCASE only. An unrecognized
+                                         // value (including 'ASC'/'DESC') is treated as 'asc'.
+                                         // default {}: natural order.
+        with?: string[];                 // relations to eager-load. default []
+        withDeleted?: boolean;           // default FALSE -> soft-deleted rows excluded
+                                         // ("deletedAt IS NULL" added automatically). true ->
+                                         // soft-deleted rows included.
+      }): Promise<Row[]>
+  - id: mapping-note
+    type: note
+    label: intended migration rules (data platform team)
+    content: |
+      How to move a findAll query to repo.query without changing the result set. These rules are
+      exhaustive for the differences between the two builders.
+
+      1. WHERE / FILTER NULLS. `where` and `filter` are the same for non-null values. But
+         where: { f: null } means "f IS NULL", while filter: { f: null } is IGNORED and matches
+         every row. Translate any null in `where` to `filter: { f: { is: null } }`.
+
+      2. PAGINATION. limit -> take, offset -> skip (identical meaning). Keep the numbers with their
+         keys; do not swap take and skip.
+
+      3. SORT. order [['f','DESC']] -> sort { f: 'desc' } (and 'ASC' -> 'asc'). The direction MUST
+         be lowercased: repo.query treats 'DESC'/'ASC' as unrecognized and silently falls back to
+         'asc'. A single order tuple becomes a single sort key.
+
+      4. SOFT DELETE. findAll paranoid: true (the default) == repo.query withDeleted: false (the
+         default): both exclude soft-deleted rows. paranoid: false == withDeleted: true (include
+         soft-deleted). If the original set paranoid: false, the migration MUST set
+         withDeleted: true; omitting it flips soft-deleted rows back out of the result set.
+
+      5. RELATIONS. include -> with (identical). Default [] on both sides; omitting is safe.
+  - id: legacy-queries
+    type: code
+    label: original findAll queries (Q1..Q6)
+    content: |
+      // Q1 — active members of org 5, newest first, page 3 (20 per page), with profile
+      db.findAll(Member, {
+        where: { orgId: 5 },
+        limit: 20,
+        offset: 40,
+        order: [['createdAt', 'DESC']],
+        include: ['profile'],
+      });
+
+      // Q2 — sessions that have NOT been revoked (revokedAt is null)
+      db.findAll(Session, {
+        where: { revokedAt: null },
+      });
+
+      // Q3 — posts newest first
+      db.findAll(Post, {
+        order: [['publishedAt', 'DESC']],
+      });
+
+      // Q4 — audit accounts for owner 9, INCLUDING soft-deleted ones
+      db.findAll(Account, {
+        where: { ownerId: 9 },
+        paranoid: false,
+      });
+
+      // Q5 — tokens for user 3 that never expire (expiresAt is null), including revoked/deleted,
+      //      oldest id first
+      db.findAll(Token, {
+        where: { userId: 3, expiresAt: null },
+        paranoid: false,
+        order: [['id', 'ASC']],
+      });
+
+      // Q6 — a page of logs: 10 rows starting after the first 100
+      db.findAll(Log, {
+        limit: 10,
+        offset: 100,
+      });
+  - id: proposed-queries
+    type: code
+    label: proposed repo.query rewrites (Q1..Q6)
+    content: |
+      // Q1
+      repo.query({
+        model: Member,
+        filter: { orgId: 5 },
+        take: 20,
+        skip: 40,
+        sort: { createdAt: 'desc' },
+        with: ['profile'],
+      });
+
+      // Q2
+      repo.query({
+        model: Session,
+        filter: { revokedAt: null },
+      });
+
+      // Q3
+      repo.query({
+        model: Post,
+        sort: { publishedAt: 'DESC' },
+      });
+
+      // Q4
+      repo.query({
+        model: Account,
+        filter: { ownerId: 9 },
+      });
+
+      // Q5
+      repo.query({
+        model: Token,
+        filter: { userId: 3, expiresAt: { is: null } },
+        withDeleted: true,
+        sort: { id: 'asc' },
+      });
+
+      // Q6
+      repo.query({
+        model: Log,
+        take: 100,
+        skip: 10,
+      });
+tags: [api-migration, refactoring, orm, query-builder, behavior-preservation]

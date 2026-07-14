@@ -1,0 +1,155 @@
+id: semantic-equivalence-collection-mutation
+version: 1.0.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Are these six array simplifications behavior-preserving across mutation, ordering, and identity?
+summary: Six small functions each have a proposed one-line simplification over arrays. Some are equivalent for every input; others break on argument mutation (sort/splice in place), the default lexicographic sort comparator, or NaN membership (indexOf vs includes). Using the cited language semantics and the declared observability rules, classify each rewrite as behavior-preserving or changes-behavior and give a witness for every change.
+prompt: |
+  A "simplify" PR rewrites six array functions (originals O1..O6) into shorter forms (proposed
+  P1..P6). Judge each rewrite for FULL semantic equivalence: it is behavior-preserving only if, for
+  EVERY input in the parameters' declared types, it returns the same value AND leaves the caller's
+  arguments in the same state as the original (mutating an argument the caller still holds is
+  observable — see observability-note). Do not assume a narrower input domain than the type allows;
+  a number[] may contain NaN, duplicates, and any length.
+
+  Answer each deliverable using ONLY the supplied artifacts (language-spec, observability-note,
+  originals, proposed). Cite the artifact id(s) for every claim; ground each edge case in the
+  language-spec and each observability point in observability-note.
+
+  For each rewrite below, classify it as exactly one of:
+    - behavior-preserving  (equal return AND equal argument state for every input)
+    - changes-behavior     (differs on some input; give a concrete witness input, the two resulting
+                            return values AND/OR the two resulting argument states, and cite the
+                            language-spec rule that explains the divergence)
+
+  1. Classify P1 (rewrite of O1).
+  2. Classify P2 (rewrite of O2).
+  3. Classify P3 (rewrite of O3).
+  4. Classify P4 (rewrite of O4).
+  5. Classify P5 (rewrite of O5).
+  6. Classify P6 (rewrite of O6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the semantics in
+  language-spec and the observability rules applied to the two forms.
+artifacts:
+  - id: language-spec
+    type: spec
+    label: relevant JavaScript array/collection semantics (authoritative for this task)
+    content: |
+      Semantics you must apply (these govern every deliverable):
+
+      A. Array.prototype.sort(cmp) sorts the array IN PLACE and RETURNS the same array reference (it
+         MUTATES the receiver). Its DEFAULT comparator (no cmp) converts each element to a string and
+         compares by UTF-16 code-unit order, so numbers sort LEXICOGRAPHICALLY: [2, 10].sort() ->
+         [10, 2] because "10" < "2". To sort numbers ascending you must pass (a, b) => a - b.
+
+      B. slice() (no args) and spread `[...xs]` each create a SHALLOW COPY: a NEW array with the same
+         elements in the same order; they do NOT mutate the receiver. Sorting or otherwise mutating the
+         copy leaves the original array untouched.
+
+      C. Array.prototype.includes(v) uses SameValueZero: NaN matches NaN, so [NaN].includes(NaN) is
+         true, and +0 matches -0. Array.prototype.indexOf(v) (and ===) use strict equality: NaN never
+         matches anything, so [NaN].indexOf(NaN) is -1. Thus `indexOf(v) >= 0` and `includes(v)` differ
+         exactly when v is NaN (and the array contains NaN).
+
+      D. Array.prototype.splice(start, count) REMOVES `count` elements beginning at `start`, MUTATING
+         the array in place, and RETURNS a new array of the removed elements. slice(start, end) returns
+         a shallow copy of that range and does NOT mutate. For splice(0, n) on an array of length >= n,
+         the returned removed elements equal slice(0, n)'s result, but the receiver is left missing its
+         first n elements.
+
+      E. Array.prototype.reduce(cb, init) and a `for...of` accumulation visit elements in ascending
+         index order and perform the same sequence of operations; neither mutates the source array when
+         the callback/body does not. With the same initial value and the same per-element operation
+         they produce the same result for every input (NaN/Infinity propagate identically).
+
+      F. Numbers are IEEE-754 doubles; the number type includes NaN, +0, -0, and +/-Infinity. Assume
+         the full type domain for every parameter.
+  - id: observability-note
+    type: note
+    label: what counts as observable behavior (authoritative)
+    content: |
+      What "same behavior" requires here (this determines every verdict):
+
+      A function's OBSERVABLE behavior is BOTH (i) its return value and (ii) the state, after the call,
+      of any argument the caller still holds a reference to. If a function REORDERS or REMOVES elements
+      of an array passed in by the caller, that mutation is observable to the caller even when the
+      returned value looks correct. Two functions are equivalent only if they agree on BOTH the return
+      value and the post-call argument state for every input.
+
+      These functions have no other side effects: no I/O, no globals, no clocks. The only channels are
+      the return value and mutation of the argument arrays. Callers may read their arrays again after
+      the call, so preserving the input array's contents and order is part of behavior unless a
+      function is explicitly documented to consume its argument (none here are).
+  - id: originals
+    type: code
+    label: original functions (O1..O6)
+    content: |
+      // Each array parameter may hold ANY values of its element type; assume no narrower domain.
+
+      // O1 — return the numbers sorted ascending, WITHOUT disturbing the caller's array
+      function sortedAsc(nums: number[]): number[] {
+        return [...nums].sort((a, b) => a - b);
+      }
+
+      // O2 — return the ids sorted ascending as numbers
+      function sortIds(ids: number[]): number[] {
+        return [...ids].sort((a, b) => a - b);
+      }
+
+      // O3 — does the list contain the value?
+      function has(xs: number[], v: number): boolean {
+        return xs.includes(v);
+      }
+
+      // O4 — a shallow copy of the array
+      function copy(xs: number[]): number[] {
+        return xs.slice();
+      }
+
+      // O5 — the sum of all amounts
+      function total(xs: number[]): number {
+        return xs.reduce((acc, x) => acc + x, 0);
+      }
+
+      // O6 — the first n elements, WITHOUT changing the caller's array
+      function firstN(xs: number[], n: number): number[] {
+        return xs.slice(0, n);
+      }
+  - id: proposed
+    type: code
+    label: proposed simplifications (P1..P6)
+    content: |
+      // P1 — rewrite of O1
+      function sortedAsc(nums: number[]): number[] {
+        return nums.sort((a, b) => a - b);
+      }
+
+      // P2 — rewrite of O2
+      function sortIds(ids: number[]): number[] {
+        return [...ids].sort();
+      }
+
+      // P3 — rewrite of O3
+      function has(xs: number[], v: number): boolean {
+        return xs.indexOf(v) >= 0;
+      }
+
+      // P4 — rewrite of O4
+      function copy(xs: number[]): number[] {
+        return [...xs];
+      }
+
+      // P5 — rewrite of O5
+      function total(xs: number[]): number {
+        let acc = 0;
+        for (const x of xs) acc += x;
+        return acc;
+      }
+
+      // P6 — rewrite of O6
+      function firstN(xs: number[], n: number): number[] {
+        return xs.splice(0, n);
+      }
+tags: [semantic-equivalence, refactoring, javascript, arrays, mutation]

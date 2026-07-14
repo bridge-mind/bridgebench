@@ -4,15 +4,20 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import YAML from 'yaml';
 
-import { TaskLoader, validatePublicTaskFile } from '../src/tasks.js';
+import {
+  TaskLoader,
+  TASKS_PER_CATEGORY,
+  TASKS_PER_CLUSTER,
+  validatePublicTaskFile,
+} from '../src/tasks.js';
 import { CATEGORIES, CATEGORY_CLUSTERS, TaskPublicSchema } from '../src/types.js';
 import { makePrivateTask, makePublicTask, withTempDir } from './helpers.js';
 
 describe.each(CATEGORIES)('%s task pack', (category) => {
-  it('loads 12 balanced tasks with valid evidence', async () => {
+  it('loads a balanced pack with valid evidence', async () => {
     const loader = new TaskLoader(category);
     const tasks = await loader.loadAll();
-    expect(tasks).toHaveLength(12);
+    expect(tasks).toHaveLength(TASKS_PER_CATEGORY);
     const counts = new Map<string, number>();
     for (const task of tasks) {
       expect(task.public.category).toBe(category);
@@ -20,7 +25,7 @@ describe.each(CATEGORIES)('%s task pack', (category) => {
       counts.set(task.public.cluster, (counts.get(task.public.cluster) ?? 0) + 1);
     }
     expect(counts.size).toBe(CATEGORY_CLUSTERS[category].length);
-    for (const count of counts.values()) expect(count).toBe(2);
+    for (const count of counts.values()) expect(count).toBe(TASKS_PER_CLUSTER);
     for (const task of tasks) {
       expect(task.publicHash).toMatch(/^[a-f0-9]{64}$/);
       if (loader.hasPrivate) {

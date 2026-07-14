@@ -1,0 +1,112 @@
+id: regression-pagination-tiebreak
+version: 1.0.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: Bisecting Why a Feed Started Dropping and Duplicating Items Across Pages
+summary: >-
+  feedsvc's cursor pagination began skipping some items and repeating others across page boundaries.
+  A CI matrix that ran a determinism test on every commit, six commit diffs, a data-distribution
+  note, and the bug report are provided. An ORM major bump, a new index, and a page-size change all
+  look like plausible culprits. Identify the exact commit that introduced the regression, explain the
+  keyset mechanism that breaks, rule out the decoys, and give the fix that restores a total order.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (ci-matrix, c2-diff, c3-diff, c4-diff,
+  c5-diff, data-note, bug-report). Cite the artifact id(s) for every claim.
+
+  1. CULPRIT COMMIT. Which commit introduced the regression? Cite the exact ci-matrix transition (the
+     first commit where paginate-no-dupes flips PASS -> FAIL) and the diff that contains the defect.
+  2. THE MECHANISM. Explain precisely why the change causes items to be skipped and duplicated across
+     pages. Cite the diff and data-note. Name the specific condition in the data that triggers it.
+  3. RULE OUT THE ORM BUMP. Explain why the ORM major-version bump is not the origin. Cite ci-matrix.
+  4. RULE OUT THE INDEX AND PAGE-SIZE CHANGES. Explain why adding an index on created_at and raising
+     the page size do not cause (or fix) the skip/duplicate behavior. Cite ci-matrix and the diffs.
+  5. ADEQUATE FIX. Give the minimal change that removes the regression and state the invariant keyset
+     pagination requires. Explain why adding the index or reverting the ORM bump would not fix it.
+  6. BLAST RADIUS. State exactly which page requests can skip or duplicate items and which are
+     unaffected, tying it to data-note.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: ci-matrix
+    type: table
+    label: CI results per commit (the same suite runs pre-merge on EVERY commit)
+    content: |
+      This suite runs on every commit before merge. paginate-no-dupes walks all pages over a fixture
+      containing duplicate created_at values and asserts every item appears exactly once (no skips,
+      no duplicates). paginate-count asserts the total item count returned equals the row count.
+
+      commit  date        title                                    paginate-no-dupes  paginate-count
+      c1      Mon 10:00   baseline keyset pagination               PASS               PASS
+      c2      Mon 16:20   chore: bump feed-orm 4.x -> 5.0          PASS               PASS
+      c3      Tue 11:15   perf: add index on events(created_at)    PASS               PASS
+      c4      Tue 15:40   simplify: drop redundant ORDER BY column PASS -> FAIL       PASS
+      c5      Wed 09:30   tune: raise page size 20 -> 50           FAIL               PASS
+      c6      Wed 14:10   docs: update pagination README           FAIL               PASS
+
+      The FIRST commit where paginate-no-dupes fails is c4. It passed on c3 and every prior commit.
+      paginate-count stays PASS throughout (the total number of returned rows is unchanged; only their
+      per-page assignment is wrong), which is why the bug is easy to miss.
+  - id: c2-diff
+    type: diff
+    label: 'c2 — "chore: bump feed-orm 4.x -> 5.0"'
+    content: |
+      # Major version bump of the query builder. The generated SQL for the feed query is byte-identical
+      # before and after (verified by the ORM's SQL-snapshot test, which did not change).
+        - "feed-orm": "4.7.2"
+        + "feed-orm": "5.0.0"
+      # feed-orm 5.0 notes: new typings, no change to ORDER BY / LIMIT emission. The pagination query
+      # after c2 still emits: ORDER BY created_at DESC, id DESC  with  WHERE (created_at, id) < ($1,$2).
+  - id: c3-diff
+    type: diff
+    label: 'c3 — "perf: add index on events(created_at)"'
+    content: |
+      # Adds a non-unique btree index to speed the scan. Indexes affect access path and speed, not the
+      # result-set ordering guarantees: without an ORDER BY tiebreaker, rows with equal created_at have
+      # no defined relative order regardless of which index is used.
+        + CREATE INDEX events_created_at_idx ON events (created_at);
+      # The query after c3 is unchanged: ORDER BY created_at DESC, id DESC  WHERE (created_at, id) < ($1,$2).
+  - id: c4-diff
+    type: diff
+    label: 'c4 — "simplify: drop redundant ORDER BY column"'
+    content: |
+      # Author's rationale in the commit body: "created_at is effectively unique, so the trailing id in
+      # the ORDER BY and the composite cursor are redundant; simplify to a single sort key."
+        function pageQuery(cursor, pageSize) {
+          return db.select('*').from('events')
+        -   .whereRaw('(created_at, id) < (?, ?)', [cursor.createdAt, cursor.id])
+        -   .orderBy([{ col: 'created_at', dir: 'desc' }, { col: 'id', dir: 'desc' }])
+        +   .where('created_at', '<', cursor.createdAt)
+        +   .orderBy('created_at', 'desc')
+            .limit(pageSize);
+        }
+        // cursor for the next page is taken from the LAST row of the current page:
+        // { createdAt: lastRow.created_at, id: lastRow.id }   (id is now unused by pageQuery)
+  - id: c5-diff
+    type: diff
+    label: 'c5 — "tune: raise page size 20 -> 50"'
+    content: |
+        - const PAGE_SIZE = 20;
+        + const PAGE_SIZE = 50;
+      # Changes how many rows each page returns. Does not touch ORDER BY, the WHERE cursor predicate,
+      # or the tiebreaker.
+  - id: data-note
+    type: note
+    label: events table — column and data distribution (verified)
+    content: |
+      events(id uuid PRIMARY KEY, created_at timestamptz, ...). created_at is NOT unique: bulk imports
+      insert many rows in one batch that share an identical created_at value to the millisecond. In the
+      current table ~4% of rows share their created_at with at least one other row; the largest such
+      group is 37 rows with the same created_at. id is unique (primary key). There is no unique
+      constraint or index on created_at alone. These are the complete uniqueness facts for the table.
+  - id: bug-report
+    type: note
+    label: bug report FEED-311 (as filed)
+    content: |
+      Reporter: "Scrolling the activity feed, some posts show up on two pages in a row, and a few
+      never appear at all. It seems to happen around big batch-imported blocks." QA reproduced on a
+      fixture with duplicate timestamps: paging with size 20 skips 6 items and repeats 5 across the
+      first three page boundaries. Reporter initially suspected "the ORM upgrade from Monday." The
+      total number of distinct items eventually reachable by fetching enough pages is correct; the
+      problem is which page each item lands on.
+tags: [debugging, regression-introduction, pagination, keyset, ordering]

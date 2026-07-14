@@ -1,0 +1,166 @@
+id: fix-adequacy-cursor-pagination
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Feed Pagination Duplicates And Skips Items, With Four Candidate Fixes To Judge
+summary: A feed paginated by OFFSET over created_at DESC returns duplicate and skipped items when rows are inserted or deleted between page requests. Four candidate fix diffs are on the table. Exactly one resolves the root cause without reintroducing a regression the contract describes; one masks, one is per-request only, and one switches to keyset on a non-unique column and drops rows at a tie boundary. Judge each and name the disqualifying over-rejection.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (contract, current-code,
+  bug-report, boundary-data, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for every
+  claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix,
+  shallow-fix. A fix is ADEQUATE only if it resolves the root cause AND reintroduces no
+  regression the artifacts describe; any fix that merely masks the symptom, fixes only one
+  request in isolation, or reintroduces a described regression is SHALLOW.
+
+  The "streamly" feed at GET /v2/feed returns some items twice and skips others while a
+  user scrolls. Judge the root cause and the four candidate fixes.
+
+  1. ROOT CAUSE. Name the single defect in current-code that lets items be duplicated or
+     skipped across page requests, and explain the mechanism using bug-report's scenario.
+
+  2. FIX VERDICTS. Classify EACH of fix-a, fix-b, fix-c, fix-d as adequate-fix or
+     shallow-fix, and for each give the exact mechanism that justifies the verdict (what it
+     masks, what it leaves unfixed, or what described regression it reintroduces).
+
+  3. THE ADEQUATE FIX. Identify the single adequate fix and show, using boundary-data, that
+     it produces no duplicate and no skip across the page boundary, including at the tie in
+     created_at.
+
+  4. WHY C IS NOT ADEQUATE. Using boundary-data, show concretely which item(s) fix-c drops
+     or repeats at the created_at tie boundary, and which contract rule it violates.
+
+  5. OVER-REJECTION TRAP. State the contract rule that makes rejecting the adequate fix
+     "because it changes the cursor format" an incorrect disqualification, and quote it.
+artifacts:
+  - id: contract
+    type: spec
+    label: streamly feed pagination contract
+    content: |
+      streamly GET /v2/feed pagination contract (authoritative, complete):
+
+      R1 — CURSOR IS OPAQUE. The `cursor` query parameter is an opaque token. Clients MUST
+           NOT parse it. Its internal encoding is an implementation detail and MAY change
+           between releases without a version bump. Changing what the cursor encodes is
+           explicitly permitted.
+      R2 — NO DUPLICATES OR SKIPS. Within a single scroll session, an item MUST NOT be
+           returned in more than one page, and no item that existed for the whole session
+           and matches the filter MUST be skipped — even when other rows are inserted or
+           deleted concurrently between page requests.
+      R3 — TOTAL ORDER. Results are ordered created_at DESC. created_at is NOT unique (many
+           rows share the same millisecond). Ties on created_at MUST be broken by id DESC to
+           give a deterministic total order. A pagination scheme that cannot distinguish two
+           rows with equal created_at is non-conforming.
+      This contract is the complete set of pagination requirements.
+  - id: current-code
+    type: code
+    label: current pagination query (buggy)
+    content: |
+      // streamly/feed.ts — current, buggy.
+      // cursor encodes a numeric OFFSET into the created_at DESC ordering.
+      async function page(cursor?: string) {
+        const offset = cursor ? decodeOffset(cursor) : 0;   // e.g. "o:3" -> 3
+        const rows = await db.query(`
+          SELECT id, created_at, body FROM posts
+          WHERE deleted = false
+          ORDER BY created_at DESC
+          LIMIT 3 OFFSET ${offset}
+        `);
+        return { rows, cursor: encodeOffset(offset + rows.length) };
+      }
+      // The next page is "the same ORDER BY, skip N rows". N is a position, not an anchor to
+      // a specific row.
+  - id: bug-report
+    type: note
+    label: reproduction of the duplicate and the skip
+    content: |
+      Repro (page size 3), newest first.
+      Initial feed:            [I10, I9, I8, I7, I6, I5, ...]
+      Page 1 (offset 0):       returns I10, I9, I8  -> next cursor offset=3
+
+      DUPLICATE case: before page 2, two new posts I11, I12 are inserted at the head.
+      Feed now:                [I12, I11, I10, I9, I8, I7, I6, ...]
+      Page 2 (offset 3):       returns I9, I8, I7  -> I9 and I8 were ALREADY shown on page 1
+                               (duplicates), because inserting 2 rows above shifted every
+                               row's offset by +2.
+
+      SKIP case: instead, before page 2, two head posts I10, I9 are deleted.
+      Feed now:                [I8, I7, I6, I5, ...]
+      Page 2 (offset 3):       returns I5, I4, I3  -> I8, I7, I6 were never shown (skipped),
+                               because removing 2 rows above pulled every row's offset by -2.
+      Both come from the same cause: OFFSET counts positions in a list that changes between
+      requests.
+  - id: boundary-data
+    type: table
+    label: rows around the page-1/page-2 boundary (note the created_at tie)
+    content: |
+      id   created_at (UTC)            note
+      ---  --------------------------  -------------------------------
+      I10  2026-07-10T10:00:00.002Z    page 1, row 1
+      I9   2026-07-10T10:00:00.001Z    page 1, row 2
+      I8   2026-07-10T10:00:00.000Z    page 1, row 3  <-- LAST row of page 1 (the anchor)
+      I7   2026-07-10T10:00:00.000Z    page 2, row 1  <-- SAME created_at as I8 (tie)
+      I6   2026-07-10T10:00:00.000Z    page 2, row 2  <-- SAME created_at as I8 (tie)
+      I5   2026-07-09T09:59:59.998Z    page 2, row 3
+      # Under the R3 total order (created_at DESC, id DESC) the correct sequence is
+      # I8, I7, I6 (10:00:00.000, ids 8 > 7 > 6), so page 2 must start at I7.
+  - id: fix-a
+    type: diff
+    label: candidate fix A
+    content: |
+      # fix A: keep OFFSET; dedup by id in the client before rendering.
+        // streamly-web/feed-list.ts
+      +   const seen = new Set(renderedIds);
+      +   const deduped = page.rows.filter(r => !seen.has(r.id));   // drop ids already shown
+          render(deduped);
+      # Server query is unchanged (still OFFSET). Only the client hides repeats.
+  - id: fix-b
+    type: diff
+    label: candidate fix B
+    content: |
+      # fix B: keep OFFSET; wrap the single page query in a REPEATABLE READ transaction.
+        async function page(cursor?) {
+          const offset = cursor ? decodeOffset(cursor) : 0;
+      +   return db.tx({ isolation: 'repeatable read' }, async (t) => {
+            const rows = await t.query(`SELECT ... ORDER BY created_at DESC LIMIT 3 OFFSET ${offset}`);
+            return { rows, cursor: encodeOffset(offset + rows.length) };
+      +   });
+        }
+      # Each page request is its own transaction/snapshot; there is no shared snapshot across
+      # the separate page-1 and page-2 requests.
+  - id: fix-c
+    type: diff
+    label: candidate fix C
+    content: |
+      # fix C: keyset pagination anchored on created_at only.
+        async function page(cursor?) {
+      -   const offset = cursor ? decodeOffset(cursor) : 0;
+      -   const rows = await db.query(`... ORDER BY created_at DESC LIMIT 3 OFFSET ${offset}`);
+      -   return { rows, cursor: encodeOffset(offset + rows.length) };
+      +   const ts = cursor ? decodeTs(cursor) : MAX_TS;              // last row's created_at
+      +   const rows = await db.query(`
+      +     SELECT id, created_at, body FROM posts
+      +     WHERE deleted = false AND created_at < '${ts}'
+      +     ORDER BY created_at DESC LIMIT 3`);
+      +   return { rows, cursor: encodeTs(rows.at(-1)?.created_at) };
+        }
+      # cursor now encodes only created_at.
+  - id: fix-d
+    type: diff
+    label: candidate fix D
+    content: |
+      # fix D: keyset pagination anchored on the (created_at, id) tuple.
+        async function page(cursor?) {
+      -   const offset = cursor ? decodeOffset(cursor) : 0;
+      -   const rows = await db.query(`... ORDER BY created_at DESC LIMIT 3 OFFSET ${offset}`);
+      -   return { rows, cursor: encodeOffset(offset + rows.length) };
+      +   const { ts, id } = cursor ? decodeKey(cursor) : { ts: MAX_TS, id: MAX_ID };
+      +   const rows = await db.query(`
+      +     SELECT id, created_at, body FROM posts
+      +     WHERE deleted = false AND (created_at, id) < ('${ts}', ${id})
+      +     ORDER BY created_at DESC, id DESC LIMIT 3`);
+      +   const last = rows.at(-1);
+      +   return { rows, cursor: encodeKey({ ts: last?.created_at, id: last?.id }) };
+        }
+      # cursor now encodes the (created_at, id) of the last returned row.
+tags: [fix-adequacy, pagination, keyset, debugging, cursor]

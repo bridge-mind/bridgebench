@@ -1,0 +1,187 @@
+id: behavior-preservation-retry-wrapper
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: runWithRetry Rewrite Equivalence — Attempt Counts, Error Class, and onRetry Timing
+summary: >-
+  Four candidate rewrites of a transient-retry wrapper are proposed. Exactly one preserves
+  observable behavior (task-invocation count, which error classes retry vs rethrow, the error
+  object thrown, and how many times onRetry fires and with which attempt argument). The others
+  shift an attempt boundary, broaden the caught error class, or move onRetry across the exhaustion
+  check. Classify each rewrite and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (retry-original, error-model,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d, usage-note). Cite artifact id(s) for every claim.
+  Use the verdict vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to restructure runWithRetry for readability WITHOUT changing any
+  observable behavior: the number of times task() is invoked, which error classes are retried vs
+  rethrown immediately, the error object ultimately thrown, and the number of times and the attempt
+  argument with which opts.onRetry is called.
+
+  1. Classify rewrite-a relative to retry-original. Justify by tracing the attempt counter and the
+     retry/throw decision across every path.
+
+  2. Classify rewrite-b. If it changes behavior, name the exact observable difference. Use scenario
+     S1 in usage-note (task() throws a TransientError on every call, maxAttempts = 3): give the
+     number of task() invocations and the sequence of onRetry attempt arguments, and compare to
+     retry-original.
+
+  3. Classify rewrite-c. Use scenario S2 in usage-note (task() throws a PermanentError on its first
+     call, maxAttempts = 3): give the task() invocation count and onRetry behavior for BOTH
+     retry-original and rewrite-c, and name the observable difference if any.
+
+  4. Classify rewrite-d under scenario S1. State how many times opts.onRetry fires and with which
+     attempt arguments, and name the observable difference from retry-original, considering what
+     usage-note says onRetry is wired to.
+
+  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for retry-original
+     under scenario S1, state the ground-truth counts: how many times task() is invoked, how many
+     times onRetry fires and with which attempt values, and which error object is thrown.
+artifacts:
+  - id: retry-original
+    type: code
+    label: orchard/retry.ts — shipped runWithRetry (the reference behavior)
+    content: |
+      // orchard/retry.ts — the shipped helper. This file is the ONLY definition of runWithRetry
+      // in the codebase (see usage-note for call sites).
+      import { TransientError } from './errors';
+
+      export async function runWithRetry<T>(
+        task: () => Promise<T>,
+        opts: { maxAttempts: number; onRetry?: (err: unknown, attempt: number) => void },
+      ): Promise<T> {
+        let attempt = 0;
+        for (;;) {
+          attempt += 1;
+          try {
+            return await task();
+          } catch (err) {
+            if (!(err instanceof TransientError)) throw err; // permanent errors are never retried
+            if (attempt >= opts.maxAttempts) throw err;      // out of attempts: rethrow last error
+            opts.onRetry?.(err, attempt);                    // fires only for an attempt that RETRIES
+          }
+        }
+      }
+  - id: error-model
+    type: code
+    label: orchard/errors.ts — the complete error taxonomy
+    content: |
+      // orchard/errors.ts — the complete error taxonomy used with runWithRetry.
+      // TransientError and PermanentError are SIBLINGS; neither extends the other.
+      export class TransientError extends Error {} // e.g. network blip, 503
+      export class PermanentError extends Error {} // e.g. 400 bad request
+
+      // A PermanentError is NOT an instanceof TransientError. This is the entire set of error
+      // classes the retry helper distinguishes; there are no subclasses of TransientError.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — "same logic, tidier loop header"
+    content: |
+      // rewrite-a — proposed by engineer A. "Same logic, tidier loop header."
+      export async function runWithRetry<T>(
+        task: () => Promise<T>,
+        opts: { maxAttempts: number; onRetry?: (err: unknown, attempt: number) => void },
+      ): Promise<T> {
+        for (let attempt = 1; ; attempt++) {
+          try {
+            return await task();
+          } catch (err) {
+            if (!(err instanceof TransientError)) throw err;
+            if (attempt >= opts.maxAttempts) throw err;
+            opts.onRetry?.(err, attempt);
+          }
+        }
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — "clearer exhaustion check"
+    content: |
+      // rewrite-b — proposed by engineer B. "Clearer exhaustion check."
+      export async function runWithRetry<T>(
+        task: () => Promise<T>,
+        opts: { maxAttempts: number; onRetry?: (err: unknown, attempt: number) => void },
+      ): Promise<T> {
+        let attempt = 0;
+        for (;;) {
+          attempt += 1;
+          try {
+            return await task();
+          } catch (err) {
+            if (!(err instanceof TransientError)) throw err;
+            if (attempt > opts.maxAttempts) throw err; // changed >= to >
+            opts.onRetry?.(err, attempt);
+          }
+        }
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — "collapse the two guard lines"
+    content: |
+      // rewrite-c — proposed by engineer C. "Collapse the two guard lines."
+      export async function runWithRetry<T>(
+        task: () => Promise<T>,
+        opts: { maxAttempts: number; onRetry?: (err: unknown, attempt: number) => void },
+      ): Promise<T> {
+        let attempt = 0;
+        for (;;) {
+          attempt += 1;
+          try {
+            return await task();
+          } catch (err) {
+            if (attempt >= opts.maxAttempts) throw err;
+            opts.onRetry?.(err, attempt);
+          }
+        }
+        // note: the instanceof TransientError guard from retry-original is gone.
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — "report the retry before deciding to give up"
+    content: |
+      // rewrite-d — proposed by engineer D. "Report the retry before deciding to give up."
+      export async function runWithRetry<T>(
+        task: () => Promise<T>,
+        opts: { maxAttempts: number; onRetry?: (err: unknown, attempt: number) => void },
+      ): Promise<T> {
+        let attempt = 0;
+        for (;;) {
+          attempt += 1;
+          try {
+            return await task();
+          } catch (err) {
+            if (!(err instanceof TransientError)) throw err;
+            opts.onRetry?.(err, attempt);              // moved ABOVE the exhaustion check
+            if (attempt >= opts.maxAttempts) throw err;
+          }
+        }
+      }
+  - id: usage-note
+    type: note
+    label: orchard retry — usage, observability, and canonical semantics (complete)
+    content: |
+      orchard retry — usage and observability (complete for the 2.x helper).
+
+      Call sites: runWithRetry is defined exactly once (retry-original) and called from exactly two
+      places: the queue worker and the webhook forwarder. Both pass an onRetry callback that does
+      one thing: metrics.increment('retries_total'). There is no other onRetry implementation and
+      nothing else reads the attempt argument. So the number of onRetry calls is directly
+      observable as the retries_total counter, and the attempt value is recorded as a metric label.
+
+      Canonical semantics of retry-original (authoritative):
+        - task() is invoked at most maxAttempts times.
+        - onRetry fires ONLY after a failed attempt that will be retried; it never fires on the
+          final (exhausting) attempt. So onRetry fires at most maxAttempts - 1 times, with
+          attempt = 1, 2, ..., up to maxAttempts - 1.
+        - A caught error that is not an instanceof TransientError is rethrown immediately, with no
+          retry and no onRetry call.
+        - On exhaustion, the LAST caught TransientError is rethrown.
+
+      Scenarios referenced by the deliverables:
+        S1: task() throws a TransientError on every invocation; maxAttempts = 3.
+        S2: task() throws a PermanentError on its first invocation; maxAttempts = 3.
+
+      This note plus retry-original and error-model are the complete behavioral contract: there is
+      no background auto-retry, no jitter/backoff timer, and no other caller to consider.
+tags: [refactoring, behavior-preservation, retry, error-handling, equivalence]

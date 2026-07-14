@@ -1,0 +1,146 @@
+id: fix-adequacy-rate-limit-window
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Rate Limiter Admits Double the Limit at Window Boundaries, With Four Candidate Fixes To Judge
+summary: >-
+  rategate's per-key limiter is a fixed-window counter, so a client can send the full limit just before
+  a boundary and the full limit again just after, admitting twice the limit in a sub-second span. Four
+  candidate fix diffs are on the table. Exactly one enforces the true rolling limit without reintroducing
+  a described regression; one shortens the window, one raises the limit, and one moves enforcement to
+  the client. Judge each and name the disqualifying over-rejection of the sliding-window fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (contract, current-code, bug-report,
+  boundary-data, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for every claim. Use this
+  vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix. A fix is ADEQUATE only
+  if it resolves the root cause AND reintroduces no regression the artifacts describe; any fix that
+  merely loosens the limit, keeps a boundary that still double-admits, or fails to enforce the limit
+  server-side is SHALLOW.
+
+  The "rategate" limiter admits about twice the configured limit right at each window boundary. Judge
+  the root cause and the four candidate fixes.
+
+  1. ROOT CAUSE. Name the single defect in current-code that lets a key exceed the limit at a boundary,
+     and explain the mechanism using bug-report's scenario.
+  2. FIX VERDICTS. Classify EACH of fix-a, fix-b, fix-c, fix-d as adequate-fix or shallow-fix, and for
+     each give the exact mechanism that justifies the verdict (what it loosens, what boundary it leaves,
+     or which described contract rule it fails).
+  3. THE ADEQUATE FIX. Identify the single adequate fix and show, using boundary-data, that it admits at
+     most `limit` requests in the rolling 60 seconds that span the boundary.
+  4. WHY A IS NOT ADEQUATE. Using boundary-data, show concretely that fix-a still admits twice the
+     allowance at its own (shorter) boundary, and which contract rule it violates.
+  5. OVER-REJECTION TRAP. State the contract rule that makes rejecting the adequate fix "because it
+     uses more memory / needs a Redis sorted set" an incorrect disqualification, and quote it.
+artifacts:
+  - id: contract
+    type: spec
+    label: rategate rate-limit contract
+    content: |
+      rategate rate-limit contract (authoritative, complete). limit = 100 per API key.
+
+      L1 — ROLLING LIMIT. At most `limit` requests may be ADMITTED per API key in ANY rolling
+           60-second interval — i.e. any interval [t-60s, t], not a calendar-aligned bucket. A scheme
+           that admits more than `limit` in some 60-second span is non-conforming.
+      L2 — NO OVER-REJECTION. A request MUST be admitted if fewer than `limit` requests were admitted in
+           the preceding 60 seconds. Rejecting within-limit traffic is non-conforming.
+      L3 — STORAGE IS FREE TO CHANGE. The limiter MAY use additional server-side storage (for example a
+           Redis sorted set of request timestamps per key). Extra memory or a new Redis structure is
+           additive and backward-compatible; requiring more storage is NOT a reason to reject a fix.
+      L4 — SERVER-ENFORCED. The limit MUST be enforced on the server. Client-side throttling is
+           advisory only and does NOT satisfy L1 (an SDK-less or non-cooperating client must still be
+           limited).
+      This contract is the complete set of rate-limit requirements.
+  - id: current-code
+    type: code
+    label: current limiter (buggy)
+    content: |
+      // rategate/limiter.ts — current, buggy. Fixed-window counter keyed by the calendar minute.
+      const LIMIT = 100;
+      async function allow(key: string): Promise<boolean> {
+        const windowId = Math.floor(Date.now() / 60000);       // calendar-aligned 60s bucket
+        const n = await redis.incr(`rl:${key}:${windowId}`);
+        if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 60);
+        return n <= LIMIT;                                     // count resets to 0 at every boundary
+      }
+      // The counter is per fixed bucket. At each minute boundary windowId increments and the count
+      // starts again at 0, independent of how many requests arrived in the seconds just before.
+  - id: bug-report
+    type: note
+    label: reproduction of the boundary burst
+    content: |
+      Repro (limit 100 per key). A client aims to maximize admitted requests around a boundary.
+      Just before the boundary (window W): send 100 requests in [11:59:59.900, 11:59:59.999].
+        -> counter rl:key:W goes 1..100, all 100 admitted (n <= 100).
+      Just after the boundary (window W+1): send 100 requests in [12:00:00.000, 12:00:00.100].
+        -> windowId incremented, counter rl:key:W+1 starts at 0, goes 1..100, all 100 admitted.
+      Net: 200 requests admitted in the ~0.2-second span straddling the boundary — 2x the limit inside a
+      rolling 60-second interval. The limiter never looked back across the boundary.
+  - id: boundary-data
+    type: table
+    label: admitted counts around the boundary (limit = 100)
+    content: |
+      phase                    time span                       requests  admitted-by-current  note
+      -----------------------  ------------------------------  --------  -------------------  ---------------------------
+      pre-boundary burst       11:59:59.900 - 11:59:59.999     100       100 (window W)       fills the pre-boundary bucket
+      post-boundary burst      12:00:00.000 - 12:00:00.100     100       100 (window W+1)     bucket reset admits 100 more
+      rolling 60s [11:59:59.9..12:00:59.9]                     200       200                  L1 allows only 100 here
+      # Under a correct rolling-60s limiter, the second burst's requests fall inside 60s of the first
+      # burst, so at most 100 total may be admitted across the boundary. current-code admits 200.
+  - id: fix-a
+    type: diff
+    label: candidate fix A
+    content: |
+      # fix A: keep the fixed-window counter, shorten the window from 60s to 10s.
+        async function allow(key) {
+      -   const windowId = Math.floor(Date.now() / 60000);   // 60s bucket
+      +   const windowId = Math.floor(Date.now() / 10000);   // 10s bucket
+          const n = await redis.incr(`rl:${key}:${windowId}`);
+      -   if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 60);
+      +   if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 10);
+          return n <= LIMIT;
+        }
+      # Still a fixed window; the bucket still resets to 0 at each (now 10s) boundary.
+  - id: fix-b
+    type: diff
+    label: candidate fix B
+    content: |
+      # fix B: keep the fixed-window counter, raise the admitted limit to add headroom.
+        const LIMIT = 100;
+        async function allow(key) {
+          const windowId = Math.floor(Date.now() / 60000);
+          const n = await redis.incr(`rl:${key}:${windowId}`);
+          if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 60);
+      -   return n <= LIMIT;
+      +   return n <= LIMIT * 2;      // allow 200 per bucket so bursts "fit"
+        }
+  - id: fix-c
+    type: diff
+    label: candidate fix C
+    content: |
+      # fix C: sliding-window log. Keep a per-key sorted set of admit timestamps; count only those
+      # within the last 60s; admit iff that count is below the limit.
+        async function allow(key) {
+      +   const now = Date.now();
+      +   const zkey = `rl:${key}:log`;
+      +   await redis.zremrangebyscore(zkey, 0, now - 60000);   // drop timestamps older than 60s
+      +   const inWindow = await redis.zcard(zkey);             // requests admitted in the last 60s
+      +   if (inWindow >= LIMIT) return false;                  // rolling limit reached
+      +   await redis.zadd(zkey, now, `${now}:${randomId()}`);
+      +   await redis.pexpire(zkey, 60000);
+      +   return true;
+        }
+      # No calendar bucket, so no boundary reset; the window slides continuously with each request.
+  - id: fix-d
+    type: diff
+    label: candidate fix D
+    content: |
+      # fix D: move rate limiting into the client SDK (token bucket in the caller), remove the server check.
+        // rategate-sdk/client.ts
+      +   const bucket = new TokenBucket({ ratePerMin: 100 });
+      +   async function request(req) { await bucket.take(); return http.send(req); }   // client self-throttles
+        // rategate/limiter.ts
+      -   async function allow(key) { /* fixed-window check */ return n <= LIMIT; }
+      +   async function allow(key) { return true; }     // server admits everything; trust the SDK
+      # Enforcement now lives in the SDK; the server no longer counts or rejects.
+tags: [fix-adequacy, rate-limiting, sliding-window, debugging, boundary]

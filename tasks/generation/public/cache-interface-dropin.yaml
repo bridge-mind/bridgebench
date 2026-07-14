@@ -1,0 +1,178 @@
+id: cache-interface-dropin
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Which Cache Implementation Is a Drop-In Replacement for the Declared Cache Interface
+summary: A frozen Cache<V> interface and its existing call sites are declared complete. Five candidate implementations are proposed as drop-in replacements. Some match exactly; decoys break compatibility subtly — one renames delete to remove, one narrows get to V | null, one makes the ttlMs argument required. One conformer adds an extra method beyond the interface. Classify each conforms/violates against the interface and name the exact call site each violator breaks.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (interface, call-sites,
+  candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite
+  the artifact id(s) for every claim. Do not execute anything — compare each candidate's
+  member signatures against the `interface` using the structural-typing rules in
+  `judging-notes`.
+
+  A candidate is judged as a DROP-IN replacement: an instance must be assignable to a
+  variable typed `Cache<V>` and every existing call site in `call-sites` must keep
+  type-checking and behaving as the interface specifies. Verdict vocabulary: CONFORMS if
+  it is a valid drop-in; VIOLATES otherwise.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or
+     violates against the Cache<V> drop-in contract.
+
+  2. For every candidate you mark VIOLATES, name the exact incompatibility (which member,
+     and whether it is a name, nullability, optionality/arity, return-type, or
+     property-vs-method mismatch) and the exact call-site id (CS1–CS5) it breaks.
+
+  3. State the complete set of candidates that are valid drop-in replacements.
+
+  4. candidate-e declares a member that does not appear in Cache<V>. Does that extra
+     member break drop-in compatibility? Justify strictly from the rules in
+     `judging-notes`.
+
+  5. A reviewer approves candidate-c, reasoning "null and undefined are both falsy, so it
+     makes no difference." Rebut this using CS1 and the interface's declared nullability
+     of get.
+artifacts:
+  - id: interface
+    type: spec
+    label: Cache<V> interface (frozen, complete)
+    content: |
+      // The frozen cache contract. Every drop-in replacement must satisfy exactly this.
+      interface Cache<V> {
+        get(key: string): V | undefined;              // MISS is undefined (never null)
+        set(key: string, value: V, ttlMs?: number): void;  // ttlMs is OPTIONAL
+        has(key: string): boolean;
+        delete(key: string): boolean;                 // returns true iff a value was removed
+        readonly size: number;                        // a property, not a method
+      }
+
+      This interface is COMPLETE: it has exactly these five members (get, set, has,
+      delete, and the size property) and no others. The names, parameter lists, optionality
+      markers, return types, and the property-vs-method shape shown here are all part of
+      the contract.
+  - id: call-sites
+    type: code
+    label: existing call sites a drop-in must keep working
+    content: |
+      // These are the ONLY places the codebase touches a cache. `cache` is typed Cache<Profile>.
+      // A valid drop-in must keep every one of these compiling and behaving as written.
+
+      // CS1 — get followed by a STRICT undefined check:
+      const hit = cache.get(userId);
+      if (hit === undefined) return loadAndCache(userId);   // miss path keyed on `=== undefined`
+      return hit;                                            // hit path returns the value
+
+      // CS2 — set with NO ttl argument:
+      cache.set(userId, profile);                           // relies on ttlMs being optional
+
+      // CS3 — delete used for its boolean result, by the name `delete`:
+      if (cache.delete(userId)) metrics.evictions += 1;
+
+      // CS4 — has:
+      if (!cache.has(userId)) warm(userId);
+
+      // CS5 — size read as a PROPERTY (no call parentheses):
+      gauge.set('cache.size', cache.size);
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      class CandidateA<V> {
+        private m = new Map<string, V>();
+        get(key: string): V | undefined { return this.m.get(key); }
+        set(key: string, value: V, ttlMs?: number): void { this.m.set(key, value); }
+        has(key: string): boolean { return this.m.has(key); }
+        delete(key: string): boolean { return this.m.delete(key); }
+        get size(): number { return this.m.size; }
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      class CandidateB<V> {
+        private m = new Map<string, V>();
+        get(key: string): V | undefined { return this.m.get(key); }
+        set(key: string, value: V, ttlMs?: number): void { this.m.set(key, value); }
+        has(key: string): boolean { return this.m.has(key); }
+        remove(key: string): boolean { return this.m.delete(key); }
+        get size(): number { return this.m.size; }
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      class CandidateC<V> {
+        private m = new Map<string, V>();
+        get(key: string): V | null {
+          const v = this.m.get(key);
+          return v === undefined ? null : v;
+        }
+        set(key: string, value: V, ttlMs?: number): void { this.m.set(key, value); }
+        has(key: string): boolean { return this.m.has(key); }
+        delete(key: string): boolean { return this.m.delete(key); }
+        get size(): number { return this.m.size; }
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      class CandidateD<V> {
+        private m = new Map<string, V>();
+        get(key: string): V | undefined { return this.m.get(key); }
+        set(key: string, value: V, ttlMs: number): void { this.m.set(key, value); }
+        has(key: string): boolean { return this.m.has(key); }
+        delete(key: string): boolean { return this.m.delete(key); }
+        get size(): number { return this.m.size; }
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      class CandidateE<V> {
+        private m = new Map<string, V>();
+        get(key: string): V | undefined { return this.m.get(key); }
+        set(key: string, value: V, ttlMs?: number): void { this.m.set(key, value); }
+        has(key: string): boolean { return this.m.has(key); }
+        delete(key: string): boolean { return this.m.delete(key); }
+        clear(): void { this.m.clear(); }
+        get size(): number { return this.m.size; }
+      }
+  - id: judging-notes
+    type: note
+    label: structural-typing rules for a drop-in (scope)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of proposals. Judge each ONLY
+      against the frozen `interface` and the `call-sites`.
+
+      Rules for deciding whether a class is a valid drop-in for Cache<V>:
+        R1 MEMBER NAMES: every member named in Cache<V> (get, set, has, delete, size) must
+           be present under that EXACT name. A member under a different name (e.g. remove
+           instead of delete) does not satisfy the interface member and breaks any call
+           site that uses the interface name.
+        R2 RETURN TYPES / NULLABILITY: a member's return type must be assignable to the
+           interface's. get must return `V | undefined`. `V | null` is NOT assignable to
+           `V | undefined` (null and undefined are distinct types), so a get returning
+           `V | null` is incompatible.
+        R3 PARAMETER OPTIONALITY / ARITY: a parameter the interface marks optional (ttlMs?)
+           may be OMITTED by callers. A candidate that makes that parameter REQUIRED
+           (ttlMs: number) cannot be called with the argument omitted, so it is not
+           assignable to the interface and breaks any call site that omits it.
+        R4 PROPERTY VS METHOD: `readonly size: number` is a property, read as `cache.size`.
+           A candidate exposing `size()` as a method would break `cache.size` property
+           access. (Check whether each candidate exposes size as a getter/property or a
+           method.)
+        R5 EXTRA MEMBERS: a class MAY declare members BEYOND the five in Cache<V>. Under
+           structural typing a type with additional members is still assignable to the
+           interface, and the existing call sites never touch the extra member, so extra
+           members do NOT break drop-in compatibility.
+
+      The `interface` is complete (exactly five members) and the `call-sites` are the only
+      usages. A candidate CONFORMS iff it is assignable to Cache<V> and keeps CS1–CS5
+      compiling and behaving as specified; otherwise it VIOLATES.
+tags: [typescript, interface, drop-in, structural-typing, interface-compatibility, generation]

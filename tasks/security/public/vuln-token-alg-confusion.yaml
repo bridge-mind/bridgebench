@@ -1,0 +1,252 @@
+id: vuln-token-alg-confusion
+version: 1.0.0
+category: security
+cluster: vuln-discovery
+difficulty: expert
+title: Latchkey Session-Token Verification Review
+summary: Review a fictional session-token issuance/verification service where one real, reachable token-forgery vulnerability hides among three benign look-alikes (long TTL, Math.random request id, dev-secret fallback) that are each neutralized elsewhere in the artifacts.
+prompt: |
+  You are performing a defensive security review of "Latchkey", an internal
+  session-token issuance and verification service. Six artifacts describe the
+  production deployment: token-issuer, token-verifier, key-loader,
+  latchkey-config, keys-endpoint-spec, and integration-note.
+
+  Exactly one of the behaviors in these artifacts is a real, reachable
+  vulnerability; the others are look-alikes that are neutralized somewhere in the
+  same artifacts. Answer each deliverable using ONLY the supplied artifacts. Cite
+  the artifact id(s) you rely on for every claim. If something is not defined or
+  not reachable in the artifacts, say so explicitly. Reason about reachability
+  ONLY — do NOT write a forged token, signing code, or any exploit payload.
+
+  1. Name the single real vulnerability class present in token-verifier, using
+     standard terminology, and point to the exact code behavior that constitutes
+     it.
+
+  2. State the precondition / exploitability chain: the specific facts across the
+     artifacts that together make it reachable by an external attacker, and what
+     capability (not payload) an attacker needs. If any required precondition is
+     NOT satisfied by the artifacts, say so.
+
+  3. A reviewer flags the 24-hour token lifetime (lease of ttlSeconds) as the
+     critical issue. Is it? Rule it in or out and cite the mechanism that decides
+     it.
+
+  4. A reviewer flags the Math.random() requestId in token-issuer as a
+     weak-randomness vulnerability. Is it? Rule it in or out and cite the
+     evidence.
+
+  5. A reviewer flags the `|| 'dev-secret'` fallback in key-loader as a hardcoded
+     secret that is reachable in production. Is it? Rule it in or out and cite the
+     mechanism that decides it.
+
+  6. Give the severity of the one real vulnerability and the minimal control that
+     closes it. State the control precisely: what the server must do about the
+     algorithm named in the token header.
+artifacts:
+  - id: token-issuer
+    type: code
+    label: Latchkey token issuer (RS256)
+    content: |
+      // token-issuer.ts — issues Latchkey session tokens. RS256 only.
+      import { rsaSign } from './latchkey-crypto';
+      import { loadSigningKey } from './key-loader';
+      import { config } from './latchkey-config';
+      import { randomUuid } from './latchkey-crypto'; // CSPRNG-backed uuid
+
+      export function issueToken(sub: string): string {
+        // requestId is a LOG-CORRELATION tag only. It is never used as a jti,
+        // nonce, CSRF token, signature salt, or any secret (see integration-note).
+        // Math.random is adequate for correlating log lines; nothing here relies
+        // on it being unpredictable.
+        const requestId = Math.random().toString(36).slice(2);
+
+        const header = { alg: 'RS256', typ: 'LST' };
+        const now = Math.floor(Date.now() / 1000);
+        const claims = {
+          sub,
+          iss: config.expectedIssuer,
+          aud: config.expectedAudience,
+          exp: now + config.ttlSeconds, // 24h; every verify still checks revocation
+          jti: randomUuid(),            // cryptographically random token id (NOT Math.random)
+        };
+
+        log.info('issuing session token', { sub, requestId });
+
+        const signingInput = `${b64url(header)}.${b64url(claims)}`;
+        const sig = rsaSign(signingInput, loadSigningKey().privateKeyPem);
+        return `${signingInput}.${sig}`;
+      }
+  - id: token-verifier
+    type: code
+    label: Latchkey token verifier
+    content: |
+      // token-verifier.ts — verifies a compact Latchkey token of the form
+      //   base64url(header) . base64url(claims) . base64url(signature)
+
+      import { rsaVerify, hmacVerify } from './latchkey-crypto';
+      import { loadVerifyKey } from './key-loader';
+      import { isRevoked } from './revocation';
+      import { config } from './latchkey-config';
+
+      export interface Claims { sub: string; iss: string; aud: string; exp: number; jti: string; }
+
+      export function verifyToken(token: string): Claims {
+        const [rawHeader, rawClaims, rawSig] = token.split('.');
+        const header = JSON.parse(b64urlDecode(rawHeader)); // attacker-controlled bytes
+        const claims = JSON.parse(b64urlDecode(rawClaims)) as Claims;
+        const signingInput = `${rawHeader}.${rawClaims}`;
+
+        // The single verification key this service holds (see key-loader).
+        const key = loadVerifyKey();
+
+        // Choose the verification routine from the algorithm the CALLER named in
+        // the token header.
+        let signatureOk: boolean;
+        switch (header.alg) {
+          case 'RS256':
+            signatureOk = rsaVerify(signingInput, rawSig, key.publicKeyPem);
+            break;
+          case 'HS256':
+            // Symmetric path for internal callers that cannot do RSA. There is no
+            // separate HS256 key configured, so we key the HMAC with the RSA
+            // public key material we already hold.
+            signatureOk = hmacVerify(signingInput, rawSig, key.publicKeyPem);
+            break;
+          default:
+            throw new VerifyError('UNSUPPORTED_ALG');
+        }
+        if (!signatureOk) throw new VerifyError('BAD_SIGNATURE');
+
+        // Claim checks are done MANUALLY after the signature check. We deliberately
+        // do not pass audience/issuer options into the verify primitives above;
+        // these direct comparisons run on every verify.
+        if (claims.iss !== config.expectedIssuer) throw new VerifyError('BAD_ISS');
+        if (claims.aud !== config.expectedAudience) throw new VerifyError('BAD_AUD');
+        if (claims.exp * 1000 <= Date.now()) throw new VerifyError('EXPIRED');
+
+        // Live revocation: consulted on EVERY verify, so a stolen-but-revoked jti
+        // is rejected no matter how far off exp is.
+        if (isRevoked(claims.jti)) throw new VerifyError('REVOKED');
+
+        return claims;
+      }
+  - id: key-loader
+    type: code
+    label: Latchkey key material loader
+    content: |
+      // key-loader.ts — loads Latchkey key material.
+      import { config } from './latchkey-config';
+
+      export interface VerifyKey { publicKeyPem: string; }
+      export interface SignKey { privateKeyPem: string; }
+
+      let cachedVerify: VerifyKey | null = null;
+
+      // Runs ONCE at boot, before the server binds its port (see integration-note).
+      // Outside development the public key MUST be present, so control never reaches
+      // the 'dev-secret' fallback below in production — this throws first.
+      export function assertKeyMaterial(): void {
+        if (config.env !== 'development' && !process.env.LATCHKEY_PUBLIC_KEY) {
+          throw new Error('LATCHKEY_PUBLIC_KEY is required outside development');
+        }
+      }
+
+      export function loadVerifyKey(): VerifyKey {
+        if (cachedVerify) return cachedVerify;
+        // In development only, fall back to a fixed string so tests can run without
+        // real key material. assertKeyMaterial() has already aborted boot in prod
+        // if the real key is missing.
+        const pem = process.env.LATCHKEY_PUBLIC_KEY || 'dev-secret';
+        cachedVerify = { publicKeyPem: pem };
+        return cachedVerify;
+      }
+
+      export function loadSigningKey(): SignKey {
+        return { privateKeyPem: requireEnv('LATCHKEY_PRIVATE_KEY') };
+      }
+  - id: latchkey-config
+    type: config
+    label: Latchkey runtime configuration (production)
+    content: |
+      # latchkey.production.yaml — full session-token config, no keys omitted.
+      env: production
+      expectedIssuer: "https://auth.latchkey.internal"
+      expectedAudience: "latchkey-session"
+      ttlSeconds: 86400            # 24h session lifetime
+
+      revocation:
+        enabled: true             # consulted on EVERY verify (see token-verifier isRevoked)
+        store: "latchkey-revset"  # shared, synchronous revocation set
+
+      keys:
+        publicKeyEnv: LATCHKEY_PUBLIC_KEY
+        privateKeyEnv: LATCHKEY_PRIVATE_KEY
+        # The RSA public key is PUBLISHED (see keys-endpoint-spec); the private key
+        # is held only by the issuer. No symmetric / shared secret is configured for
+        # this service at all — HS256 has no key of its own.
+
+      # Algorithms the verifier will accept. There is no server-side pin narrower
+      # than this list; the verifier selects its routine from the token header.
+      allowedAlgs: ["RS256", "HS256"]
+  - id: keys-endpoint-spec
+    type: spec
+    label: Latchkey public key distribution endpoint
+    content: |
+      Latchkey key distribution — GET /.well-known/latchkey-keys.json
+
+      Access: PUBLIC, unauthenticated. World-readable by design so any client or
+      partner can fetch the key and verify session tokens offline.
+
+      Response (200):
+        {
+          "keys": [
+            {
+              "kid": "lk-2026-03",
+              "kty": "RSA",
+              "use": "sig",
+              "alg": "RS256",
+              "pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkq...AQAB\n-----END PUBLIC KEY-----"
+            }
+          ]
+        }
+
+      The full PEM of the RSA PUBLIC key is served verbatim in the `pem` field. The
+      private key is never exposed here or anywhere else.
+
+      This is the COMPLETE and only key set for the service. There is exactly one
+      active verification key — the RSA public key above — and no separate
+      HS256 / symmetric key is distributed at this endpoint or anywhere else. Any
+      party on the internet can retrieve these exact public key bytes.
+  - id: integration-note
+    type: note
+    label: Latchkey integration notes (authoritative, as-deployed)
+    content: |
+      Latchkey integration notes — authoritative; reflects production as deployed.
+
+      - Boot: the server calls assertKeyMaterial() before it binds the port. In
+        production (env != development) a missing LATCHKEY_PUBLIC_KEY aborts boot,
+        so the 'dev-secret' string in key-loader is never live in production.
+
+      - Revocation is mandatory and synchronous: verifyToken consults the shared
+        revocation set on every call. A token is rejected the instant its jti is
+        revoked, so the 24h ttlSeconds is NOT a standing-access window beyond
+        revocation. Token lifetime is a product decision; revocation is the security
+        control.
+
+      - requestId (Math.random) is a log-correlation tag ONLY — never a jti, nonce,
+        CSRF token, or signature input. The jti is generated by randomUuid(), a
+        CSPRNG-backed identifier.
+
+      - iss and aud are validated inside verifyToken AFTER the signature check, by
+        direct comparison against config.expectedIssuer / expectedAudience. We do
+        not pass audience/issuer options into the low-level verify primitives; the
+        manual comparison is equivalent and runs on every verify.
+
+      - By design the verifier selects its verification routine from the algorithm
+        named in the token header, to let "internal callers that cannot do RSA" use
+        HS256.
+
+      This note, latchkey-config, keys-endpoint-spec, and the three code files are
+      the COMPLETE surface for token issuance and verification. There are no other
+      verify paths, key sources, or algorithm branches.
+tags: [security, vuln-discovery, jwt, algorithm-confusion, crypto-misuse]

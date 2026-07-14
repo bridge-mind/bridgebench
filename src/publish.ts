@@ -28,9 +28,14 @@ export async function publishTasks(
   category: BenchmarkCategory,
   config: ApiConfig = resolveApiConfig(),
 ): Promise<{ imported: number }> {
-  const loaded: CompleteArenaTask[] = await new TaskLoader(category).loadAll({
-    requirePrivate: true,
-  });
+  // Speed is a public-only pack (no hidden reference / rubric), so it is
+  // imported without a private overlay. Every other arena is judged and its
+  // import contract requires both halves — fail closed when the overlay is
+  // absent (with a pointer to docs/private-packs.md).
+  const requirePrivate = category !== 'speed';
+  const loaded = (await new TaskLoader(category).loadAll(
+    requirePrivate ? { requirePrivate: true } : {},
+  )) as CompleteArenaTask[];
   // Batch a few tasks per request (each task's inline artifacts can be ~100KB)
   // to stay under both the body limit and the operator throttle.
   const results = await postChunks<CompleteArenaTask, { imported: number }>(

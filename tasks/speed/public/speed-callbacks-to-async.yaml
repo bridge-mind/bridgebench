@@ -1,0 +1,39 @@
+id: speed-callbacks-to-async
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: hard
+title: Convert a Node Callback Pipeline to Async/Await
+summary: >-
+  Rewrite a nested Node.js callback function into an equivalent async/await implementation, preserving
+  its result shape and error propagation while parallelizing the two independent reads.
+prompt: |
+  Rewrite [callback-code] using async/await and the `fs.promises` API. Preserve the returned object
+  shape and error behavior.
+
+  1. The rewritten async function with the same name and inputs (dropping the trailing callback and
+     returning a promise instead).
+  2. Any step failing must reject the returned promise with that error.
+  3. Read `config.json` first; `a.txt` and `b.txt` are independent, so read them concurrently.
+artifacts:
+  - id: callback-code
+    type: code
+    label: Original callback version
+    content: |
+      const fs = require('fs');
+
+      function loadBundle(dir, cb) {
+        fs.readFile(dir + '/config.json', 'utf8', (e1, cfg) => {
+          if (e1) return cb(e1);
+          fs.readFile(dir + '/a.txt', 'utf8', (e2, a) => {
+            if (e2) return cb(e2);
+            fs.readFile(dir + '/b.txt', 'utf8', (e3, b) => {
+              if (e3) return cb(e3);
+              cb(null, { config: JSON.parse(cfg), a, b });
+            });
+          });
+        });
+      }
+
+      module.exports = { loadBundle };
+tags: [javascript, async, refactor]

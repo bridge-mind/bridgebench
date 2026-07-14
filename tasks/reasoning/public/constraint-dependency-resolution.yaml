@@ -1,0 +1,143 @@
+id: constraint-dependency-resolution
+version: 1.0.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Single-Version Dependency Resolution Under SemVer Ranges, Peer Deps, and a Lockfile Pin
+summary: >-
+  Resolve a four-package dependency graph in the knot package manager to the one version assignment
+  that satisfies every SemVer range, both peer-dependency constraints, the single-instance rule for
+  the shared package, and an authoritative lockfile pin, then evaluate four candidate plans and the
+  effect of lifting the pin.
+prompt: |
+  The knot resolver must pick exactly one version of each package so that every constraint holds at
+  once. The rules are in [resolver-spec]; the packages, versions, and their dependency ranges are in
+  [registry]; the app's direct dependencies and the lockfile pin are in [manifest]; the complete set
+  of published versions is in [available-versions]; four candidate resolutions are in
+  [candidate-plans]; [triage-note] holds unverified hunches; [proposed-change] lifts the pin.
+
+  Every version is a SemVer triple. `util` is installed ONCE and shared by all its dependents (see the
+  single-instance rule). Answer every deliverable and cite the artifact ids behind each claim.
+
+  1. The resolution. Give the one valid version of core, ui, logger, and util. Show that it satisfies
+     every applicable util range, the ui peer-dependency, the single-instance rule, and the pin.
+  2. Maximality. For core, logger, and util, name what stops the resolver from choosing any higher
+     version. State why util cannot be lower than it is, and why ui is fixed. Justify uniqueness.
+  3. Plan review. For each of Plan A, B, C, and D in [candidate-plans], state valid or invalid, and
+     for each invalid plan name every specific constraint it violates (which range/peer/pin/rule, and
+     against which package). A plan may violate more than one.
+  4. Lift the pin. Under [proposed-change] (remove the ui lockfile pin), give the new resolution and
+     name the single package whose version changes and exactly why the newly-chosen version becomes
+     selectable now.
+  5. Decoy refutation. Explain, citing the rules, why "take the highest published version of every
+     package independently" is not the resolution under the current manifest, and why "install two
+     versions of util so both consumers are satisfied" is not permitted.
+artifacts:
+  - id: resolver-spec
+    type: spec
+    label: knot resolution rules
+    content: |
+      A resolution assigns exactly one version to each package the app transitively depends on, such
+      that ALL of the following hold. There is no partial credit: a resolution is valid iff every rule
+      holds simultaneously.
+
+      RANGE SATISFACTION. The chosen version of a package must satisfy every SemVer range imposed on
+      it by any dependent that is present in the resolution. SemVer:
+        - ^X.Y.Z means >= X.Y.Z and < (X+1).0.0.
+        - Ranges written ">= A < B" are half-open: A is included, B is excluded.
+
+      SINGLE-INSTANCE (hard invariant). knot installs a package at most once. In particular there is
+      exactly ONE util version in the whole resolution, shared by every dependent of util. knot has no
+      nested/duplicate install path; two different util versions in one resolution is never valid. This
+      list of installed packages is the complete install graph — there are no other hidden copies.
+
+      PEER DEPENDENCIES. A peerDependency is a range a package requires the ALREADY-RESOLVED peer to
+      satisfy. The peer edge does NOT itself install anything; the peer must be provided by another
+      dependency edge, and its resolved version must satisfy the peer range. An unsatisfied peer range
+      invalidates the resolution.
+
+      HIGHEST-COMPATIBLE SELECTION. Among the versions that satisfy every applicable constraint, the
+      resolver selects the HIGHEST (by SemVer). The valid resolution is the unique one in which no
+      package could be raised to a higher published version without violating some rule.
+
+      LOCKFILE PIN (authoritative). A pinned package must resolve to EXACTLY the pinned version. The
+      pin is not a preference: the resolver never overrides it to chase a newer version, and a plan
+      that assigns the pinned package any other version is invalid regardless of how well it scores
+      elsewhere. If the pin makes the graph unsatisfiable, resolution fails (does not happen here).
+
+      WORKED READING (illustrative). If package X 1.0.0 needs `dep >=2.0.0 <2.5.0` and package Y 1.0.0
+      needs `dep >=2.4.0 <3.0.0`, and both X and Y are in the resolution sharing the single dep, then
+      dep must be in [2.4.0, 2.5.0); the highest published version in that window is chosen.
+  - id: registry
+    type: table
+    label: Package versions and their dependency ranges
+    content: |
+      package | version | depends: util range     | peerDependency
+      core    | 2.0.0   | util >= 3.5.0 < 4.0.0    | (none)
+      core    | 2.1.0   | util >= 4.0.0 < 4.5.0    | (none)
+      core    | 2.2.0   | util >= 4.5.0 < 5.0.0    | (none)
+      ui      | 1.0.0   | util >= 3.5.0 < 5.0.0    | core >= 2.0.0
+      ui      | 1.1.0   | util >= 4.0.0 < 5.0.0    | core >= 2.1.0
+      ui      | 1.2.0   | util >= 4.5.0 < 5.0.0    | core >= 2.2.0
+      logger  | 3.0.0   | util >= 3.5.0 < 5.0.0    | (none)
+      logger  | 3.1.0   | util >= 4.5.0 < 5.0.0    | (none)
+      util    | *       | (leaf; depends on nothing)| (none)
+      note: only util is shared/single-instance here; core, ui, and logger each appear once as direct
+      deps of the app. A package's util range applies ONLY for the version actually chosen.
+  - id: manifest
+    type: config
+    label: app manifest and lockfile
+    content: |
+      # app/package.json (direct dependencies)
+      dependencies:
+        core:   "^2.0.0"      # >= 2.0.0 < 3.0.0
+        ui:     "^1.0.0"      # >= 1.0.0 < 2.0.0
+        logger: "^3.0.0"      # >= 3.0.0 < 4.0.0
+      # knot.lock (authoritative pins)
+      pins:
+        ui: "1.1.0"           # ui is pinned to exactly 1.1.0
+      note: only ui is pinned. core, logger, and util are chosen by the resolver under [resolver-spec].
+  - id: available-versions
+    type: table
+    label: Complete published version list (registry snapshot)
+    content: |
+      # These are ALL published versions. No other version of any package exists to resolve to.
+      package | published versions (ascending)
+      core    | 2.0.0, 2.1.0, 2.2.0
+      ui      | 1.0.0, 1.1.0, 1.2.0
+      logger  | 3.0.0, 3.1.0
+      util    | 3.5.0, 4.0.0, 4.2.0, 4.4.0, 4.5.0, 4.6.0
+      note: there is no util 5.x published, and every util range in [registry] excludes >= 5.0.0
+      anyway. 4.6.0 is the highest published util.
+  - id: candidate-plans
+    type: table
+    label: Candidate resolutions to evaluate
+    content: |
+      plan | core   | ui     | logger | util assignment                         | author's rationale
+      A    | 2.2.0  | 1.2.0  | 3.1.0  | util 4.6.0                              | "everything at its newest"
+      B    | 2.1.0  | 1.1.0  | 3.1.0  | util 4.4.0                              | "4.4 keeps core happy and is close enough"
+      C    | 2.0.0  | 1.1.0  | 3.0.0  | util 4.0.0                              | "older core is fine, ui only needs read access"
+      D    | 2.1.0  | 1.1.0  | 3.1.0  | util 4.4.0 for core+ui, util 4.6.0 for logger | "give each consumer the util it wants"
+  - id: triage-note
+    type: note
+    label: Resolver hunches (unverified)
+    content: |
+      Slack thread while debugging the install (NOT verified; each is a claim to check):
+        - "Just take the latest of everything — core 2.2, ui 1.2, logger 3.1, util 4.6 — done."
+        - "If core wants util < 4.5 and logger wants util >= 4.5, install both util versions; npm-style
+          resolvers do that all the time."
+        - "The lockfile pin is only a hint; if a newer ui is compatible the resolver should take it."
+        - "util 4.4.0 is fine because core accepts it." (Check every other consumer of util.)
+      Do not assume any of these is correct.
+  - id: proposed-change
+    type: diff
+    label: Proposed manifest change
+    content: |
+      --- knot.lock (current)
+      +++ knot.lock (proposed)
+      - pins:
+      -   ui: "1.1.0"
+      + pins: {}                 # remove the ui pin entirely; let the resolver choose ui
+      Rationale attached: "The pin was added months ago to dodge a bug that is now fixed. Drop it and
+      let ui float to its highest compatible version." Evaluate the resolution AFTER this change.
+tags: [dependency-resolution, semver, peer-dependencies, lockfile, package-manager, constraints]

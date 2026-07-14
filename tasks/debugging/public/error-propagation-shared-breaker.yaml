@@ -1,0 +1,159 @@
+id: error-propagation-shared-breaker
+version: 1.0.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: Profile Route 503s As CircuitOpen While Its Own Database Is Healthy
+summary: >-
+  gatewayd alerts that GET /profile returns 503 CircuitOpen, yet /profile only reads a users database
+  that stays healthy all window. The trigger is a different backend, recsvc, timing out, and a single
+  shared circuit breaker counting all dependencies together tripping open for every route. A recent
+  profile deploy and a suspected profile-DB outage are in play. Trace past the generic CircuitOpen on an
+  unrelated route to the true origin, name the propagation defect, and pick the fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (alert-log, gateway-code, breaker-code,
+  metrics, deploy-note, error-policy, oncall-note). Cite the artifact id(s) for every claim. Use this
+  vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  Alerts show "503 CircuitOpen" on GET /profile, a route whose only dependency is the users database.
+  Do not stop at the route where the 503 surfaces; trace to the true origin.
+
+  1. THROW SITE vs ORIGIN. Identify where the 503 CircuitOpen is thrown, then trace up to the true
+     origin. Name BOTH the upstream fault that TRIGGERED the breaker and the DEFECT that makes that
+     fault surface on /profile even though /profile never calls the failing backend. Cite them.
+  2. MASKING MECHANISM. Explain precisely why an operator sees a generic CircuitOpen on /profile rather
+     than the real per-dependency status. Identify every layer that transforms or hides the real error
+     and what each does, including that /profile's own dependency is never even contacted.
+  3. RED HERRINGS. Classify (a) the suspected users-DB outage, (b) the recent /profile deploy in
+     deploy-note, and (c) the claim "recsvc is unrelated because /profile doesn't call it, so it cannot
+     be involved." For each, explain with evidence why it is or is not the origin.
+  4. POLICY VIOLATION. State which artifact defines how circuit breakers must be scoped, and which
+     component violates that policy. Quote the rule.
+  5. FIX ADEQUACY. Three fixes are proposed: (a) raise the breaker failure threshold and lengthen its
+     window; (b) disable the circuit breaker entirely; (c) make the breaker per-dependency (one breaker
+     keyed by backend) so a backend's failures open only its own circuit. Classify each as adequate-fix
+     or shallow-fix and justify which resolves the origin without removing protection.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: alert-log
+    type: log
+    label: gateway log around the /profile alert
+    content: |
+      12:00:03 WARN  call recsvc.recommend -> timeout after 2000ms (attempt failed)
+      12:00:05 WARN  call recsvc.recommend -> timeout after 2000ms
+      12:00:31 WARN  call recsvc.recommend -> timeout after 2000ms  (recsvc failure count in shared breaker: 20/20)
+      12:00:31 ERROR CircuitBreaker OPENED (global): 20 failures in 30s window >= threshold 20
+      12:00:32 INFO  GET /profile uid=u-7  -> route deps: [usersdb]   (does NOT call recsvc)
+      12:00:32 ERROR GET /profile -> 503 CircuitOpen: "service temporarily unavailable"
+      12:00:32 INFO  (breaker OPEN -> gateway short-circuited the call; usersdb was NOT contacted)
+      12:00:33 ERROR GET /recommend -> 503 CircuitOpen
+      12:00:34 ERROR GET /profile -> 503 CircuitOpen   (every route now 503s while the one breaker is open)
+      # /profile 503s begin at 12:00:31+, exactly when the shared breaker opened on recsvc's timeouts —
+      # not at any /profile deploy, and not from usersdb (which was never called on these requests).
+  - id: gateway-code
+    type: code
+    label: gatewayd/gateway.ts — outbound dependency calls (current)
+    content: |
+      // ONE shared CircuitBreaker instance guards EVERY outbound dependency call in the gateway.
+      // It is NOT keyed by dependency: recsvc, usersdb, and every other backend share this instance
+      // and its single failure counter. This is the complete set of breakers in the gateway.
+      const breaker = new CircuitBreaker({ failureThreshold: 20, windowMs: 30000 });
+
+      async function callDep(depName, fn) {
+        // depName is logged but NOT used to scope the breaker; all deps funnel through `breaker`.
+        return breaker.exec(fn);
+      }
+
+      // /profile handler: reads ONLY the users DB.
+      app.get('/profile', async (req, res) => {
+        const user = await callDep('usersdb', () => usersDb.getProfile(req.uid));  // guarded by the shared breaker
+        res.json(user);
+      });
+
+      // /recommend handler: calls recsvc (the backend that is timing out).
+      app.get('/recommend', async (req, res) => {
+        const recs = await callDep('recsvc', () => recsvc.recommend(req.uid));
+        res.json(recs);
+      });
+  - id: breaker-code
+    type: code
+    label: gatewayd/circuit-breaker.ts — exec()
+    content: |
+      export class CircuitBreaker {
+        private failures = 0;            // ONE global counter across all dependencies
+        private openUntil = 0;
+        constructor(private cfg: { failureThreshold: number; windowMs: number }) {}
+
+        async exec<T>(fn: () => Promise<T>): Promise<T> {
+          if (Date.now() < this.openUntil) {
+            // OPEN: short-circuit WITHOUT calling fn, and replace whatever the real dependency status
+            // is with a generic CircuitOpen. The caller's actual backend is never contacted.
+            throw new CircuitOpen('service temporarily unavailable');
+          }
+          try { return await fn(); }
+          catch (e) {
+            this.failures++;                          // any dep's failure increments the SAME counter
+            if (this.failures >= this.cfg.failureThreshold) this.openUntil = Date.now() + this.cfg.windowMs;
+            throw e;
+          }
+        }
+      }
+      // Once open, exec() returns CircuitOpen for EVERY dependency, regardless of which one failed.
+  - id: metrics
+    type: table
+    label: gatewayd per-dependency + per-route metrics (incident window)
+    content: |
+      dependency/route     12:00-12:01                 status
+      -------------------  --------------------------  ------------------------------------------
+      recsvc               p99 2000ms (timeout), 100% fail   <-- the failing backend
+      usersdb              p99 6ms, 0% error                 <-- /profile's only dependency: HEALTHY
+      GET /recommend       100% 503 after 12:00:31           (its dep recsvc is down)
+      GET /profile         100% 503 after 12:00:31           (its dep usersdb is HEALTHY; 503 is CircuitOpen)
+      breaker.state        CLOSED until 12:00:31, then OPEN (global)
+      # usersdb served 0 errors and 6ms p99 all window; /profile's 503s are the shared breaker being
+      # open, not usersdb. /profile's 503 onset (12:00:31) matches the breaker opening, not usersdb.
+  - id: deploy-note
+    type: diff
+    label: most recent /profile deploy d-51 (shipped 11:20, before the incident) — for rule-out
+    content: |
+      # Files changed by d-51: gatewayd/profile-handler.ts ONLY.
+        app.get('/profile', async (req, res) => {
+      -   const user = await callDep('usersdb', () => usersDb.getProfile(req.uid));
+      -   res.json({ id: user.id, name: user.name });
+      +   const user = await callDep('usersdb', () => usersDb.getProfile(req.uid));
+      +   res.json({ id: user.id, name: user.name, avatarUrl: user.avatarUrl });   // added one field
+        }
+      # d-51 added one response field. It did NOT touch the shared breaker, callDep, or recsvc. /profile
+      # 503s began at 12:00:31 (breaker open), 40 minutes after this deploy, not when it shipped.
+  - id: error-policy
+    type: spec
+    label: gatewayd resilience policy
+    content: |
+      gatewayd resilience policy (authoritative, applies to all routes):
+
+      P1 — Circuit breakers MUST be scoped PER DEPENDENCY. A backend's failures MUST open only that
+           backend's circuit; they MUST NOT open the circuit for, or fail, routes that do not call that
+           backend. A single fleet-wide breaker is prohibited.
+      P2 — A breaker that opens MUST surface the failing dependency's identity and cause; it MUST NOT
+           replace it with a generic error that hides which dependency failed.
+      P3 — users-DB degradation is reported via the db-health probe as DbUnavailable; it never manifests
+           as CircuitOpen on /profile.
+      This policy is the complete contract for breaker scoping and error surfacing.
+  - id: oncall-note
+    type: note
+    label: on-call triage thread
+    content: |
+      Triage guesses during the incident (record only; not all correct):
+      - "The users DB is down and that is why /profile 503s." — metrics shows usersdb at 6ms p99, 0%
+        error, and alert-log shows usersdb was never even contacted once the breaker opened; per P3 a
+        users-DB problem would surface as DbUnavailable, not CircuitOpen.
+      - "The /profile deploy d-51 broke it." — d-51 only added a response field and touched nothing in
+        the breaker path (deploy-note); the 503s began 40 minutes later, exactly when the breaker opened.
+      - "recsvc can't be involved — /profile doesn't call recsvc." — this rule-out is wrong: the shared
+        breaker (gateway-code) is the coupling. recsvc's timeouts filled the ONE global failure counter
+        and opened the circuit for all routes, including /profile.
+      - "Just raise the failure threshold so it stops opening." — recsvc is at 100% failure; a higher
+        threshold or longer window only delays the same fleet-wide open and still fails /profile.
+      Reminder: /profile's own dependency (usersdb) is healthy; the 503 is the shared breaker being open.
+tags: [error-propagation, circuit-breaker, blast-radius, debugging, gateway]

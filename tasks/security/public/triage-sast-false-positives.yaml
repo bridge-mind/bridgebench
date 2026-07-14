@@ -1,0 +1,257 @@
+id: triage-sast-false-positives
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Triage a Palisade SAST Report Against the Fernwood Storefront API
+summary: >-
+  A fictional SAST tool "Palisade" raised 8 findings against a fictional storefront API and
+  declares full-tree coverage at a pinned commit. Most of the report is noise. Classify each
+  finding as a true positive or a false positive using only the source and triage context,
+  confirm the genuine issues with a reachability chain and a calibrated severity, and refuse to
+  inflate. Confirming all 8 is scored as an error, not as diligence.
+prompt: |
+  You are the application-security engineer triaging an automated scan. The SAST tool
+  "Palisade" ran against the Fernwood storefront API and emitted 8 findings (scan-report).
+  Palisade does per-file AST matching: it cannot resolve globally registered guards, cannot
+  tell a security hash from a cache key, cannot tell a secret from a publishable identifier,
+  and cannot model runtime path-containment checks. Roughly half of what it reported is a
+  false positive.
+
+  You are given the report plus the relevant source and triage context: scan-report,
+  order-search, crypto-util, guard-registration, review-render, download-handler, image-proxy,
+  and triage-note. Answer each deliverable using ONLY the supplied artifacts. Cite the artifact
+  id(s) you rely on for every claim. If something is not defined, not reachable, or not
+  exploitable in the artifacts, say so explicitly. This is analysis only: do NOT write exploit
+  code, attack payloads, or working bypass strings — the ceiling is explaining the preconditions
+  under which an issue is or is not reachable.
+
+  Over-flagging loses as clearly as missing. A finding is "real" only if you can cite the
+  reachable source-to-sink path in the source; a finding is a false positive when another
+  artifact shows a citable mechanism that neutralizes it. Do not confirm a finding to appear
+  cautious, and do not carry Palisade's severity ratings through uncritically.
+
+  For findings 1 through 8, give a Verdict of TRUE POSITIVE or FALSE POSITIVE:
+    - For a TRUE POSITIVE: give the reachability chain (the source, the sink, and the path
+      between them, with artifact-id citations) and a calibrated Severity, and say whether
+      Palisade's own rating is accurate or inflated.
+    - For a FALSE POSITIVE: name the specific artifact and mechanism that neutralizes the
+      finding, and explain why Palisade could not see it.
+
+  1. F1 — SQL injection in order-search (rule PAL-SQLI-001). True positive or false positive?
+  2. F2 — hardcoded secret in the payments config (rule PAL-SECRET-014). True or false positive?
+  3. F3 — weak hashing algorithm MD5 in crypto-util (rule PAL-CRYPTO-022). True or false positive?
+  4. F4 — missing authentication on the admin metrics route (rule PAL-AUTHZ-031). True or false?
+  5. F5 — stored XSS in review rendering (rule PAL-XSS-047). True or false positive?
+  6. F6 — path traversal in the invoice download handler (rule PAL-PATH-052). True or false?
+  7. F7 — SSRF in the image proxy (rule PAL-SSRF-060). True or false positive?
+  8. F8 — CSRF on the checkout POST (rule PAL-CSRF-073). True or false positive?
+  9. Give the non-inflated summary: how many of the 8 findings are genuine issues, broken down
+     by your calibrated severity (not by Palisade's). This count must reflect only findings you
+     confirmed as reachable in deliverables 1–8.
+artifacts:
+  - id: scan-report
+    type: table
+    label: Palisade SAST report for storefront-api (8 findings, declares coverage)
+    content: |
+      Palisade SAST — storefront-api scan report
+      Engine: Palisade 4.6.0   Ruleset: palisade-web-default
+      Target: storefront-api @ commit a1b2c3d4   (FULL-TREE scan)
+      Coverage: every file under src/ was parsed and analyzed. This report lists EVERY finding
+      Palisade raised for this target — nothing is suppressed, deduplicated away, or truncated.
+
+      Palisade limitations (declared by the vendor): Palisade performs per-file AST analysis. It
+      does NOT resolve middleware/guards registered globally at application bootstrap, does NOT
+      distinguish a security hash from a non-security checksum, does NOT classify whether a key
+      literal is a secret or a publishable identifier, and does NOT evaluate runtime
+      path-containment checks.
+
+      id  | rule           | palisade_severity | location                              | finding
+      ----|----------------|-------------------|---------------------------------------|-------------------------------------------------------------
+      F1  | PAL-SQLI-001   | Critical          | src/orders/order-search.ts:12         | user-controlled `sort` concatenated into ORDER BY clause
+      F2  | PAL-SECRET-014 | High              | src/payments/config.ts:7              | hardcoded secret literal: PUBLISHABLE = 'pub_sandbox_9f2a4c1e...'
+      F3  | PAL-CRYPTO-022 | Medium            | src/cache/crypto-util.ts:9            | weak hashing algorithm MD5 used to compute a digest
+      F4  | PAL-AUTHZ-031  | High              | src/admin/metrics.controller.ts:18    | admin route handler declares no in-file authentication decorator
+      F5  | PAL-XSS-047    | High              | src/reviews/review-render.ts:8        | stored value `r.body` interpolated into HTML without escaping
+      F6  | PAL-PATH-052   | High              | src/files/download-handler.ts:11      | user-supplied `file` reaches a filesystem read (path traversal)
+      F7  | PAL-SSRF-060   | High              | src/media/image-proxy.ts:10           | user-supplied `src` URL is fetched server-side (SSRF)
+      F8  | PAL-CSRF-073   | Medium            | src/orders/checkout.controller.ts:14  | state-changing POST has no anti-CSRF token check
+
+      Triage instruction: confirm or refute each finding against the source and the triage
+      context. A finding Palisade rated high is not automatically real.
+  - id: order-search
+    type: code
+    label: src/orders/order-search.ts — order search query (F1)
+    content: |
+      // src/orders/order-search.ts
+      // Handler for GET /orders/search  (authenticated: req.user is set by BearerAuthGuard).
+      import { sql } from '../db';
+
+      export async function searchOrders(req, res) {
+        const q = String(req.query.q ?? '');
+        const sort = String(req.query.sort ?? 'created_at');
+        // `dir` is whitelisted to two literal keywords:
+        const dir = req.query.dir === 'asc' ? 'ASC' : 'DESC';
+
+        // The customer filter and the text filter are parameterized ($1, $2).
+        // `sort`, however, is interpolated straight into the ORDER BY clause with
+        // no whitelist and no parameterization.
+        const rows = await sql.query(
+          `SELECT id, total, status, created_at
+             FROM orders
+            WHERE customer_id = $1
+              AND status ILIKE $2
+            ORDER BY ${sort} ${dir}
+            LIMIT 50`,
+          [req.user.customerId, `%${q}%`],
+        );
+        return res.json(rows);
+      }
+  - id: crypto-util
+    type: code
+    label: src/cache/crypto-util.ts — cache-bucket key derivation (F3)
+    content: |
+      // src/cache/crypto-util.ts
+      import { createHash } from 'node:crypto';
+
+      // Derives a short, stable cache-bucket key from PUBLIC, non-secret inputs
+      // (a product id and its last-updated timestamp).
+      //
+      // This digest is NOT a password hash, NOT a signature, and NOT an integrity
+      // check. Nothing about authentication, authorization, or data integrity
+      // depends on it. A hash collision here can only route two products to the
+      // same cache bucket; the cache layer already stores the full key alongside
+      // the value and disambiguates on read, so a collision degrades to a cache
+      // miss, never to incorrect data.
+      export function cacheBucketKey(productId: string, updatedAt: string): string {
+        return createHash('md5').update(`${productId}:${updatedAt}`).digest('hex');
+      }
+  - id: guard-registration
+    type: config
+    label: src/app/guards.config — global guard registry (F4)
+    content: |
+      # src/app/guards.config.ts — application bootstrap guard registration.
+      #
+      # Palisade analyzes controllers file-by-file and does not resolve guards that
+      # are registered globally here, so it reports any handler without an in-file
+      # auth decorator as unauthenticated. This file is the authoritative guard
+      # registry: every request is matched against it BEFORE reaching any handler.
+
+      globalGuards:
+        - BearerAuthGuard        # applied to every route in the application
+        - AdminScopeGuard        # additionally requires scope=admin on any path under /admin
+
+      routePrefixGuards:
+        # Exhaustive path-prefix guard table.
+        - prefix: /admin
+          guards: [BearerAuthGuard, AdminScopeGuard]   # covers /admin/metrics AND all other /admin routes
+        - prefix: /orders
+          guards: [BearerAuthGuard]
+        - prefix: /media
+          guards: [BearerAuthGuard]
+        - prefix: /files
+          guards: [BearerAuthGuard]
+
+      # There are no unguarded route prefixes. The metrics controller at
+      # src/admin/metrics.controller.ts resolves under /admin and is therefore
+      # covered by BearerAuthGuard + AdminScopeGuard even though it declares no
+      # in-file decorator. This table is the complete authentication surface.
+  - id: review-render
+    type: code
+    label: src/reviews/review-render.ts — product review rendering (F5)
+    content: |
+      // src/reviews/review-render.ts
+      // Renders the stored product reviews into server-side HTML for the public
+      // product page. `reviews` are submitted by authenticated customers via
+      // POST /products/:id/reviews and stored verbatim; every shopper who views
+      // the product page — and the staff who view the moderation queue — receives
+      // this HTML.
+      import { escapeHtml } from '../util/escape';
+
+      export function renderReviews(reviews: Review[]): string {
+        return reviews
+          .map(
+            (r) => `
+              <li class="review">
+                <span class="review-author">${escapeHtml(r.author)}</span>
+                <div class="review-body">${r.body}</div>
+              </li>`,
+          )
+          .join('');
+      }
+      // Note: r.author is passed through escapeHtml; r.body is interpolated raw.
+  - id: download-handler
+    type: code
+    label: src/files/download-handler.ts — invoice download (F6)
+    content: |
+      // src/files/download-handler.ts
+      import { resolve, join, relative, isAbsolute } from 'node:path';
+      import { createReadStream } from 'node:fs';
+
+      const ROOT = resolve('/srv/storefront/invoices');
+
+      // Handler for GET /files/invoice?file=...  This is the ONLY filesystem read
+      // path in the service; no other handler opens files from user input.
+      export function downloadInvoice(req, res) {
+        const requested = String(req.query.file ?? '');
+
+        // Resolve the candidate against ROOT, then verify it did not escape ROOT.
+        const candidate = resolve(join(ROOT, requested));
+        const rel = relative(ROOT, candidate);
+        if (rel.startsWith('..') || isAbsolute(rel)) {
+          // Any traversal (../.., an absolute path, etc.) resolves to a location
+          // outside ROOT, making `rel` start with '..' or be absolute, and is
+          // rejected here BEFORE any filesystem access happens.
+          return res.status(400).json({ error: 'invalid path' });
+        }
+
+        return createReadStream(candidate).pipe(res);
+      }
+  - id: image-proxy
+    type: code
+    label: src/media/image-proxy.ts — remote image proxy (F7)
+    content: |
+      // src/media/image-proxy.ts
+      import { fetch } from '../http';
+
+      // Handler for GET /media/proxy?src=<url>. Fetches a remote image server-side
+      // so the browser can display third-party images without mixed-content
+      // warnings. Reachable by any authenticated caller (BearerAuthGuard on /media).
+      export async function proxyImage(req, res) {
+        const src = String(req.query.src ?? '');
+
+        // `src` is taken as-is from the query string. There is no host allow-list,
+        // no restriction to known image CDNs, and no check against private or
+        // link-local address ranges. The server issues the request and pipes the
+        // upstream response body straight back to the caller.
+        const upstream = await fetch(src);
+        res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/octet-stream');
+        return upstream.body.pipe(res);
+      }
+  - id: triage-note
+    type: note
+    label: triage-note — storefront platform team (authoritative for classification)
+    content: |
+      Triage context for the Palisade scan. Authored by the storefront platform team;
+      authoritative for classifying the findings below.
+
+      Authentication model — the storefront API is STATELESS and BEARER-ONLY. Every request
+      must carry `Authorization: Bearer <token>`. The server keeps no session state and sets
+      no authentication cookies. Because no credential is stored ambiently in the browser, a
+      browser never attaches credentials automatically to a cross-site request, so cross-site
+      request forgery cannot be mounted against any endpoint here. There is no cookie-based or
+      session-based authentication anywhere in this service — this is the complete auth model.
+
+      Payment keys — the literal Palisade flagged as F2 in src/payments/config.ts is
+      `pub_sandbox_9f2a4c1e...`, our payment provider's PUBLISHABLE sandbox key. The
+      `pub_sandbox_` prefix denotes a publishable key: it is designed to be shipped inside
+      client-side code, it only identifies the merchant to the provider, and it carries NO
+      secret authority — it cannot charge cards, issue refunds, or read account data. The
+      secret key (prefix `sk_live_`) is loaded only from the STOREFRONT_PAYMENT_SECRET
+      environment variable and never appears in source. F2 is therefore a publishable
+      identifier, not a leaked secret.
+
+      Scope of this note: it speaks ONLY to the CSRF finding (F8) and the payment-key finding
+      (F2). It does not excuse any other finding — judge F1, F3, F4, F5, F6, and F7 on their
+      own source.
+tags: [security, finding-triage, sast, false-positives, triage]

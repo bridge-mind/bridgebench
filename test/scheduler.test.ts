@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { listModels, SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
 import { scheduleMatches } from '../src/scheduler.js';
-import { TaskLoader } from '../src/tasks.js';
+import { TaskLoader, TASKS_PER_CATEGORY } from '../src/tasks.js';
 import { makeTask } from './helpers.js';
 
 describe('seeded match scheduler', () => {
@@ -47,12 +47,12 @@ describe('seeded match scheduler', () => {
     const schedule = scheduleMatches({
       category: 'reasoning',
       seed: 'sol-fable-pilot',
-      count: 12,
+      count: TASKS_PER_CATEGORY,
       modelIds: [...SOL_FABLE_PILOT_COMPETITOR_IDS],
       tasks,
     });
 
-    expect(schedule).toHaveLength(12);
+    expect(schedule).toHaveLength(TASKS_PER_CATEGORY);
     expect(new Set(schedule.map((match) => match.taskId))).toEqual(
       new Set(tasks.map((task) => task.public.id)),
     );

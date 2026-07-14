@@ -1,6 +1,9 @@
 # Replay the Elo yourself
 
-A BridgeBench ladder is not a claim — it is the fold of a journal you can re-run. This is the recipe.
+A BridgeBench ladder is not a claim — it is the fold of a journal you can
+re-run. This is the rating recipe. Start with
+[Reviewing BridgeBench](reviewing-bridgebench.md) if you want the complete
+task-to-result walkthrough first.
 
 ## What you need
 
@@ -15,6 +18,10 @@ npm run arena -- verify \
   --category reasoning \
   --journal test/fixtures/journals/valid.jsonl
 ```
+
+`npm run review` runs this replay together with public-pack and documentation
+validation. The synthetic line proves the verifier mechanism; it is not a
+published model-quality claim.
 
 For a downloaded journal, place its run manifests in a sibling `runs/` directory or pass `--manifests-dir <path>`.
 
@@ -76,4 +83,7 @@ With the repo checked out, `npm run report` verifies the journal before rebuildi
 - **Judging**: each vote carries the judge's rationale and resolved winner; `agreement` must match the winner-vote count (three `unanimous`, exactly two `split`).
 - **Cost/token accounting**: every response carries its OpenRouter generation ID; `npm run arena -- generation <id>` fetches the provider's own record.
 
-If any of it doesn't reproduce, open an issue with the line number.
+If any of it doesn't reproduce, open a
+[ladder audit report](https://github.com/bridge-mind/bridgebench/issues/new?template=audit-report.yml)
+with the journal source, first failing line, verifier output, and reproduction
+command.

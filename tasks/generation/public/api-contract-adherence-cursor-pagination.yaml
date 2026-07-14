@@ -1,0 +1,257 @@
+id: api-contract-adherence-cursor-pagination
+version: 1.0.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: GET /v1/events — Which Handler Obeys Every Ordering And Cursor Term
+summary: A cursor-pagination contract fixes total ordering with an id tie-break, limit clamping (not rejection) at the max, exclusive cursors with no cross-page duplicates, a null next_cursor on the last page, and a 400 status for an unknown cursor. Six handler submissions are under review; exactly one obeys every term while each decoy breaks exactly one. Classify all six against the contract and a fixed dataset.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (api-contract, sample-data-and-pages,
+  handlers-a, handlers-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent contract terms and do not overlook one that is stated. The verdict
+  vocabulary is exactly: conforms / violates. A handler `conforms` only if it satisfies EVERY term
+  T1..T5 in api-contract.
+
+  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
+  obeys every term. No code is executed; reason about each handler's output for the fixed dataset
+  and page requests in sample-data-and-pages.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single contract term (one of T1..T5) it
+     breaks and cite the sample-data-and-pages request (page or vector) that exposes it. State the
+     contract-correct output and the candidate's output.
+
+  3. Exactly one candidate `conforms`. Identify it.
+
+  4. In reviewer-thread, reviewer @priya argues candidate-4 conforms because "it returns rows in
+     the right order and stops at the right place." State candidate-4's verdict and cite the term
+     and the sample-data-and-pages page that refutes @priya.
+
+  5. A client pages by repeatedly following next_cursor until it is null. Which single candidate
+     prevents clean termination because it never returns next_cursor = null on the last non-empty
+     page? Name it and the term it breaks.
+artifacts:
+  - id: api-contract
+    type: spec
+    label: GET /v1/events pagination contract (frozen, complete)
+    content: |
+      GET /v1/events?cursor=<id>&limit=<int>   (application/json)
+
+      Returns a page of events. Behavior is fully specified by the terms below. This is the
+      COMPLETE contract; a handler conforms only if it satisfies every term.
+
+      T1  ORDERING. Events are returned in ascending order by the composite key (createdAt, id).
+          When two events share a createdAt, the tie is broken by id ASCENDING. This is a strict
+          total order.
+
+      T2  LIMIT. `limit` defaults to 20 when omitted. If `limit` is present but is not an integer,
+          or is < 1, respond 422 with error "invalid_limit". If `limit` is an integer > 100, it is
+          CLAMPED to 100 (the request succeeds with at most 100 rows) — a limit above 100 is NOT
+          rejected.
+
+      T3  CURSOR EXCLUSIVITY. `cursor` is the id of the last item of the previous page. The next
+          page returns the items strictly AFTER that item in (createdAt, id) order; the cursor item
+          itself is EXCLUDED. No event appears on two pages of the same forward scan.
+
+      T4  NEXT-CURSOR. The response includes `next_cursor`. It is the id of the LAST item in the
+          returned page when a full page (exactly `limit` rows) was returned, and it is null when
+          this is the last page (the page returned FEWER than `limit` rows, including an empty page).
+
+      T5  STATUS. A valid request responds 200. If `cursor` is provided but names an id that does
+          not exist in the dataset, respond 400 with error "invalid_cursor". (Not 200-with-empty,
+          not 404, not 500.)
+
+      Response body on success: { "rows": [<id>...], "next_cursor": <id> | null }. This is the
+      entire contract.
+  - id: sample-data-and-pages
+    type: table
+    label: fixed dataset and contract-correct pages
+    content: |
+      Fixed dataset (COMPLETE — these eight events are the entire set):
+        id   createdAt
+        e1   100
+        e2   100     # ties e1 on createdAt; e1 < e2 by id
+        e3   105
+        e4   110
+        e5   110     # ties e4; e4 < e5 by id
+        e6   115
+        e7   120
+        e8   120     # ties e7; e7 < e8 by id
+
+      Total order by (createdAt, id) ascending: e1, e2, e3, e4, e5, e6, e7, e8.
+
+      Contract-correct pages with limit = 3:
+        P1  request { limit: 3 }              -> 200 { rows: [e1, e2, e3], next_cursor: "e3" }
+        P2  request { cursor: "e3", limit: 3 } -> 200 { rows: [e4, e5, e6], next_cursor: "e6" }
+        P3  request { cursor: "e6", limit: 3 } -> 200 { rows: [e7, e8],     next_cursor: null }
+
+      Additional contract-correct vectors:
+        V-CLAMP    request { limit: 150 }      -> 200 { rows: [e1,e2,e3,e4,e5,e6,e7,e8], next_cursor: null }
+                   (150 clamps to 100; all 8 rows fit, 8 < 100 so next_cursor is null)
+        V-BADLIMIT request { limit: 0 }        -> 422 { error: "invalid_limit" }
+        V-BADCUR   request { cursor: "e99" }   -> 400 { error: "invalid_cursor" }   ("e99" not in dataset)
+  - id: handlers-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      const MAX = 100, DEFAULT_LIMIT = 20;
+      // EVENTS: Array<{ id: string; createdAt: number }> from sample-data-and-pages.
+
+      function cmpAsc(a, b) {                       // ascending (createdAt, id); id ASC on ties
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      }
+
+      // ---- candidate-1 ----
+      function candidate1({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX) limit = MAX;                                  // T2 clamp
+        const sorted = [...EVENTS].sort(cmpAsc);                            // T1
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };  // T5
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);          // T3 strictly after
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length < limit ? null : page[page.length - 1].id; // T4
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+
+      // ---- candidate-2 ----
+      function cmpTieDesc(a, b) {                   // ties broken by id DESCENDING
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+      }
+      function candidate2({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX) limit = MAX;
+        const sorted = [...EVENTS].sort(cmpTieDesc);                        // wrong tie-break order
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
+          start = sorted.findIndex((e) => cmpTieDesc(e, anchor) > 0);
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length < limit ? null : page[page.length - 1].id;
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+
+      // ---- candidate-3 ----
+      function candidate3({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX)
+          return { status: 422, body: { error: 'invalid_limit' } };        // rejects instead of clamping
+        const sorted = [...EVENTS].sort(cmpAsc);
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length < limit ? null : page[page.length - 1].id;
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+  - id: handlers-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // (reuse MAX, DEFAULT_LIMIT, cmpAsc, EVENTS from handlers-a)
+
+      // ---- candidate-4 ----
+      function candidate4({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX) limit = MAX;
+        const sorted = [...EVENTS].sort(cmpAsc);
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) >= 0);          // inclusive: includes the cursor item
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length < limit ? null : page[page.length - 1].id;
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+
+      // ---- candidate-5 ----
+      function candidate5({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX) limit = MAX;
+        const sorted = [...EVENTS].sort(cmpAsc);
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length === 0 ? null : page[page.length - 1].id;   // returns last id even on a short page
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+
+      // ---- candidate-6 ----
+      function candidate6({ cursor, limit }) {
+        if (limit === undefined) limit = DEFAULT_LIMIT;
+        else if (!Number.isInteger(limit) || limit < 1)
+          return { status: 422, body: { error: 'invalid_limit' } };
+        else if (limit > MAX) limit = MAX;
+        const sorted = [...EVENTS].sort(cmpAsc);
+        let start = 0;
+        if (cursor !== undefined) {
+          const anchor = sorted.find((e) => e.id === cursor);
+          if (!anchor) return { status: 200, body: { rows: [], next_cursor: null } };  // unknown cursor -> 200 empty
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);
+          if (start === -1) start = sorted.length;
+        }
+        const page = sorted.slice(start, start + limit);
+        const next = page.length < limit ? null : page[page.length - 1].id;
+        return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the six submissions
+    content: |
+      Review thread for GET /v1/events (PR #8402).
+
+      @priya: "candidate-4 looks right to me — it returns events in the correct (createdAt, id)
+      order and stops once it has a page. I'd approve it."
+
+      @sam: "Run P2 explicitly: request cursor 'e3', limit 3, and list the rows. Then confirm no id
+      appears on both P1 and P2. Ordering being correct is necessary but not sufficient."
+
+      QA-455 (untriaged): "One submission returns a page that repeats an id already returned on the
+      previous page. One rejects limit=150 instead of clamping. One keeps handing back a non-null
+      next_cursor even when the last page is short, so a paging client never stops. One returns 200
+      with an empty list for a cursor that isn't a real id. These may be four different submissions."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for GET /v1/events: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
+      being considered.
+
+      Acceptance rule: exactly one submission satisfies ALL terms T1..T5 (it reproduces the
+      contract-correct output for P1, P2, P3, and the additional vectors) and is to be accepted.
+      Each of the other five breaks exactly one term. The process assumes precisely one such
+      all-terms-correct submission exists.
+tags: [generation, api-contract-adherence, pagination, ordering, code-review]

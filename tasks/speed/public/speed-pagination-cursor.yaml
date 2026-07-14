@@ -1,0 +1,40 @@
+id: speed-pagination-cursor
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: hard
+title: Design a Stable Keyset Cursor and Encode Three Pages
+summary: >-
+  Specify and implement opaque keyset-pagination cursors for a sorted feed, then show the exact page
+  predicate and cursor values while paging through a small dataset.
+prompt: |
+  Per [feed-spec], implement cursor encode/decode and the next-page predicate, then trace paging over
+  [feed-rows] with page size 2.
+
+  1. `encodeCursor` / `decodeCursor` (base64url of the JSON keyset) plus the `WHERE` and `ORDER BY`
+     clause for the next page given a decoded cursor.
+  2. Walk [feed-rows] in pages of 2: for each page list the returned ids and the `nextCursor`
+     (its decoded form is fine), stopping when the feed is exhausted.
+artifacts:
+  - id: feed-spec
+    type: spec
+    label: Feed ordering and cursor
+    content: |
+      Rows are ordered by (score DESC, id ASC). A cursor is an opaque base64url token encoding the last
+      returned row's { score, id }. The next page selects rows strictly after the cursor in that order:
+        WHERE (score < cur.score) OR (score = cur.score AND id > cur.id)
+        ORDER BY score DESC, id ASC
+        LIMIT pageSize
+      The first page uses no cursor. nextCursor is null when fewer than pageSize rows are returned.
+  - id: feed-rows
+    type: table
+    label: Rows
+    content: |
+      id | score
+      a  | 90
+      b  | 90
+      c  | 80
+      d  | 80
+      e  | 80
+      f  | 70
+tags: [pagination, sql, api-design]

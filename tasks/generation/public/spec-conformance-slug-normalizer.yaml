@@ -1,0 +1,177 @@
+id: spec-conformance-slug-normalizer
+version: 1.0.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: normalizeSlug — Which Of Five Submissions Conforms To Every Clause
+summary: A frozen specification defines normalizeSlug(input) as a strict seven-clause pipeline. Five candidate implementations are under review; exactly one matches the spec on every input while each of the other four violates one specific, citable clause. Classify all five and name the distinguishing input for each near-miss.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (normalizer-spec, test-vectors,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite the artifact id(s)
+  for every claim. Do not invent requirements the spec does not state, and do not overlook a
+  clause it does state. The verdict vocabulary is exactly: conforms / violates.
+
+  The spec (normalizer-spec) declares clauses C1..C7 and is the complete contract. The
+  submission-manifest declares that candidate-1..candidate-5 are the entire set under review
+  and that exactly one is to be accepted.
+
+  1. Classify each of candidate-1, candidate-2, candidate-3, candidate-4, candidate-5 as
+     `conforms` or `violates` against normalizer-spec.
+
+  2. For every candidate you mark `violates`, name the single clause (one of C1..C7) it breaks
+     and give one concrete input string on which its output differs from the spec-correct
+     output. State both the spec-correct output and the candidate's output for that input.
+
+  3. Exactly one candidate `conforms`. Identify it, and state the output it produces for the
+     test-vectors input "café_düsseldorf".
+
+  4. In reviewer-thread, reviewer @ravi argues candidate-2 conforms because "it lowercases,
+     collapses separator runs to a single hyphen, trims, truncates to 40 with a trailing-hyphen
+     removal, and falls back to 'n-a' — every clause is represented." State candidate-2's verdict
+     and cite the one clause that refutes @ravi, with a discriminating input and both outputs.
+
+  5. reviewer-thread references BUG-88: one submission returns an empty string ("") instead of
+     "n-a" when the input is entirely punctuation (e.g. "@@@"). Name the single candidate BUG-88
+     belongs to and the clause it breaks. Confirm no other candidate has this defect.
+artifacts:
+  - id: normalizer-spec
+    type: spec
+    label: normalizeSlug specification (frozen, complete)
+    content: |
+      normalizeSlug(input: string): string
+
+      A pure, deterministic transform applied as an ORDERED pipeline. The clauses below are the
+      COMPLETE contract for this function; there are no other requirements. An implementation
+      conforms only if it produces the specified output for EVERY input, not merely if each clause
+      is "present" in some form.
+
+      C1  LOWERCASE. Map every character in the ASCII range U+0041..U+005A (A..Z) to its lowercase
+          form. Leave every other character unchanged. (No locale-specific casing; ASCII only.)
+
+      C2  SEPARATOR SET. After C1, a "separator" is any character NOT in the set [a-z0-9] (i.e. not
+          a lowercase ASCII letter and not an ASCII digit 0-9). Underscore '_', whitespace, all
+          punctuation, and every non-ASCII code point (e.g. 'é', 'ü', '—') are separators.
+
+      C3  COLLAPSE. Replace each maximal run of one-or-more separators with exactly one U+002D
+          hyphen-minus '-'. Two adjacent separators must not yield two hyphens.
+
+      C4  TRIM. Remove all leading and trailing '-' characters from the collapsed string.
+
+      C5  TRUNCATE. If the string's length exceeds 40, keep only the first 40 characters, then
+          remove a single trailing '-' if the 40th character is a hyphen. (Maximum length is 40;
+          truncation must never leave a trailing hyphen.)
+
+      C6  FALLBACK. If the string is now empty (length 0), return the literal "n-a". Otherwise
+          return the string. This clause is unconditional and does not depend on whether an
+          empty result is "expected" for a given input.
+
+      C7  DIGITS. ASCII digits 0-9 are preserved verbatim and are never treated as separators.
+
+      This is the entire specification. No other clause exists.
+  - id: test-vectors
+    type: table
+    label: authoritative input/output vectors (spec-correct)
+    content: |
+      These are the authoritative expected outputs computed from normalizer-spec. A conforming
+      implementation must reproduce every row exactly.
+
+      #  input                                            expected output
+      -- ------------------------------------------------ ---------------------------------------
+      1  "Hello, World!"                                  "hello-world"
+      2  "Node.js  ROCKS!!!"    (two spaces)              "node-js-rocks"
+      3  "café_düsseldorf"                                "caf-d-sseldorf"
+      4  "___"                                            "n-a"
+      5  "alpha beta gamma delta epsilon zeta eta theta"  "alpha-beta-gamma-delta-epsilon-zeta-eta"
+      6  "foo_bar"                                        "foo-bar"
+
+      Worked notes:
+        - Row 3: 'é', '_', 'ü' are all separators (C2). "café_" -> "caf" + one hyphen (the run
+          "é_" collapses per C3); "ü" -> one hyphen. Result "caf-d-sseldorf".
+        - Row 5: the collapsed slug is 45 chars ("alpha-beta-gamma-delta-epsilon-zeta-eta-theta").
+          The first 40 chars end in a hyphen ("...zeta-eta-"), which C5 removes, giving 39 chars.
+        - Row 6: '_' is a separator (C2), so "foo_bar" -> "foo-bar".
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // Each function is a complete, standalone implementation of normalizeSlug.
+
+      // ---- candidate-1 ----
+      function candidate1(input: string): string {
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());  // C1
+        s = s.replace(/[^a-z0-9]+/g, '-');                        // C2 + C3
+        s = s.replace(/^-+/, '').replace(/-+$/, '');              // C4
+        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');  // C5
+        return s.length === 0 ? 'n-a' : s;                        // C6
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(input: string): string {
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
+        s = s.replace(/[^\w]+/g, '-');   // \w is [A-Za-z0-9_]
+        s = s.replace(/^-+/, '').replace(/-+$/, '');
+        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
+        return s.length === 0 ? 'n-a' : s;
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(input: string): string {
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
+        s = s.replace(/[^a-z0-9]+/g, '-');
+        s = s.replace(/^-+/, '').replace(/-+$/, '');
+        if (s.length > 40) s = s.slice(0, 40);   // truncates; no trailing-hyphen removal
+        return s.length === 0 ? 'n-a' : s;
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(input: string): string {
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
+        s = s.replace(/[^a-z0-9]+/g, '-');
+        s = s.replace(/^-+/, '').replace(/-+$/, '');
+        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
+        return s;    // returns s directly, including '' when the result is empty
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(input: string): string {
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
+        s = s.replace(/[^a-z0-9]/g, '-');   // no '+': each separator char becomes its own hyphen
+        s = s.replace(/^-+/, '').replace(/-+$/, '');
+        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
+        return s.length === 0 ? 'n-a' : s;
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on PR #4471
+    content: |
+      Review thread for the five normalizeSlug submissions (PR #4471).
+
+      @ravi: "I stepped candidate-2 through the spec. It lowercases (C1), it collapses separator
+      runs to a single hyphen (C2/C3 — note the '+' in the regex), it trims the ends (C4), it
+      truncates to 40 and strips a trailing hyphen (C5), and it falls back to 'n-a' on empty (C6).
+      Every clause is represented, so I lean toward approving candidate-2."
+
+      @lena: "The bar is not 'every clause is represented somewhere' — it is 'matches the spec on
+      every input.' Compare the exact character classes and the exact order of operations before
+      approving anything."
+
+      BUG-88 (filed by QA, not yet triaged to a specific candidate): "One of the five submissions
+      returns an empty response body instead of 'n-a' when the input string is entirely
+      punctuation (repro input: \"@@@\")." Note: C6 is unconditional and applies regardless of
+      whether an all-punctuation input is considered 'realistic'.
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for normalizeSlug: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5. This is the COMPLETE set — there is no candidate-6 and no other
+      implementation is being considered.
+
+      Acceptance rule: exactly one submission is to be accepted. A submission is accepted only if
+      it conforms to normalizer-spec on every input (it reproduces all six rows of test-vectors and
+      obeys clauses C1..C7 generally). At most one of the five satisfies this; the acceptance
+      process assumes precisely one conformer exists in the set.
+tags: [generation, spec-conformance, string-processing, code-review]

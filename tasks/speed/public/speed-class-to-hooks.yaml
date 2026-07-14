@@ -1,0 +1,47 @@
+id: speed-class-to-hooks
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: hard
+title: Migrate a React Class Component to a Function Component With Hooks
+summary: >-
+  Convert a small React class component that fetches on mount, polls on an interval, cleans up on
+  unmount, and holds two pieces of state into an equivalent function component using hooks.
+prompt: |
+  Rewrite [class-component] as a TypeScript function component using hooks. Preserve behavior: fetch on
+  mount with abort on unmount, the polling interval, both state fields, and the rendered output.
+
+  1. The function component using `useState` and `useEffect` with a correct cleanup.
+  2. Keep the same props (`serviceId`, `intervalMs`) and the same rendered markup.
+  3. On unmount, abort the in-flight fetch and clear the interval.
+artifacts:
+  - id: class-component
+    type: code
+    label: Class component
+    content: |
+      class StatusPanel extends React.Component {
+        state = { status: 'loading', lastChecked: null };
+        controller = new AbortController();
+        timer = undefined;
+
+        async componentDidMount() {
+          const r = await fetch(`/api/status/${this.props.serviceId}`, { signal: this.controller.signal });
+          this.setState({ status: (await r.json()).state, lastChecked: Date.now() });
+          this.timer = setInterval(() => this.refresh(), this.props.intervalMs);
+        }
+
+        componentWillUnmount() {
+          this.controller.abort();
+          clearInterval(this.timer);
+        }
+
+        async refresh() {
+          const r = await fetch(`/api/status/${this.props.serviceId}`);
+          this.setState({ status: (await r.json()).state, lastChecked: Date.now() });
+        }
+
+        render() {
+          return <div>{this.state.status} @ {String(this.state.lastChecked)}</div>;
+        }
+      }
+tags: [react, hooks, migration]

@@ -1,0 +1,179 @@
+id: root-keepalive-connection-reset
+version: 1.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: Intermittent Edge 502s From a Keep-Alive Idle-Timeout Ordering Between Load Balancer and Server
+summary: >-
+  An edge load balancer returns sporadic 502s to clients with zero application errors, a green
+  deploy minutes earlier, flat CPU and DNS, and the failures clustering in low-traffic windows.
+  Reconcile the LB and server timeout configs, the keep-alive reuse mechanism, the edge and app logs,
+  a deploy diff, and host metrics to isolate the one root cause, reject the decoys, and give the
+  minimal fix under a fixed-server-timeout constraint.
+prompt: |
+  The edge load balancer (LB) in front of service quote-api returns HTTP 502 to a small fraction of
+  clients. The application logs show no errors, a deploy (v2.7.0) shipped ~30 minutes before, and CPU,
+  memory, and DNS look healthy. Using only the artifacts, produce:
+
+  1. ROOT CAUSE. Name the single defect and cite the exact artifact ids and the specific values that
+     establish it. Explain precisely why it produces 502s.
+  2. CAUSAL CHAIN. Trace one concrete 502 from [edge-log]: the connection's idle duration, the reuse,
+     the reset, and the 502, and show (via [app-log]) that this request never reached the application.
+  3. INNOCENT DEPLOY. Explain why the v2.7.0 release in [deploy-diff] is NOT the cause, citing what it
+     changed and the timeline of 502s relative to the deploy.
+  4. RED HERRINGS. Rule out CPU/memory saturation, DNS, and "the app is returning 500s," each with the
+     specific artifact evidence that eliminates it.
+  5. WHY NO APP 5xx. Explain why [app-log] shows zero 5xx even though clients see 502s, grounded in
+     where the failure occurs in the request path.
+  6. MINIMAL FIX. Give the smallest change that closes the 502s under the constraint in
+     [protocol-note] that the server keep-alive timeout is fixed. State the invariant the fix must
+     establish, and name the decoy fixes that do not durably close it.
+  7. BLAST RADIUS. State exactly which requests can 502 and which are safe, explain why the 502 rate is
+     small, and explain why the 502s cluster in low-traffic minutes.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: incident-summary
+    type: note
+    label: Incident summary and on-call theories
+    content: |
+      SEV-3 quote-api edge 502s. Between 10:00 and 11:15 the edge LB returned 502 to roughly 0.3% of
+      client requests, in bursts, then recovered on retry. All hosts hold NTP sync (offset < 20 ms), so
+      timestamps across artifacts are directly comparable. Traffic was light and uneven across the
+      window.
+
+      On-call theories (do not assume any is correct):
+        - Engineer A: "We deployed quote-api v2.7.0 at 10:40, right in the middle of this. Roll it back."
+        - Engineer B: "502 means the app is throwing 500s the LB can't parse. Check the app error logs."
+        - Engineer C: "Probably DNS flapping between the LB and the upstream, or the box is out of CPU."
+      Decide the cause from the artifacts before any rollback or failover.
+  - id: protocol-note
+    type: spec
+    label: Keep-alive connection reuse and the timeout-ordering rule
+    content: |
+      The edge LB keeps a POOL of persistent (keep-alive) TCP connections to each upstream server and
+      REUSES them for later requests to avoid reconnecting. Each side independently closes an idle
+      keep-alive connection after its own idle timeout:
+        - server keep-alive timeout: after this many ms with no request on a connection, the SERVER
+          sends FIN and closes it (see [server-config]).
+        - LB upstream idle timeout: after this many ms idle, the LB closes and discards the pooled
+          connection (see [lb-config]).
+
+      THE RACE. If the LB's idle timeout is LONGER than the server's keep-alive timeout, the server
+      closes idle connections first, while the LB still believes them usable. When the LB then
+      dispatches a new request onto such a just-closed connection, the write races the server's close:
+      the server has already half-closed the socket, so the request is met with a TCP reset (RST) /
+      "connection reset by peer" BEFORE any response bytes. The LB, if it cannot retry (see the retry
+      policy in [lb-config]), surfaces this to the client as HTTP 502. No request bytes ever reach the
+      application: the failure is entirely at the LB<->server transport layer.
+
+      When the LB idle timeout is SHORTER than the server keep-alive timeout, the LB always closes and
+      refreshes the connection first, so it never dispatches onto a server-closed socket and the race
+      cannot occur.
+
+      CONTROL SURFACE (exhaustive). The server keep-alive timeout is pinned at 5000 ms by the shared
+      runtime base image under platform policy; this service CANNOT override it. The ONLY timeout under
+      this team's control is the edge LB's upstream idle timeout. There is no application code path in
+      this stack that emits 502: the app returns 200, 4xx, or 5xx, and every 5xx it emits is written to
+      [app-log]. A client-visible 502 in this stack is produced only by the LB, only by the reuse race
+      above.
+  - id: lb-config
+    type: config
+    label: Edge load balancer upstream configuration
+    content: |
+      # edge-lb/upstream.conf  (the only config under this team's control)
+      upstream quote_api {
+        keepalive_pool: enabled
+        keepalive_connections: 64
+        upstream_idle_timeout_ms: 60000     # LB discards a pooled upstream connection after 60s idle
+        connect_timeout_ms: 2000
+      }
+      retry_policy:
+        retry_on: [connect_timeout]          # retried: failure to establish a NEW connection
+        do_not_retry_on: [reset_after_dispatch, upstream_closed]   # NOT retried once a request is
+                                             # dispatched onto a pooled connection (avoids double-send
+                                             # on non-idempotent requests) -> surfaced as 502
+      # Note: upstream_idle_timeout_ms (60000) is far larger than the server's keep-alive timeout.
+  - id: server-config
+    type: config
+    label: quote-api server runtime configuration
+    content: |
+      # quote-api server (Node http), values from the shared runtime base image
+      server:
+        keepAliveTimeout_ms: 5000            # server closes an idle keep-alive connection after 5s
+        headersTimeout_ms: 6000
+        maxConnections: 512
+      # PINNED: keepAliveTimeout_ms is set to 5000 by the base image (platform policy) and cannot be
+      # overridden by quote-api. v2.7.0 did NOT change this value (see deploy-diff).
+  - id: edge-log
+    type: log
+    label: Edge LB access log (LB clock; NTP healthy)
+    content: |
+      # cols: time | conn | action | idle_ms_before_use | upstream_status | client_status | req_id | detail
+      10:12:03 | c17 | reuse-pooled | 8200  | -   | 502 | r-9001 | RST before response; upstream closed idle conn; not retried
+      10:12:04 | c22 | reuse-pooled | 1100  | 200 | 200 | r-9002 | ok
+      10:12:05 | c09 | new-conn     | -     | 200 | 200 | r-9003 | ok (fresh connection)
+      10:19:47 | c05 | reuse-pooled | 3200  | 200 | 200 | r-9021 | ok (idle < 5000 ms; server had not closed)
+      10:31:20 | c31 | reuse-pooled | 12500 | -   | 502 | r-9040 | RST before response; upstream closed idle conn; not retried
+      10:31:21 | c33 | reuse-pooled | 900   | 200 | 200 | r-9041 | ok
+      10:40:10 | --  | deploy-note  | -     | -   | -   | -      | quote-api v2.7.0 rollout complete (see deploy-diff)
+      10:52:41 | c44 | reuse-pooled | 6700  | -   | 502 | r-9105 | RST before response; upstream closed idle conn; not retried
+      10:52:43 | c46 | new-conn     | -     | 200 | 200 | r-9106 | ok
+      11:07:55 | c50 | reuse-pooled | 41000 | -   | 502 | r-9188 | RST before response; upstream closed idle conn; not retried
+      11:08:00 | c51 | reuse-pooled | 2100  | 200 | 200 | r-9190 | ok
+      # Every 502 row: a pooled connection reused after being idle > 5000 ms, upstream_status "-" (no
+      # response line was ever received), reset before any bytes. Every reuse with idle < 5000 ms and
+      # every new connection succeeded. upstream_response_time was "-" for all 502 rows.
+  - id: app-log
+    type: log
+    label: quote-api application request log (app clock; NTP healthy)
+    content: |
+      # The app logs EVERY request it receives, with the LB-provided x-request-id, and every response
+      # status it returns. This is the complete set of requests the app process handled in the window.
+      10:12:04 req=r-9002 GET /v1/quote 200 12ms
+      10:12:05 req=r-9003 GET /v1/quote 200 11ms
+      10:19:47 req=r-9021 GET /v1/quote 200 10ms
+      10:31:21 req=r-9041 GET /v1/quote 200 13ms
+      10:52:43 req=r-9106 GET /v1/quote 200 12ms
+      11:08:00 req=r-9190 GET /v1/quote 200 11ms
+      # Aggregate for 10:00-11:15: total app requests 24118, 2xx 24102, 4xx 16, 5xx 0.
+      # The request ids that the LB logged as 502 (r-9001, r-9040, r-9105, r-9188) DO NOT appear here:
+      # the app never received them. No 5xx was emitted anywhere in the window.
+  - id: deploy-diff
+    type: diff
+    label: quote-api v2.6.4 -> v2.7.0 (deployed 10:40)
+    content: |
+      # release v2.7.0 — "switch request logs to structured JSON; add a route label to metrics"
+      # Files changed: logging/format.ts, metrics/labels.ts. No server or connection settings touched.
+
+        // logging/format.ts
+      -   log.info(`${req.method} ${req.path} ${res.status} ${ms}ms`);
+      +   log.info({ method: req.method, path: req.path, status: res.status, ms });
+
+        // metrics/labels.ts
+      -   httpRequests.inc({ status: res.status });
+      +   httpRequests.inc({ status: res.status, route: req.routeName });
+
+      # server keepAliveTimeout, headersTimeout, and the connection pool are unchanged by this release.
+      # Timeline of client 502s (LB clock):
+      #   10:12:03 r-9001   (28 min BEFORE the 10:40 deploy)
+      #   10:31:20 r-9040   (9 min BEFORE the deploy)
+      #   10:52:41 r-9105   (12 min AFTER the deploy)
+      #   11:07:55 r-9188   (28 min AFTER the deploy)
+      # 502s occur both before and after v2.7.0, at a steady rate; the deploy did not start or stop them.
+  - id: metrics-table
+    type: table
+    label: quote-api host and dependency metrics (10:00-11:15, 5-min buckets)
+    content: |
+      bucket      | req_per_min | cpu_pct | mem_pct | conn_pool_inuse/64 | dns_resolve_ms | client_502s
+      10:00-10:05 | 340         | 31      | 44      | 22                 | 1              | 0
+      10:10-10:15 | 95          | 18      | 43      | 6                  | 1              | 3
+      10:25-10:30 | 88          | 17      | 43      | 5                  | 1              | 0
+      10:30-10:35 | 92          | 18      | 44      | 6                  | 1              | 2
+      10:40-10:45 | 300         | 29      | 45      | 20                 | 1              | 0
+      10:50-10:55 | 84          | 16      | 44      | 5                  | 1              | 2
+      11:05-11:10 | 79          | 15      | 43      | 4                  | 1              | 3
+      # CPU and memory stay low and flat all window; the connection pool is far from its 64 cap; DNS
+      # resolution is ~1 ms (a static internal record, no re-resolution failures logged). 502s appear
+      # in the LOW-traffic buckets (79-95 req/min), not the busy ones (300-340 req/min).
+tags: [load-balancer, keep-alive, timeout, "502", connection-reuse, root-cause]

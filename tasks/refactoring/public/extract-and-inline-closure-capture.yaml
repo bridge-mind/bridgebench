@@ -1,0 +1,132 @@
+id: extract-and-inline-closure-capture
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Extracting makeHandler From a Loop — Per-Iteration Capture, Shared var, and Eager Render
+summary: >-
+  A loop that registers deferred event handlers is to be refactored by extracting the handler-building
+  logic into a makeHandler helper. Exactly one extraction preserves, for every registered handler,
+  which widget object render runs on, the index it receives, and that render runs only on emit. The
+  decoys share a var across iterations, capture only the index wrong, or call render eagerly at
+  registration. Classify each and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (register-original, bus-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to lift the handler-building logic out of the loop into a reusable helper
+  WITHOUT changing, for each registered event, (i) which widget object render is called on, (ii) the
+  index argument render receives, or (iii) that render runs only when the event is emitted, never
+  during registration (see bus-note for what is observable).
+
+  1. Classify rewrite-a relative to register-original. Justify by tracing what each registered handler
+     captures across iterations.
+
+  2. Classify rewrite-b. If it changes behavior, state precisely: when the event 'refresh:' +
+     widgets[0].id is later emitted, which widget object render is called on and what index argument
+     it receives.
+
+  3. Classify rewrite-c. Name the observable difference from register-original, in terms of when
+     render runs and how many times, for widgets that are never emitted.
+
+  4. Classify rewrite-d. If it changes behavior, state what render receives (widget object and index)
+     when 'refresh:' + widgets[0].id is emitted, and how this differs from rewrite-b.
+
+  5. Exactly one extraction is the only behavior-preserving refactor. Name it. Then, for
+     register-original, state the ground truth: when 'refresh:' + widgets[0].id is emitted, which
+     widget object render is called on, with what index, and at what time.
+artifacts:
+  - id: register-original
+    type: code
+    label: dashboard/wire.ts — original inline loop (the reference behavior)
+    content: |
+      // dashboard/wire.ts — original. registerWidgets is the ONLY function that wires refresh
+      // handlers (see bus-note).
+      import type { EventBus } from './bus';
+      import type { Widget } from './widget';
+
+      export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
+        for (let i = 0; i < widgets.length; i++) {
+          const widget = widgets[i];                 // per-iteration block binding
+          bus.on(`refresh:${widget.id}`, () => {
+            widget.render(i);                        // captures THIS iteration's widget and i
+          });
+        }
+      }
+  - id: bus-note
+    type: note
+    label: dashboard wiring — EventBus semantics, render observability, completeness
+    content: |
+      dashboard wiring — EventBus semantics and observability (complete).
+
+      EventBus.on(event, handler) registers handler under the event name; it does NOT call handler.
+      Later, EventBus.emit(event) invokes every handler registered under that event, in registration
+      order. Handlers may be invoked zero, one, or many times depending on runtime events.
+
+      widget.render(index) paints the widget and increments a global paint_count (an observable side
+      effect); the index argument is recorded in the paint. render is a method on the widget object
+      (it reads its own `this`), so which widget object a handler calls render on is observable, as is
+      the index argument.
+
+      registerWidgets is the ONLY function that wires refresh handlers, and it is called exactly once
+      at startup. The `widgets` array is frozen after registration: neither its length nor its element
+      identities change. This is the complete wiring surface.
+
+      Reference behavior of register-original: for each index k, a handler is registered under
+      'refresh:' + widgets[k].id that, WHEN LATER EMITTED, calls widgets[k].render(k) — the widget
+      object and the index captured at iteration k. render is not called during registration.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — makeHandler(widget, i) by value
+    content: |
+      // rewrite-a — extract a helper that takes the widget and index by value.
+      function makeHandler(widget: Widget, i: number): () => void {
+        return () => widget.render(i);
+      }
+
+      export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
+        for (let i = 0; i < widgets.length; i++) {
+          const widget = widgets[i];
+          bus.on(`refresh:${widget.id}`, makeHandler(widget, i));
+        }
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — hoisted var bindings
+    content: |
+      // rewrite-b — "hoist the temporaries out of the loop body."
+      export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
+        for (var i = 0; i < widgets.length; i++) {
+          var widget = widgets[i];                   // var: one shared binding for the whole loop
+          bus.on(`refresh:${widget.id}`, () => widget.render(i));
+        }
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — makeHandler computes render up front
+    content: |
+      // rewrite-c — "precompute the render inside the helper."
+      function makeHandler(widget: Widget, i: number): () => void {
+        const result = widget.render(i);             // render invoked here, during registration
+        return () => result;
+      }
+
+      export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
+        for (let i = 0; i < widgets.length; i++) {
+          const widget = widgets[i];
+          bus.on(`refresh:${widget.id}`, makeHandler(widget, i));
+        }
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — const widget, var i
+    content: |
+      // rewrite-d — "keep widget local, hoist just the counter."
+      export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
+        for (var i = 0; i < widgets.length; i++) {   // var i: shared counter
+          const widget = widgets[i];                 // const: per-iteration binding
+          bus.on(`refresh:${widget.id}`, () => widget.render(i));
+        }
+      }
+tags: [refactoring, extract-and-inline, closure, capture, evaluation-order]

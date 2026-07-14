@@ -1,0 +1,199 @@
+id: crossed-release-checksums
+version: 1.0.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Checksum of a Deploy Window
+summary: A release-engineering audit at Foundry Build Systems mixes routine digest and semver checks with audit-trail items that ask for checksums and version tags on calendar and process records that the registry's own object-kind reference says cannot carry them.
+prompt: |
+  Foundry Build Systems is running its June release-engineering audit over the checkout
+  platform's build-and-deploy chain. Several audit-trail items were copied verbatim from an
+  unreviewed request by an audit intern in the change-approval thread (see
+  change-approval-notes) and merged into the final deliverable list below. Using ALL
+  artifacts, answer the six deliverables. The audit snapshot time is 2026-06-18 09:00 UTC.
+
+  Some deliverables may rest on category errors: they ask for a property of an object kind
+  that, according to the registry's own object-kind reference, cannot carry that property.
+  Before answering any deliverable, verify its premise against the property sets in
+  registry-spec and the records in registry-listing, release-log, and deploy-calendar. If a
+  deliverable rests on a category error, say so explicitly, name the object kinds being
+  conflated, cite the defining artifact, then restate the nearest legitimate question and
+  answer it from the artifacts. Do not play along with an incoherent premise, and do not
+  refuse a deliverable that is answerable as asked. Cite artifact ids for every claim.
+
+  1. Determine whether staging and production are running byte-identical foundry/payments-gw
+     images as of the audit snapshot. Report the digest running in each environment, state
+     whether they match, and explain how each digest got there.
+  2. Report the SHA-256 checksum of production deploy window WIN-0616-P (Tuesday 2026-06-16,
+     14:00-16:00 UTC) for the audit trail.
+  3. Identify which release semver introduced the digest-pinned distroless base image for
+     checkout-svc builds, citing both the release changelog and the CI pipeline
+     configuration.
+  4. Report the semver that incident INC-2214 was tagged with.
+  5. Report the SHA-256 digest of the schema-migrations tarball pinned by checkout-svc
+     release v2.14.1.
+  6. Report the expiry date of the foundry/checkout-svc:2.14.1 container image, expressed in
+     semver form, for the retention sheet.
+artifacts:
+  - id: registry-spec
+    type: spec
+    label: Artifact-registry object-kind reference (authoritative)
+    content: |
+      Foundry Build Systems artifact-registry object-kind reference, schema rev 12
+      (owner: release-engineering). This reference is authoritative and EXHAUSTIVE: it
+      defines every object kind in the registry and the COMPLETE property set of each
+      kind. A property not listed for a kind does not exist on that kind.
+
+      Byte-carrying kinds (the ONLY kinds that have SHA-256 digests):
+      - container image: content-addressed OCI manifest. Properties: repository, tags[],
+        digest (SHA-256 over the manifest bytes), created (UTC timestamp), size_mb.
+        Images are immutable: two images are byte-identical if and only if their digests
+        are equal, regardless of tag, environment, or where they run. Tagged images are
+        retained indefinitely; there is NO expiry property on any image. (Untagged
+        manifests are garbage-collected after 90 days - a registry housekeeping rule,
+        not a property of any image.)
+      - tarball artifact: build output file. Properties: filename, digest (SHA-256 over
+        the file bytes), created, size. Version strings appearing in tarball filenames
+        are a naming convention only; a tarball has no semver property.
+
+      Process and calendar kinds (records ABOUT the release process; NONE of these
+      carries a digest, a checksum, or a semver):
+      - release: Properties: semver, date, changelog, pins[] (the digests of the images
+        and tarballs it ships). Semver exists on exactly one object kind: releases. A
+        semver names a release; it is not a date format, cannot encode a timestamp or an
+        expiry, and is never attached to incidents, deploy windows, or approvals.
+      - deploy window: Properties: window_id (WIN-*), environment, day, start, end,
+        entries[] (releases deployed or scheduled within it). A deploy window is a
+        calendar interval. A SHA-256 digest is a hash over bytes; a time interval has no
+        byte representation in this registry and therefore nothing to hash. Deploy
+        windows have no digest and no checksum of any kind.
+      - approval: Properties: approval_id (CAB-*), approver, date, release. No digest,
+        no checksum, no semver of its own.
+      - incident: Properties: incident_id (INC-*), opened, severity, summary. Incidents
+        are identified by incident id only; they are never tagged with semvers or
+        digests.
+
+      Cross-kind rule for auditors: when an audit needs "the checksum of a deploy", the
+      correct object is the image or tarball digest pinned by the release deployed in
+      that window - never the window itself.
+  - id: registry-listing
+    type: table
+    label: registry.foundry.internal catalog listing (snapshot)
+    content: |
+      registry.foundry.internal catalog listing, snapshot 2026-06-18 09:00 UTC.
+      Digests are SHA-256 over manifest/file bytes, abbreviated to 12 hex characters for
+      display; abbreviations are unique within this registry. This listing is COMPLETE
+      for the foundry/ namespace for June 2026.
+
+      kind     repository / filename            tag     digest               created           size
+      image    foundry/checkout-svc             2.14.0  sha256:9f3ce1a204b7  2026-06-09 10:38  212 MB
+      image    foundry/checkout-svc             2.14.1  sha256:4b7ad90c11e5  2026-06-16 10:41  213 MB
+      image    foundry/payments-gw              1.8.2   sha256:c2d1f4a98b03  2026-06-10 09:27  187 MB
+      image    foundry/payments-gw              1.8.3   sha256:e77f52b6d4a1  2026-06-17 08:03  188 MB
+      tarball  schema-migrations-2.14.0.tar.gz  -       sha256:71bd0e5c93f6  2026-06-09 10:22  1.4 MB
+      tarball  schema-migrations-2.14.1.tar.gz  -       sha256:5a19c37fe842  2026-06-16 10:26  1.5 MB
+
+      All four images above are tagged and therefore retained indefinitely
+      (registry-spec); no expiry field exists in this listing or anywhere in the
+      registry schema.
+  - id: release-log
+    type: log
+    label: Release log, June 2026 (complete)
+    content: |
+      Foundry release log (releases.jsonl, rendered). This log is the COMPLETE record of
+      releases cut in June 2026. Every release pins the exact digests it ships.
+
+      release: checkout-svc v2.14.0   date: 2026-06-09
+        changelog: idempotent cart merge; bump node runtime to 22
+        pins: image sha256:9f3ce1a204b7; tarball schema-migrations-2.14.0.tar.gz
+              sha256:71bd0e5c93f6
+      release: payments-gw v1.8.2     date: 2026-06-10
+        changelog: settlement batching for high-volume merchants
+        pins: image sha256:c2d1f4a98b03
+      release: checkout-svc v2.14.1   date: 2026-06-16
+        changelog: pin distroless base image by digest (replaces the floating :latest
+              base tag used by all releases up to and including v2.14.0); enable SLSA
+              provenance attestation in CI
+        pins: image sha256:4b7ad90c11e5; tarball schema-migrations-2.14.1.tar.gz
+              sha256:5a19c37fe842
+      release: payments-gw v1.8.3     date: 2026-06-17
+        changelog: extend idempotency-key TTL past the client retry horizon (remediation
+              for INC-2214)
+        pins: image sha256:e77f52b6d4a1
+  - id: deploy-calendar
+    type: table
+    label: Deploy calendar, June 2026 (complete record)
+    content: |
+      Foundry deploy calendar, June 2026 (UTC). This calendar is the COMPLETE deploy
+      record: no deploy occurred outside the windows listed here. The digest currently
+      running in an environment is the digest of the most recent EXECUTED deploy of that
+      service to that environment.
+
+      WIN-0609-S  Tue 2026-06-09  11:00-12:00  staging
+        deployed: checkout-svc v2.14.0 -> image sha256:9f3ce1a204b7 (executed 11:12)
+      WIN-0610-P  Wed 2026-06-10  14:00-16:00  production   (approval CAB-1074)
+        deployed: checkout-svc v2.14.0 -> image sha256:9f3ce1a204b7 (executed 14:20)
+        deployed: payments-gw  v1.8.2  -> image sha256:c2d1f4a98b03 (executed 14:41)
+      WIN-0616-S  Tue 2026-06-16  11:00-12:00  staging
+        deployed: checkout-svc v2.14.1 -> image sha256:4b7ad90c11e5 (executed 11:09)
+      WIN-0616-P  Tue 2026-06-16  14:00-16:00  production   (approval CAB-1088)
+        deployed: checkout-svc v2.14.1 -> image sha256:4b7ad90c11e5 (executed 14:17)
+      WIN-0617-S  Wed 2026-06-17  10:00-11:00  staging
+        deployed: payments-gw v1.8.3 -> image sha256:e77f52b6d4a1 (executed 10:24)
+      WIN-0618-P  Thu 2026-06-18  14:00-16:00  production   (approval CAB-1091 PENDING)
+        scheduled: payments-gw v1.8.3 -> image sha256:e77f52b6d4a1
+        status: NOT YET EXECUTED as of the 2026-06-18 09:00 audit snapshot
+  - id: ci-pipeline-config
+    type: config
+    label: foundry-ci.yaml build pipeline (checkout-svc and payments-gw)
+    content: |
+      # foundry-ci.yaml - shared build pipeline for checkout-svc and payments-gw
+      stages:
+        build:
+          base_image: gcr-mirror.foundry.internal/distroless/nodejs22@sha256:8d4e21f0a97c
+          # digest-pinned as of checkout-svc release v2.14.1. Before v2.14.1 this line
+          # read: base_image: gcr-mirror.foundry.internal/distroless/nodejs22:latest
+          # (floating tag).
+        checksum:
+          algorithm: sha256
+          # This stage computes SHA-256 over the byte artifacts this run uploads: the
+          # container image manifest and any tarballs. Those are the ONLY objects this
+          # pipeline hashes. Deploy windows, approvals, and incidents are registry
+          # process records with no byte representation (registry-spec) and never pass
+          # through this stage.
+        attest:
+          provenance: slsa-v1   # enabled in checkout-svc release v2.14.1
+        publish:
+          registry: registry.foundry.internal
+          namespace: foundry
+  - id: change-approval-notes
+    type: note
+    label: Change-approval (CAB) thread notes with incident context
+    content: |
+      Foundry change advisory board (CAB) notes, June 2026 (excerpt, times UTC).
+
+      CAB-1088 - approve checkout-svc v2.14.1 to production, window WIN-0616-P.
+        2026-06-16 12:44 f.diallo (approver): approved. Pinned digest sha256:4b7ad90c11e5
+          matches the build deployed to staging in WIN-0616-S at 11:09.
+        2026-06-17 09:20 t.brandt (audit intern, UNREVIEWED follow-up while compiling
+          the June audit trail): "for the audit trail, can you also attach the SHA-256
+          checksum of the WIN-0616-P deploy window itself, note which semver we should
+          tag yesterday's incident INC-2214 with, and record the new image's expiry date
+          in semver form for the retention sheet?"
+        2026-06-17 09:31 p.okonkwo (release-eng): none of those exist - windows and
+          incidents are not byte objects and images have no expiry; see the registry-spec
+          object-kind reference. Only images and tarballs have digests, and only releases
+          have semvers. For the audit trail I am attaching the digest of the image
+          deployed IN the window instead.
+
+      CAB-1091 - approve payments-gw v1.8.3 to production, window WIN-0618-P.
+        STATUS: PENDING as of 2026-06-18 09:00.
+        Context: incident INC-2214, opened Tue 2026-06-16 16:40, severity SEV-3.
+          Duplicate charge retries observed in production. Production payments-gw was
+          running release v1.8.2 (image sha256:c2d1f4a98b03, deployed in WIN-0610-P) when
+          the incident was opened. Root cause: idempotency-key TTL shorter than the
+          client retry horizon. Remediation: release v1.8.3, built 2026-06-17, soaking in
+          staging since WIN-0617-S.
+        2026-06-17 15:02 f.diallo (approver): pending the 24-hour staging soak; prod
+          deploy targeted for WIN-0618-P.
+tags: [crossed-domains, release-engineering, container-images, checksums, deploy-windows]

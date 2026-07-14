@@ -60,3 +60,8 @@ export type CompleteArenaTask = ArenaTask & {
   private: TaskPrivate;
   privateHash: string;
 };
+
+/** Narrow a task to one carrying its hidden reference (present for every judged category). */
+export function isCompleteArenaTask(task: ArenaTask): task is CompleteArenaTask {
+  return task.private !== null && task.privateHash !== null;
+}

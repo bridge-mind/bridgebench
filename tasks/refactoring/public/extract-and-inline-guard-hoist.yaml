@@ -1,0 +1,124 @@
+id: extract-and-inline-guard-hoist
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Extracting the Quota Check From a Short-Circuit Guard — Eager Hoisting, Double Metering, Meets-Goal vs Fails-Goal
+summary: >-
+  canOpen guards a metered quota.check behind a `&&` null-check, so quota.check runs (and a null
+  dereference is avoided) only when the guard passes. The task is to extract the quota decision into a
+  named helper. One extraction preserves behavior and meets the goal; one hoists the call to a const
+  above the guard (throwing on anonymous sessions); one calls quota.check twice; one is behavior-
+  preserving but never actually extracts. Classify each against both behavior and goal.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (canopen-original, access-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to EXTRACT the quota decision out of canOpen into a named helper and call
+  that helper from canOpen, while preserving observable behavior exactly: the boolean canOpen returns,
+  the number of times quota.check() fires (each call increments quota_checks — see access-note), and
+  whether a TypeError is thrown. Because of the `&&` short-circuit, when session.user is null the
+  original returns false WITHOUT evaluating session.user.id and WITHOUT calling quota.check. Two
+  scenarios: S_anon = session.user is null; S_user = session.user = { id: 'u1' } and quota.check
+  returns true.
+
+  1. Classify rewrite-a against BOTH dimensions (behavior vs canopen-original, and whether it meets the
+     extract goal). Justify by tracing S_anon and S_user.
+
+  2. Classify rewrite-b. If it changes behavior, state precisely what canOpen does under S_anon (does
+     it return false, or throw a TypeError?) and the quota_checks delta under S_anon, compared to
+     canopen-original.
+
+  3. Classify rewrite-c. Under S_user, state how many times quota.check() fires (the quota_checks
+     delta) and the value canOpen returns, compared to canopen-original.
+
+  4. Classify rewrite-d against BOTH dimensions. If its behavior matches canopen-original, say so, and
+     separately state whether it satisfies the extract goal, with the reason.
+
+  5. Exactly one rewrite both preserves behavior AND meets the extract goal. Name it. Then, for
+     canopen-original, state the ground truth: under S_anon (the return value, the quota_checks delta,
+     and whether a TypeError is thrown) and under S_user (the return value and the quota_checks delta).
+artifacts:
+  - id: canopen-original
+    type: code
+    label: gatekeeper/access.ts — shipped canOpen (the reference behavior)
+    content: |
+      // gatekeeper/access.ts — the shipped gate. canOpen is the ONLY access gate (see access-note).
+      import { quota } from './quota';
+      import type { Session, Doc } from './types';
+
+      export function canOpen(session: Session, doc: Doc): boolean {
+        // && short-circuits: session.user.id and quota.check are evaluated ONLY when user is non-null.
+        return session.user != null && quota.check(session.user.id, doc.id);
+      }
+  - id: access-note
+    type: note
+    label: gatekeeper access — observability, null semantics, the complete surface, and the goal
+    content: |
+      gatekeeper access — observability and the complete call surface.
+
+      quota.check(userId, docId) increments a quota_checks counter on EVERY call (an observable side
+      effect watched on the ops dashboard) and returns a boolean. It is otherwise deterministic: for
+      the same (userId, docId) it returns the same boolean and has no other side effect.
+
+      session.user is a plain nullable property (no getter, no side effect on read). An anonymous
+      session has session.user === null. Reading session.user.id when session.user is null throws a
+      TypeError (evaluated left-to-right, this throw would happen while building quota.check's first
+      argument). doc.id is always present.
+
+      canOpen is the ONLY gate and is called once per open request; quota.check has no other caller.
+      So the number of quota_checks increments per canOpen call is fully determined by canOpen's
+      control flow. This is the complete surface.
+
+      Reference behavior of canOpen (canopen-original): because `&&` short-circuits, when
+      session.user is null canOpen returns false WITHOUT evaluating session.user.id (no TypeError) and
+      WITHOUT calling quota.check (quota_checks NOT incremented). When session.user is non-null,
+      quota.check runs exactly once and canOpen returns its boolean.
+
+      The transformation goal is to EXTRACT the quota decision into a named helper that canOpen then
+      calls, preserving that behavior exactly (same boolean, same quota_checks count, same
+      throw-or-not on every path).
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — helper that keeps the short-circuit
+    content: |
+      // rewrite-a — extract a predicate that itself short-circuits the null guard.
+      function isWithinQuota(session: Session, doc: Doc): boolean {
+        return session.user != null && quota.check(session.user.id, doc.id);
+      }
+      export function canOpen(session: Session, doc: Doc): boolean {
+        return isWithinQuota(session, doc);
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — hoist the quota result to a const above the guard
+    content: |
+      // rewrite-b — "compute the quota result first, then AND it with the null check."
+      export function canOpen(session: Session, doc: Doc): boolean {
+        const allowed = quota.check(session.user.id, doc.id); // evaluated BEFORE the null guard
+        return session.user != null && allowed;
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — re-check to return a fresh result
+    content: |
+      // rewrite-c — "guard, then return the quota result freshly."
+      export function canOpen(session: Session, doc: Doc): boolean {
+        if (session.user != null && quota.check(session.user.id, doc.id)) {
+          return quota.check(session.user.id, doc.id); // re-evaluate to return the current decision
+        }
+        return false;
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — add the helper but keep the original expression
+    content: |
+      // rewrite-d — "introduce the helper, leave canOpen's body as it was."
+      function isWithinQuota(session: Session, doc: Doc): boolean {
+        return session.user != null && quota.check(session.user.id, doc.id);
+      }
+      export function canOpen(session: Session, doc: Doc): boolean {
+        return session.user != null && quota.check(session.user.id, doc.id); // unchanged; helper unused
+      }
+tags: [refactoring, extract-and-inline, short-circuit, evaluation-order, side-effect]

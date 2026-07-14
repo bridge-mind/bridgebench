@@ -57,7 +57,7 @@ export interface ArenaEventDataMap {
     matchId: string;
     taskId: string;
     winnerModelId: string | null;
-    outcome: 'judged' | 'forfeit' | 'no-contest';
+    outcome: 'judged' | 'forfeit' | 'no-contest' | 'speed-decided';
     costUsd: number;
     eloAfter: Record<string, number>;
     completed: number;

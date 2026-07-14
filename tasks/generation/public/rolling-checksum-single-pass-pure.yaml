@@ -1,0 +1,186 @@
+id: rolling-checksum-single-pass-pure
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: Which rollingChecksum Candidate Is Single-Pass, O(1)-Memory, Pure, and Reentrant
+summary: A spec defines a Fletcher-style rollingChecksum(bytes) under four declared constraints — single pass, bounded O(1) working memory, purity/reentrancy, and an exact arithmetic contract. Five candidates are submitted; one keeps a per-byte history array, one carries accumulators in module-level state so a second call drifts, one swaps the update order and computes the wrong value. Classify each conforms/violates, cite the exact construct, and give the concrete symptom of the reentrancy defect.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, worked-example,
+  candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite
+  the artifact id(s) for every claim. Do not execute anything — reason about each
+  candidate from its code using the definitions in `reading-guide`, and trace the
+  arithmetic where a deliverable asks for a value.
+
+  Verdict vocabulary: a candidate CONFORMS if it satisfies ALL FOUR declared constraints
+  C1–C4 in `spec`; it VIOLATES if it breaks any one of them.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or
+     violates. For every violator, name the exact constraint number (C1–C4) it breaks
+     and quote the exact construct responsible.
+
+  2. State the complete set of conforming candidates. candidate-e is written with
+     Array.prototype.reduce and allocates a small object each step — confirm whether it
+     still satisfies C1 and C2.
+
+  3. candidate-c returns the correct value on its FIRST invocation. Explain precisely why
+     it still VIOLATES its constraint, and give the concrete value a SECOND call with the
+     same input bytes [1,2] returns.
+
+  4. candidate-d — compute the value it returns for bytes [1,2], contrast it with the
+     spec's required 1027, and name the constraint it breaks.
+
+  5. A reviewer approves candidate-b, arguing "it's fine, it's still just one loop."
+     Rebut this using C2 and the exact growing structure in candidate-b.
+artifacts:
+  - id: spec
+    type: spec
+    label: rollingChecksum specification (function + constraints)
+    content: |
+      FUNCTION rollingChecksum(bytes)
+
+      `bytes` is an array of integers, each in 0..255. The function returns a 16-bit
+      checksum computed with two running accumulators, per this exact contract:
+
+        C4  CORRECTNESS: start a = 0, b = 0. For each element `byte` of `bytes`, in order:
+              a = (a + byte) % 255      (update a FIRST)
+              b = (b + a) % 255         (then fold the just-updated a into b)
+            After the loop, return  b * 256 + a.
+            Empty input returns 0.
+
+      This runs on a streaming hot path, so it MUST ALSO satisfy the following, each a
+      hard requirement:
+
+        C1  SINGLE PASS: it visits each element of `bytes` exactly once, in one loop (or
+            one reduce). No sort. It does not first materialize a second full-length copy
+            of the sequence and then iterate that.
+        C2  BOUNDED MEMORY: O(1) working memory — a constant number of accumulators (a
+            fixed-shape object with a constant field count also counts as O(1)). It MUST
+            NOT build an array/Set/Map that gains one entry per byte.
+        C3  PURE AND REENTRANT: the result depends ONLY on `bytes`. It MUST NOT read or
+            update module-level mutable state that carries between calls, MUST NOT use
+            Date.now / Math.random / I/O, and MUST NOT mutate `bytes`. Two calls with the
+            same `bytes` MUST return the same result.
+
+      A candidate CONFORMS iff it satisfies C1 AND C2 AND C3 AND C4. Breaking any single
+      constraint means it VIOLATES.
+  - id: worked-example
+    type: table
+    label: worked example and a reference trace
+    content: |
+      Reference computation of the contract (C4) so values are checkable by hand.
+
+      bytes = [1, 2]
+        start: a = 0, b = 0
+        byte 1: a = (0 + 1) % 255 = 1 ; b = (0 + 1) % 255 = 1
+        byte 2: a = (1 + 2) % 255 = 3 ; b = (1 + 3) % 255 = 4
+        return b * 256 + a = 4 * 256 + 3 = 1027
+
+      bytes = [10, 20, 30]
+        byte 10: a = 10 ; b = 10
+        byte 20: a = 30 ; b = 40
+        byte 30: a = 60 ; b = 100
+        return 100 * 256 + 60 = 25660
+
+      bytes = []      -> a = 0, b = 0 -> return 0
+
+      Note the ORDER inside the loop: a is updated first, and b folds in the NEW a. A
+      candidate that computes b from the OLD a (b before a) produces a different result.
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function rollingChecksum(bytes) {
+        let a = 0, b = 0;
+        for (let i = 0; i < bytes.length; i++) {
+          a = (a + bytes[i]) % 255;
+          b = (b + a) % 255;
+        }
+        return b * 256 + a;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function rollingChecksum(bytes) {
+        let a = 0, b = 0;
+        const history = [];
+        for (let i = 0; i < bytes.length; i++) {
+          a = (a + bytes[i]) % 255;
+          b = (b + a) % 255;
+          history.push(b);
+        }
+        return b * 256 + a;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      let _a = 0, _b = 0;               // module scope, outside the function
+      function rollingChecksum(bytes) {
+        for (let i = 0; i < bytes.length; i++) {
+          _a = (_a + bytes[i]) % 255;
+          _b = (_b + _a) % 255;
+        }
+        return _b * 256 + _a;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function rollingChecksum(bytes) {
+        let a = 0, b = 0;
+        for (let i = 0; i < bytes.length; i++) {
+          b = (b + a) % 255;             // folds in the OLD a
+          a = (a + bytes[i]) % 255;
+        }
+        return b * 256 + a;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function rollingChecksum(bytes) {
+        const acc = bytes.reduce(
+          (s, byte) => {
+            const a = (s.a + byte) % 255;
+            return { a, b: (s.b + a) % 255 };
+          },
+          { a: 0, b: 0 },
+        );
+        return acc.b * 256 + acc.a;
+      }
+  - id: reading-guide
+    type: note
+    label: how to read the constraints (definitions + scope)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of submissions. Judge each
+      against all four constraints C1–C4; do not assume correctness — trace the arithmetic
+      where it matters.
+
+      How to read each constraint from the code (no execution needed):
+        C1 (single pass): one `for` loop over bytes, or one `bytes.reduce(...)`, that
+           touches each element once is a single pass. Sorting or copying the whole array
+           into a second full-length structure before iterating is not.
+        C2 (bounded memory): a fixed set of number accumulators is O(1). A fixed-SHAPE
+           object with a constant number of fields (e.g. { a, b }) is also O(1), even if a
+           fresh one is created each step, because only a constant amount is live. An
+           array/Set/Map that receives one entry PER byte (e.g. via .push inside the loop)
+           grows to length proportional to bytes.length and is O(n) — that breaks C2.
+        C3 (pure and reentrant): the result must depend only on `bytes`. A `let`/`var`
+           declared at MODULE scope (outside the function body) that the function reads and
+           updates, and that is never reset per call, makes the output depend on PRIOR
+           calls — that breaks C3. Mutating `bytes`, or reading Date.now/Math.random, also
+           breaks C3. A quick test: if calling the function twice with identical `bytes`
+           can yield two different numbers, C3 is violated.
+        C4 (correctness): trace with a = 0, b = 0; per byte update a first, then b from the
+           new a; return b*256 + a. Computing b before updating a (using the stale a) gives
+           a different, wrong value.
+
+      Cite the exact line/construct when you assign a violation.
+tags: [checksum, streaming, purity, reentrancy, constraint-satisfaction, generation]

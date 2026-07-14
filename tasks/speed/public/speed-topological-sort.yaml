@@ -1,0 +1,41 @@
+id: speed-topological-sort
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: hard
+title: Implement Kahn's Topological Sort and Trace a Build Order
+summary: >-
+  Implement a deterministic topological sort over a task-dependency graph, then trace it step by step to
+  produce the exact build order for the given tasks.
+prompt: |
+  Using [sort-spec], implement the sort and then apply it to [task-graph].
+
+  1. Implement `topoSort(nodes: string[], edges: [string, string][]): string[]` in TypeScript using
+     Kahn's algorithm with the tie-break rule in [sort-spec].
+  2. Trace the run over [task-graph]: show the initial in-degree of every node, then, step by step, the
+     node chosen and the updated ready set, ending with the final ordered list.
+artifacts:
+  - id: sort-spec
+    type: spec
+    label: Sort rules
+    content: |
+      - an edge [a, b] means a must come before b (a is a prerequisite of b)
+      - compute each node's in-degree: the number of incoming edges
+      - repeatedly remove a node whose in-degree is 0, append it to the output, and decrement the
+        in-degree of each of its successors
+      - tie-break: when more than one node has in-degree 0, choose the one that is smallest in ASCII
+        (lexicographic) order, so the output is fully deterministic
+      - `nodes` is the complete list of node names; every edge endpoint appears in it
+  - id: task-graph
+    type: table
+    label: Task graph
+    content: |
+      nodes: build, lint, test, deploy, docs, bundle
+      edges:
+        [lint, build]
+        [build, test]
+        [build, bundle]
+        [test, deploy]
+        [bundle, deploy]
+        [test, docs]
+tags: [algorithms, graphs, typescript]

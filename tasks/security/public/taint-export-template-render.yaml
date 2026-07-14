@@ -1,0 +1,207 @@
+id: taint-export-template-render
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Ledgerline HTML Export Template Taint Flow
+summary: >-
+  Trace five account-profile fields through the Ledgerline HTML exporter and
+  classify each source-to-sink path. Auto-escaped slots, an allowlist-sanitized
+  raw slot, a flag-gated raw slot, and a telemetry-only field surround one field
+  that reaches a raw template slot unescaped. Identify the single reachable,
+  unsafe path with evidence — reachability reasoning only, no payloads.
+prompt: |
+  You are reviewing the "Ledgerline" account HTML exporter. It reads an account's
+  profile record and renders it through a single Vellum template. Vellum escaping:
+  a {{ x }} slot is HTML-escaped by the engine; a {{{ x }}} slot emits the model
+  value verbatim (raw, unescaped). The rendered document is served as text/html and
+  opened directly in a viewer's browser, so markup that survives into the output
+  executes in that viewer's context (a stored/reflected cross-site-scripting shape).
+
+  Five profile fields are account-owner-controlled and are read by the exporter:
+  title, description, notes, ownerLabel, legacyBanner. For each numbered deliverable,
+  answer using ONLY the supplied artifacts (export-controller, report-service,
+  sanitizers, export-template, render-config, field-map, service-note). Cite the
+  artifact id(s) you rely on for every claim. If a field is not rendered, not
+  reachable, or not a sink in the artifacts, say so explicitly and cite why.
+
+  This is an analysis task: give reachability reasoning only. Do NOT write an XSS
+  payload, an attack string, or step-by-step exploitation. The verdict is the
+  traced source-to-sink path and its classification, not an exploit.
+
+  Classify each field's source-to-sink path as exactly one of: reachable-unsafe /
+  escaped / sanitized / not-a-sink / unreachable — and give the file-to-file chain
+  (which artifact carries the field from input to its slot, and what neutralizes it,
+  if anything).
+
+  1. Classify the path for `title`.
+  2. Classify the path for `description`.
+  3. Classify the path for `notes`.
+  4. Classify the path for `ownerLabel`.
+  5. Classify the path for `legacyBanner`.
+  6. Name the ONE field whose path is reachable AND unsafe, and state the precondition
+     under which its markup reaches a viewer's browser. Justify from the artifacts.
+  7. Give the minimal fix that closes exactly that one path (escape or sanitize the
+     offending value at its raw slot) without changing the other four classifications.
+artifacts:
+  - id: export-controller
+    type: code
+    label: Ledgerline export HTTP controller
+    content: |
+      // ledgerline/export.controller.ts — HTTP surface for account HTML exports.
+      import { renderExport } from './report-service';
+      import { loadExportRecord } from './records';
+
+      // GET /accounts/:id/export.html
+      // Renders a shareable HTML statement. The response is served with
+      // Content-Type: text/html and opened directly in the recipient's browser
+      // (an ops reviewer, or anyone with the shared link), so any markup that
+      // reaches the response body executes in that viewer's context.
+      export async function handleExport(req, res) {
+        const record = await loadExportRecord(req.params.id);
+        // record fields (title, description, notes, ownerLabel, legacyBanner) are
+        // profile values the account owner supplies through the profile editor.
+        // None are re-validated or stripped here; they are passed through as-is.
+        const html = renderExport(record);
+        res.set('Content-Type', 'text/html; charset=utf-8');
+        res.status(200).send(html);
+      }
+  - id: report-service
+    type: code
+    label: Ledgerline render-model builder (the only path that feeds the template)
+    content: |
+      // ledgerline/report-service.ts — assembles the Vellum render model and renders.
+      // This is the ONLY code path that binds values into the export template.
+      import { vellum } from './vellum';                  // {{ }} escapes; {{{ }}} raw
+      import { sanitizeRichText } from './sanitizers';
+      import { telemetry } from './telemetry';
+      import { exportConfig } from './render-config';
+      import template from './export-template';
+
+      export function renderExport(record) {
+        // ownerLabel is attribution metadata only: emitted to telemetry, and never
+        // bound into `model`, so it never reaches the template.
+        telemetry.record('export.rendered', {
+          ownerLabel: record.ownerLabel,
+          accountId: record.accountId,
+        });
+
+        const model = {
+          title: record.title,                         // -> {{ title }} (engine-escaped)
+          description: record.description,             // -> {{{ description }}} (raw slot)
+          notesHtml: sanitizeRichText(record.notes),   // -> {{{ notesHtml }}} (allowlisted)
+          accountId: record.accountId,                 // -> {{ accountId }} (engine-escaped)
+          legacyBanner: record.legacyBanner,           // -> {{{ legacyBanner }}} (gated slot)
+          showLegacyBanner: exportConfig.flags.exportLegacyBanner, // gate for the banner
+        };
+
+        return vellum.render(template, model);
+      }
+  - id: sanitizers
+    type: code
+    label: Ledgerline sanitizer helpers
+    content: |
+      // ledgerline/sanitizers.ts
+
+      // sanitizeRichText: allowlist HTML sanitizer used for rich note bodies. It
+      // keeps a fixed tag/attribute allowlist and DROPS everything else — <script>,
+      // <style>, <iframe>, any on* event-handler attribute, javascript: URLs, and any
+      // tag not on ALLOWED_TAGS. Its output is safe to place into a {{{ }}} raw slot.
+      export const ALLOWED_TAGS = ['b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li', 'a'];
+      export const ALLOWED_ATTRS = { a: ['href'] }; // href re-checked: http/https/mailto only
+
+      export function sanitizeRichText(html: string): string {
+        // Parse, walk the tree, delete disallowed nodes/attributes, re-serialize.
+        // Only the allowlist above survives; scripts and handlers are removed.
+        return allowlistWalk(html, ALLOWED_TAGS, ALLOWED_ATTRS);
+      }
+
+      // escapeHtml: the primitive the Vellum engine calls internally for every {{ }}
+      // slot. Replaces & < > " ' with entity references. Exposed here only for
+      // completeness. NOTE: {{{ }}} raw slots bypass this entirely — the engine does
+      // not call escapeHtml for them, and report-service does not call it either.
+      export function escapeHtml(s: string): string {
+        return s.replace(/[&<>"']/g, (c) => ENTITIES[c]);
+      }
+  - id: export-template
+    type: spec
+    label: Ledgerline export template (Vellum source — the only template used)
+    content: |
+      {{! Ledgerline account export — Vellum template v4. }}
+      {{! Escaping: {{ x }} is HTML-escaped by the engine; {{{ x }}} is emitted raw. }}
+      {{! This is the whole template. There are no partials and no second template. }}
+      <article class="ledgerline-export">
+        <header>
+          <h1 class="acct-title">{{ title }}</h1>
+          <p class="acct-id">Account {{ accountId }}</p>
+        </header>
+
+        {{#showLegacyBanner}}
+        <aside class="legacy-banner">{{{ legacyBanner }}}</aside>
+        {{/showLegacyBanner}}
+
+        <section class="summary">
+          {{{ description }}}
+        </section>
+
+        <section class="notes">
+          {{{ notesHtml }}}
+        </section>
+      </article>
+  - id: render-config
+    type: config
+    label: Ledgerline exporter feature flags (production)
+    content: |
+      # ledgerline/render-config — export feature flags (production).
+      # COMPLETE: these are all flags the exporter reads. No other flag affects
+      # rendering, and no environment overrides these values.
+      export:
+        flags:
+          exportLegacyBanner: false   # legacy promo banner slot; OFF in every environment
+          includeNotesSection: true   # notes section is rendered
+          embedAccountId: true        # account id header is rendered
+        templateVersion: 4            # selects export-template above; no other template exists
+  - id: field-map
+    type: table
+    label: Ledgerline export field map (COMPLETE — every field the exporter reads)
+    content: |
+      Ledgerline export field map — COMPLETE. Every field on the profile record that
+      report-service reads is listed here, with the render-model key it becomes, the
+      template slot it lands in, whether that slot is escaped or raw, and whether the
+      value is sanitized on the way in. A field NOT in this table is not read by the
+      exporter and reaches no slot.
+
+      record field | model key    | template slot        | slot mode | sanitized en route?
+      -------------|--------------|----------------------|-----------|--------------------------
+      title        | title        | {{ title }}          | escaped   | n/a (engine escapes {{ }})
+      description  | description  | {{{ description }}}  | raw       | NO
+      notes        | notesHtml    | {{{ notesHtml }}}    | raw       | YES — sanitizeRichText()
+      legacyBanner | legacyBanner | {{{ legacyBanner }}} | raw       | NO (slot gated by showLegacyBanner)
+      ownerLabel   | (none)       | (not rendered)       | —         | — telemetry only, no slot
+      accountId    | accountId    | {{ accountId }}      | escaped   | n/a (system value, engine escapes)
+  - id: service-note
+    type: note
+    label: Ledgerline export design note (current 2.x)
+    content: |
+      Ledgerline HTML export — design note (current, 2.x line).
+
+      Templating: we render with Vellum. {{ x }} slots are HTML-escaped by the engine;
+      {{{ x }}} slots emit the model value verbatim. The account export uses exactly
+      one template, export-template; there are no partials and no second template.
+
+      Invariant we hold ourselves to: any value bound to a {{{ }}} raw slot MUST be
+      sanitizer output (sanitizeRichText), because the engine does not escape raw
+      slots. Values bound to {{ }} slots need no pre-processing — the engine escapes
+      them. (This note states the intended invariant; it does not certify that every
+      binding currently obeys it.)
+
+      The render model is assembled in exactly one place — report-service.renderExport.
+      No other code path feeds the template. The complete list of record fields the
+      exporter reads, and the slot each maps to, is in field-map; that table is
+      exhaustive, so a field absent from it is not read.
+
+      Slot gating: the legacy banner section is wrapped in {{#showLegacyBanner}}, and
+      showLegacyBanner is driven solely by the exportLegacyBanner flag in render-config.
+      ownerLabel is attribution metadata: it is emitted to telemetry and never bound
+      into the model.
+tags: [security, taint-flow, xss, template-injection, reachability]

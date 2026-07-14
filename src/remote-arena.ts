@@ -15,8 +15,8 @@ import { ArenaStore } from './store.js';
 import {
   METHODOLOGY_VERSION,
   type ArenaRunConfig,
+  type ArenaTask,
   type BenchmarkCategory,
-  type CompleteArenaTask,
   type MatchResult,
   type OpenRouterGateway,
 } from './types.js';
@@ -28,7 +28,9 @@ const TaskArtifactSchema = z.object({
   content: z.string(),
 });
 
-const CompleteArenaTaskSchema = z.object({
+// A public-only pack (the speed arena) omits the hidden half: `private` is null
+// and `privateHash` is null. Judged packs carry both.
+const ExecutionPackTaskSchema = z.object({
   public: z.object({
     id: z.string(),
     version: z.string(),
@@ -41,16 +43,18 @@ const CompleteArenaTaskSchema = z.object({
     artifacts: z.array(TaskArtifactSchema),
     tags: z.array(z.string()).optional(),
   }),
-  private: z.object({
-    id: z.string(),
-    version: z.string(),
-    expectedResolution: z.string(),
-    requiredEvidence: z.array(z.string()),
-    disqualifyingErrors: z.array(z.string()),
-    rubric: z.record(z.unknown()),
-  }),
+  private: z
+    .object({
+      id: z.string(),
+      version: z.string(),
+      expectedResolution: z.string(),
+      requiredEvidence: z.array(z.string()),
+      disqualifyingErrors: z.array(z.string()),
+      rubric: z.record(z.unknown()),
+    })
+    .nullable(),
   publicHash: z.string(),
-  privateHash: z.string(),
+  privateHash: z.string().nullable(),
 });
 
 const ExecutionPackSchema = z.object({
@@ -58,7 +62,7 @@ const ExecutionPackSchema = z.object({
   methodologyVersion: z.string(),
   competitors: z.array(z.unknown()),
   judges: z.array(z.unknown()),
-  tasks: z.array(CompleteArenaTaskSchema).length(12),
+  tasks: z.array(ExecutionPackTaskSchema).length(12),
 });
 
 const CreateRunResponseSchema = z.object({
@@ -97,7 +101,7 @@ function remoteStoreConfig(category: BenchmarkCategory, root: string) {
 export async function fetchExecutionPack(
   config: ApiConfig,
   category: BenchmarkCategory,
-): Promise<{ tasks: CompleteArenaTask[] }> {
+): Promise<{ tasks: ArenaTask[] }> {
   const pack = await getJson(
     config,
     `/arena/admin/${category}/execution-pack`,
@@ -108,13 +112,13 @@ export async function fetchExecutionPack(
       `Execution pack methodology ${pack.methodologyVersion} does not match engine ${METHODOLOGY_VERSION}`,
     );
   }
-  return { tasks: pack.tasks as CompleteArenaTask[] };
+  return { tasks: pack.tasks as ArenaTask[] };
 }
 
 export async function createRemoteRun(
   apiConfig: ApiConfig,
   runConfig: ArenaRunConfig,
-  tasks: readonly CompleteArenaTask[],
+  tasks: readonly ArenaTask[],
 ): Promise<{ runKey: string; created: boolean }> {
   const manifest = createRunManifest(runConfig, [...tasks]);
   const manifestHash = runManifestHash(manifest);
@@ -135,19 +139,37 @@ export async function createRemoteRun(
   return { runKey: response.run.runKey, created: response.created };
 }
 
+/**
+ * Mock verdicts never reach the public ladder, even when a caller forgets
+ * --no-publish-matches.
+ */
+export function shouldPublishRemoteMatches(mock: boolean, publishMatches = true): boolean {
+  return publishMatches && !mock;
+}
+
+/**
+ * Mock journals live in their own subtree. A shared journal would let the
+ * next live run read and publish deterministic fake verdicts wholesale —
+ * exactly what --no-publish-matches exists to prevent.
+ */
+export function remoteResultsRoot(category: BenchmarkCategory, mock: boolean): string {
+  return path.join(
+    process.env.BRIDGEBENCH_RESULTS_DIR?.trim() || path.join(process.cwd(), 'results'),
+    mock ? 'remote-mock' : 'remote',
+    category,
+  );
+}
+
 export async function runRemoteArena(
   apiConfig: ApiConfig,
   options: RemoteArenaRunOptions,
 ): Promise<RemoteArenaRunResult> {
-  const { config, mock = false, publishMatches = true, logger = noopLogger } = options;
+  const { config, mock = false, logger = noopLogger } = options;
+  const publishMatches = shouldPublishRemoteMatches(mock, options.publishMatches);
   const { tasks } = await fetchExecutionPack(apiConfig, config.category);
   const { runKey } = await createRemoteRun(apiConfig, config, tasks);
 
-  const resultsRoot = path.join(
-    process.env.BRIDGEBENCH_RESULTS_DIR?.trim() || path.join(process.cwd(), 'results'),
-    'remote',
-    config.category,
-  );
+  const resultsRoot = remoteResultsRoot(config.category, mock);
   const store = new ArenaStore(remoteStoreConfig(config.category, resultsRoot));
   const eventSink = new RemoteArenaEventSink(apiConfig, runKey);
   const gateway: OpenRouterGateway = mock

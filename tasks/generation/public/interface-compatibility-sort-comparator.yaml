@@ -1,0 +1,146 @@
+id: interface-compatibility-sort-comparator
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Which Sort Comparator Is a Drop-In for the Declared Task Ordering
+summary: A frozen consumer sorts a fixed record set with Array.prototype.sort(cmp), requiring a total order — ascending priority, then createdAt, then id. Five comparators are proposed as drop-ins; one returns a boolean not a signed number, one sorts by priority alone dropping the tie-break, one compares the numeric priority as a string, and two conform. Classify each conforms/violates and give the concrete divergence from the expected order.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (interface-contract, dataset,
+  comparator-a, comparator-b, comparator-c, comparator-d, comparator-e, judging-notes). Cite the
+  artifact id(s) for every claim. Do not run any sort — per `judging-notes`, reason about each
+  comparator's return values and the order it would produce against the declared total order.
+
+  Verdict vocabulary: a comparator CONFORMS if it is a valid drop-in for Array.prototype.sort that
+  makes the consumer produce the declared expected order (it obeys the return-value protocol, defines
+  the declared total order, compares numeric fields numerically, and is pure); it VIOLATES otherwise.
+
+  1. For EACH comparator (comparator-a … comparator-e), give a verdict: conforms or violates.
+
+  2. For every comparator you mark VIOLATES, name the exact incompatibility (return-protocol,
+     tie-break, or numeric-versus-string) and cite the specific interface-contract clause it breaks.
+     Give the concrete way its sorted order differs from the dataset's expected order.
+
+  3. State the complete set of conforming comparators.
+
+  4. comparator-c is `(a, b) => a.priority - b.priority` and nothing else. A reviewer says "it sorts
+     by priority, which is the key field, so it's a compatible drop-in." Correct them, and use the
+     dataset's equal-priority records to show the concrete order it produces versus the expected one.
+
+  5. comparator-b returns `a.priority > b.priority` — a boolean. Explain why this is not a drop-in
+     comparator for Array.prototype.sort even though true and false are truthy and falsy, and name the
+     clause it breaks.
+artifacts:
+  - id: interface-contract
+    type: spec
+    label: frozen comparator contract and declared order (complete)
+    content: |
+      The consumer is FROZEN. It sorts a set of Task records with:
+          const sorted = records.slice().sort(cmp);
+      and REQUIRES `sorted` to equal the declared expected order (see dataset). A comparator `cmp` is
+      a compatible drop-in iff ALL of the following hold. These clauses are complete.
+
+      A Task record is { id: string, priority: number, createdAt: number }.
+
+      I1  RETURN PROTOCOL. cmp(a, b) MUST return a NUMBER: a negative number if `a` should come before
+          `b`, a positive number if `a` should come after `b`, and 0 only if they are equal under the
+          full order below. A comparator that returns a boolean is NOT compatible: true and false
+          coerce to 1 and 0, so it never yields a negative number and cannot place `a` before `b`.
+
+      I2  DECLARED ORDER (a TOTAL order). Ascending by `priority`; ties broken ascending by
+          `createdAt`; remaining ties broken ascending by `id` (string code-unit order). Because this
+          is a total order, cmp returns 0 ONLY for two records with identical priority, createdAt, AND
+          id. A comparator that compares only `priority` is missing the createdAt and id tie-breaks.
+
+      I3  NUMERIC COMPARISON. `priority` and `createdAt` are numbers and MUST be compared NUMERICALLY,
+          so priority 9 precedes priority 10. Comparing them as strings (so "10" precedes "2") is not
+          compatible.
+
+      I4  PURITY. cmp MUST NOT mutate its arguments or any external state; sorting the same input
+          twice yields the same order.
+
+      Note on stability: Array.prototype.sort is STABLE — when cmp returns 0 for two records, they keep
+      their input-relative order. A comparator that returns 0 for records the declared order would
+      separate therefore leaves them in INPUT order, which may differ from the required order.
+  - id: dataset
+    type: table
+    label: fixed record set (input order) and declared expected order
+    content: |
+      records (in this INPUT order):
+        r1 = { id: "t-a", priority: 10, createdAt: 100 }
+        r2 = { id: "t-b", priority: 2,  createdAt: 300 }
+        r3 = { id: "t-c", priority: 2,  createdAt: 200 }
+        r4 = { id: "t-d", priority: 9,  createdAt: 50 }
+        r5 = { id: "t-e", priority: 2,  createdAt: 200 }
+
+      Declared EXPECTED order (ascending priority, then createdAt, then id):
+        [ r3, r5, r2, r4, r1 ]   ->   ids [ "t-c", "t-e", "t-b", "t-d", "t-a" ]
+
+      Why: the three priority-2 records sort first; among them createdAt 200 (r3, r5) precedes 300
+      (r2), and between r3 and r5 (both createdAt 200) the id "t-c" precedes "t-e". Then priority 9
+      (r4), then priority 10 (r1).
+  - id: comparator-a
+    type: code
+    label: comparator-a
+    content: |
+      // comparator-a
+      const cmp = (a, b) =>
+        (a.priority - b.priority) ||
+        (a.createdAt - b.createdAt) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  - id: comparator-b
+    type: code
+    label: comparator-b
+    content: |
+      // comparator-b
+      const cmp = (a, b) => a.priority > b.priority;
+  - id: comparator-c
+    type: code
+    label: comparator-c
+    content: |
+      // comparator-c
+      const cmp = (a, b) => a.priority - b.priority;
+  - id: comparator-d
+    type: code
+    label: comparator-d
+    content: |
+      // comparator-d
+      const cmp = (a, b) => {
+        const pa = String(a.priority), pb = String(b.priority);
+        if (pa !== pb) return pa < pb ? -1 : 1;              // compares priority as strings
+        if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      };
+  - id: comparator-e
+    type: code
+    label: comparator-e
+    content: |
+      // comparator-e
+      function cmp(a, b) {
+        if (a.priority !== b.priority) return a.priority < b.priority ? -1 : 1;
+        if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+        if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+        return 0;
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (sort contract; no execution needed; scope)
+    content: |
+      Scope: comparator-a … comparator-e are the COMPLETE set of proposals. Judge each against the
+      frozen interface-contract only.
+
+      You do NOT need to run any sort. Decide each comparator by reading it:
+        1. RETURN PROTOCOL (I1): does cmp return a signed NUMBER (negative / zero / positive)? A
+           comparator that returns a boolean is not a drop-in — true/false become 1/0 and it never
+           returns a negative, so Array.prototype.sort cannot order a pair that needs `a` before `b`.
+           You need not compute the resulting permutation to call this out.
+        2. TOTAL ORDER (I2): does cmp implement ascending priority, THEN createdAt, THEN id? A
+           comparator that only subtracts priority returns 0 for two equal-priority records; because
+           sort is stable, those records stay in INPUT order. If the input order of a tie group differs
+           from the declared (createdAt, id) order, the output diverges.
+        3. NUMERIC vs STRING (I3): are priority and createdAt compared as numbers? Comparing the
+           numeric priority as a string makes "10" sort before "2" (because '1' < '2'), which is not
+           the declared numeric order.
+        4. Compare each comparator's resulting order to the dataset's declared expected order; a
+           comparator conforms only if it reproduces that order exactly.
+tags: [interface-compatibility, comparator, sorting, total-order, generation]

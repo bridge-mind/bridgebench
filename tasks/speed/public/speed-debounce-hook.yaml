@@ -1,0 +1,28 @@
+id: speed-debounce-hook
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Write a Typed useDebouncedValue React Hook
+summary: >-
+  Implement a small, correct React hook that returns a debounced copy of a value, honoring the
+  behavioral contract for cleanup, delay changes, and the initial render.
+prompt: |
+  Implement `useDebouncedValue` in TypeScript for React 18 exactly per [hook-contract]. Return only the
+  hook implementation and its import line.
+
+  1. The `useDebouncedValue<T>(value: T, delayMs: number): T` implementation.
+  2. A one-sentence note stating what happens to a pending update when `value` changes again before
+     `delayMs` elapses.
+artifacts:
+  - id: hook-contract
+    type: spec
+    label: Hook behavior
+    content: |
+      useDebouncedValue<T>(value, delayMs)
+      - returns the initial value immediately on first render (no delay)
+      - after value changes, returns the new value only once delayMs has elapsed with no further change
+      - a change during the wait window cancels the previous pending update and restarts the timer
+      - clears its timer on unmount
+      - re-reads delayMs on every change, so a changed delay applies to the next debounce window
+tags: [react, hooks, typescript]

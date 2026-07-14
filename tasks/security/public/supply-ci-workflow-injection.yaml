@@ -1,0 +1,213 @@
+id: supply-ci-workflow-injection
+version: 1.0.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: Arclight CI Workflow Review — Untrusted-Code Privilege Escalation vs Benign Changes
+summary: >-
+  A pull request to the fictional public "arclight" repo changes several Foundry CI
+  jobs. Read each change's trigger, checkout ref, and secret/token access against an
+  authoritative CI trust model to decide which single change lets untrusted fork code
+  run with repository secrets, versus a safe fork-test job, a SHA-pinned action, a
+  first-party tagged action, and a main-only OIDC deploy. Exactly one change is a
+  supply-chain compromise vector; the rest are benign.
+prompt: |
+  You are reviewing a pull request to the PUBLIC "arclight" repository that changes its
+  Foundry CI workflows. Someone may have slipped in a change that lets untrusted
+  contributor code run with the repository's secrets. Determine which change (if any) is
+  a supply-chain compromise vector versus a routine, benign change.
+
+  Answer each deliverable using ONLY the supplied artifacts (workflow-diff, ci-trust-model,
+  actions-policy, change-map, pipeline-note, fork-pr-log). Cite the artifact id(s) you rely
+  on for every claim. ci-trust-model is the AUTHORITATIVE statement of the CI platform's
+  trigger/privilege rules; treat it as ground truth. If a change cannot be shown malicious
+  from the artifacts, say so explicitly. Do NOT flag a change as malicious without an
+  artifact-grounded tell, and do NOT include exploit, exfiltration, or attack steps —
+  classification and remediation only.
+
+  For deliverables 1-5, classify each changed CI job as EXACTLY ONE of:
+    - MALICIOUS — its trigger, checkout, and secret/token access COMBINE to let untrusted
+      contributor code execute with privileges it must not have.
+    - BENIGN — the change is safe under ci-trust-model (untrusted code runs without secrets,
+      or trusted code runs with them, or it never runs on untrusted input).
+  Justify each using the job's `on:` trigger, whether it checks out the PR HEAD, and its
+  secret / token access, read against ci-trust-model.
+
+  1. The `integration` job (workflow-diff).
+  2. The `test` job (workflow-diff).
+  3. The `setup-node` action pin change in the `build` job (workflow-diff, actions-policy).
+  4. The `publish` job's action reference (workflow-diff, actions-policy).
+  5. The `deploy` job (workflow-diff).
+
+  6. Name the single compromise vector. State the EXACT combination of factors that makes it
+     dangerous (the specific trigger + checkout ref + secret/token access), and explain why
+     the OTHER job that also runs untrusted contributor code is NOT dangerous. Ground both in
+     ci-trust-model.
+
+  7. Give the containment / remediation steps for the compromise vector. Remediation only —
+     no exploit or exfiltration steps.
+artifacts:
+  - id: workflow-diff
+    type: diff
+    label: .foundry/ci.yml diff under review (five changed jobs)
+    content: |
+      --- a/.foundry/ci.yml
+      +++ b/.foundry/ci.yml
+      @@ jobs.integration (NEW job) @@
+      +  integration:
+      +    on: pull_request_target          # runs in the BASE repo context
+      +    runs-on: foundry-linux
+      +    steps:
+      +      - uses: actions/checkout@<full-sha>   # SHA-pinned checkout action
+      +        with:
+      +          ref: ${{ github.event.pull_request.head.sha }}   # checks out the PR's HEAD (fork code)
+      +      - name: install and integration-test
+      +        env:
+      +          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}         # repo secret exposed to this step
+      +        run: npm ci && npm run integration                 # npm ci runs the PR's lifecycle scripts
+      @@ jobs.test (trigger changed) @@
+      -  test:
+      -    on: push
+      +  test:
+      +    on: pull_request                 # fork PRs, untrusted head
+      +    permissions:
+      +      contents: read                 # read-only token
+           runs-on: foundry-linux
+           steps:
+      -      - uses: actions/checkout@<full-sha>
+      +      - uses: actions/checkout@<full-sha>
+      +        with:
+      +          ref: ${{ github.event.pull_request.head.sha }}   # checks out fork code
+             - run: npm ci && npm test      # no secrets referenced anywhere in this job
+      @@ jobs.build.steps (action pin bumped) @@
+      -      - uses: reactor-labs/setup-node@2f1e0d9   # 7-char short SHA
+      +      - uses: reactor-labs/setup-node@2f1e0d9c4b5a6f8e9d0c1b2a3948576f8e0d1c2b  # full 40-char commit SHA (same release, v4.2.0)
+      @@ jobs.publish (action reference) @@
+      +  publish:
+      +    on: push
+      +    if: github.ref == 'refs/heads/main'
+      +    steps:
+      +      - uses: arclight-ci/release@v3        # mutable tag on a FIRST-PARTY action (see actions-policy)
+      +        with: { channel: stable }
+      @@ jobs.deploy (NEW job) @@
+      +  deploy:
+      +    on: push
+      +    if: github.event_name == 'push' && github.ref == 'refs/heads/main'  # main pushes only
+      +    permissions:
+      +      id-token: write                # OIDC federation; no long-lived secret
+      +    steps:
+      +      - uses: actions/checkout@<full-sha>
+      +      - run: foundry deploy --oidc   # exchanges the OIDC token for short-lived cloud creds
+  - id: ci-trust-model
+    type: spec
+    label: Foundry CI trigger/privilege trust model (authoritative and complete)
+    content: |
+      Foundry CI trust model — AUTHORITATIVE and COMPLETE. These rules govern what
+      privileges a workflow run has, as a function of its trigger. There are no other
+      privilege sources.
+
+      pull_request (from a fork):
+        - The job runs with NO repository secrets injected — `secrets.*` resolve to empty
+          for fork PRs — and the automatic job token is READ-ONLY. This is guaranteed by
+          the platform for fork events.
+        - The job checks out and may execute the PR's (untrusted) HEAD code. Because that
+          code runs WITHOUT secrets and with a read-only token, executing it is the normal,
+          safe way to test a contribution: there is no privileged capability for the
+          untrusted code to steal or abuse.
+
+      pull_request_target:
+        - The job runs in the BASE repository context WITH full repository secrets available
+          and a read/write job token. By default it checks out the BASE ref (trusted).
+        - DANGER RULE: if a pull_request_target job checks out the PR HEAD
+          (ref: github.event.pull_request.head.sha) AND then executes that code (including
+          implicitly, e.g. `npm ci`/lifecycle scripts or building the checked-out tree),
+          it is running UNTRUSTED contributor code with the repository's secrets and write
+          token. That combination is a supply-chain compromise: the untrusted code inherits
+          the privileged context. pull_request_target is safe ONLY when it does not check
+          out or execute untrusted PR code.
+
+      push (to a branch in the repo):
+        - Triggered only by commits already in the repository (a trusted branch), not by
+          fork contributors. Jobs may hold secrets or `id-token: write` safely because the
+          code that runs is already trusted. A job gated `if: github.ref ==
+          'refs/heads/main'` on a push event runs only on trusted main commits.
+
+      OIDC (`id-token: write`): federated short-lived cloud credentials, minted per run; no
+      long-lived secret is stored. Safe on push/main-only jobs.
+  - id: actions-policy
+    type: config
+    label: Arclight actions-pinning policy (authoritative)
+    content: |
+      # arclight actions-pinning policy — authoritative and complete.
+      #
+      # Third-party actions (any `uses:` outside the arclight-ci org) MUST be pinned by a
+      # full 40-character commit SHA. A mutable tag (@v3) or short SHA on a THIRD-PARTY
+      # action is a policy violation. A full-SHA pin is trusted: the referenced bytes cannot
+      # change under the pin.
+      #
+      # First-party actions: the `arclight-ci/*` org is FIRST-PARTY (authored and controlled
+      # by the arclight team, same trust domain as this repo). Its actions are release-tag
+      # pinned by policy and mirrored internally; referencing arclight-ci/<action>@vN by tag
+      # is APPROVED and trusted. First-party actions are exempt from the third-party
+      # full-SHA requirement.
+      #
+      # Known refs in this repo:
+      #   - reactor-labs/setup-node : THIRD-PARTY -> must be full-SHA pinned.
+      #   - arclight-ci/release     : FIRST-PARTY -> tag pin (@vN) approved.
+  - id: change-map
+    type: table
+    label: Arclight CI change map (COMPLETE — every changed job, trigger, checkout, and secret access)
+    content: |
+      CI change map — COMPLETE. Every job changed by this pull request is listed with its
+      trigger, whether it checks out the PR HEAD (untrusted fork code), whether it has
+      secret or privileged-token access, and the action refs it uses. A job not in this
+      table is unchanged by this PR.
+
+      job          | trigger              | checks out PR HEAD? | secrets / privileged token        | action refs
+      -------------|----------------------|---------------------|-----------------------------------|-------------------------------
+      integration  | pull_request_target  | YES (head.sha)      | YES (secrets.DEPLOY_TOKEN; RW token) | actions/checkout@<full-sha>
+      test         | pull_request         | YES (head.sha)      | NO (contents: read; no secrets)   | actions/checkout@<full-sha>
+      build        | (unchanged trigger)  | n/a                 | n/a                               | reactor-labs/setup-node@<full-sha>
+      publish      | push (main only)     | NO                  | (first-party action)              | arclight-ci/release@v3
+      deploy       | push (main only)     | NO                  | id-token: write (OIDC, short-lived) | actions/checkout@<full-sha>
+
+      Reminder (ci-trust-model): the danger is the COMBINATION pull_request_target + checkout
+      of PR HEAD + secret/write access. A pull_request (fork) job gets no secrets and a
+      read-only token even though it runs untrusted code.
+  - id: pipeline-note
+    type: note
+    label: Arclight maintainer PR notes (current)
+    content: |
+      Arclight CI change notes (maintainer-authored, for this PR).
+
+      - The `test` job was moved from push to pull_request so external contributions get
+        CI on fork PRs. It intentionally holds no secrets and uses a read-only token — per
+        the trust model, running fork code there is safe.
+      - The `build` job's setup-node pin was upgraded from a 7-char short SHA to the full
+        40-char commit SHA of the same release — a hardening step, per actions-policy.
+      - `publish` uses arclight-ci/release, our FIRST-PARTY release action (actions-policy),
+        pinned by release tag as approved; it runs only on main pushes.
+      - `deploy` uses OIDC (id-token: write) and is gated to main-branch pushes; no
+        long-lived secret is stored.
+      - The `integration` job was added late in the PR. It is the change to scrutinize:
+        confirm its trigger, what ref it checks out, and whether it exposes any secret,
+        against ci-trust-model. Do not assume it is fine because the checkout action itself
+        is SHA-pinned — pinning the action does not make the checked-out CODE trusted.
+
+      Provenance authority: ci-trust-model states the trigger/privilege rules and
+      actions-policy states the pinning rules. Anything conflicting with them is the anomaly.
+  - id: fork-pr-log
+    type: log
+    label: Foundry CI run record for the fork PR that triggered this review (run #2290)
+    content: |
+      Foundry CI — run #2290 (the run that triggered this review)
+
+      event: pull_request_target        head: fork:crimson-otter/arclight@f00dbabe   (EXTERNAL fork)
+      base: arclight/arclight@main
+      triggered jobs:
+        integration  event=pull_request_target  checkout.ref=f00dbabe (PR HEAD)  secrets=[DEPLOY_TOKEN]  token=read-write
+        test         event=pull_request         checkout.ref=f00dbabe (PR HEAD)  secrets=[]              token=read-only
+      note: arclight is a PUBLIC repository and accepts pull requests from external forks, so
+            pull_request_target jobs are reachable by untrusted contributors. run #2290 shows the
+            integration job executing fork HEAD f00dbabe with DEPLOY_TOKEN present in its environment.
+tags: [supply-chain, ci-cd, github-actions, security]

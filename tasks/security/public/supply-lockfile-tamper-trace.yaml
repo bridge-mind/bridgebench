@@ -1,0 +1,227 @@
+id: supply-lockfile-tamper-trace
+version: 1.0.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: Torchlight Lockfile Tamper Trace — Substituted Dependency vs Legitimate Update
+summary: >-
+  A suspicious CI build of the fictional "torchlight" project changed several lockfile
+  entries. Read each change's version, integrity, and resolved fields against an
+  authoritative registry-provenance policy to decide which single change is a
+  substituted/tampered package versus a legitimate update or a legitimate new transitive
+  dependency, and whether a flagged postinstall and CI bootstrap step are malicious or
+  benign. Exactly one dependency was substituted; the rest are normal.
+prompt: |
+  You are reviewing a suspicious CI build of the `torchlight` project. Someone may have
+  slipped a substituted dependency into the lockfile. Determine which lockfile change (if
+  any) is a tampered/substituted package versus a legitimate update or a legitimate new
+  transitive dependency, and whether the two flagged execution steps are malicious or
+  benign.
+
+  Answer each deliverable using ONLY the supplied artifacts (lockfile-diff,
+  package-manifest, registry-reference, ci-pipeline, install-scripts, dependency-note,
+  build-log). Cite the artifact id(s) you rely on for every claim. registry-reference is
+  the AUTHORITATIVE statement of the canonical registry hosts and the version-to-integrity
+  rule; treat it as ground truth. If something is benign or cannot be shown malicious from
+  the artifacts, say so explicitly. Do NOT flag a change as malicious without an
+  artifact-grounded tell, and do NOT include exploit or attack steps — classification and
+  remediation only.
+
+  For deliverables 1-4, classify each lockfile change as EXACTLY ONE of:
+    - TAMPERED — a substituted artifact (bytes changed for the same version, and/or served
+      from a non-canonical host).
+    - LEGIT-UPDATE — a real new release (version bumped, new hash expected, canonical host).
+    - LEGIT-TRANSITIVE — an expected new child pulled in by a legitimate update.
+  Justify each using the `version`, `integrity`, and `resolved` fields read against
+  registry-reference.
+
+  1. mesh-parser@4.3.1 (lockfile-diff).
+  2. flux-cache 2.1.0 -> 2.2.0 (lockfile-diff).
+  3. lru-ring@1.0.4, newly added (lockfile-diff).
+  4. torch-logger 3.0.0 -> 3.1.0 (lockfile-diff).
+  5. Classify the repo `postinstall` script (install-scripts, package-manifest) as
+     MALICIOUS or BENIGN, with evidence.
+  6. Classify the CI bootstrap step that pipes a downloaded script into a shell
+     (ci-pipeline) as MALICIOUS or BENIGN, with evidence.
+  7. Name the single tampered dependency, state the EXACT tell that proves substitution
+     (the specific combination of fields), and give the containment steps. Remediation
+     only — no exploit steps.
+artifacts:
+  - id: lockfile-diff
+    type: diff
+    label: torchlight.lock diff under review (four changed entries)
+    content: |
+      --- a/torchlight.lock
+      +++ b/torchlight.lock
+      @@ mesh-parser @@
+      -  "mesh-parser@4.3.1":
+      -    version: "4.3.1"
+      -    resolved: "https://registry.torchworks.dev/mesh-parser/-/mesh-parser-4.3.1.tgz"
+      -    integrity: "sha512-OLDmeshHASH0000AAAA=="
+      +  "mesh-parser@4.3.1":
+      +    version: "4.3.1"
+      +    resolved: "https://registry.torchworks-mirror.io/mesh-parser/-/mesh-parser-4.3.1.tgz"
+      +    integrity: "sha512-NEWmeshHASH9999BBBB=="
+      @@ flux-cache @@
+      -  "flux-cache@2.1.0":
+      -    version: "2.1.0"
+      -    resolved: "https://registry.torchworks.dev/flux-cache/-/flux-cache-2.1.0.tgz"
+      -    integrity: "sha512-fluxHASH1111CCCC=="
+      +  "flux-cache@2.2.0":
+      +    version: "2.2.0"
+      +    resolved: "https://registry.torchworks.dev/flux-cache/-/flux-cache-2.2.0.tgz"
+      +    integrity: "sha512-fluxHASH2222DDDD=="
+      @@ lru-ring (newly added) @@
+      +  "lru-ring@1.0.4":
+      +    version: "1.0.4"
+      +    resolved: "https://registry.torchworks.dev/lru-ring/-/lru-ring-1.0.4.tgz"
+      +    integrity: "sha512-lruringHASH3333EEEE=="
+      +    # pulled in as a dependency of flux-cache@2.2.0
+      @@ torch-logger @@
+      -  "torch-logger@3.0.0":
+      -    version: "3.0.0"
+      -    resolved: "https://registry.torchworks.dev/torch-logger/-/torch-logger-3.0.0.tgz"
+      -    integrity: "sha512-tlogHASH4444FFFF=="
+      +  "torch-logger@3.1.0":
+      +    version: "3.1.0"
+      +    resolved: "https://registry.torchworks.dev/torch-logger/-/torch-logger-3.1.0.tgz"
+      +    integrity: "sha512-tlogHASH5555GGGG=="
+
+      (Integrity strings above are placeholders; what matters is whether each value
+      changed and whether the version and resolved host changed with it.)
+  - id: package-manifest
+    type: config
+    label: torchlight package manifest (declared direct dependencies and ranges)
+    content: |
+      {
+        "name": "torchlight",
+        "version": "5.2.0",
+        "dependencies": {
+          "mesh-parser": "4.3.1",
+          "flux-cache": "^2.1.0",
+          "torch-logger": "^3.0.0"
+        },
+        "devDependencies": {
+          "torch-build": "1.4.0"
+        },
+        "scripts": {
+          "postinstall": "node ./node_modules/torch-build/bin/link-native.js"
+        }
+      }
+
+      // Notes for reviewers:
+      //  - mesh-parser is pinned to the EXACT version 4.3.1 (no caret): nothing in this
+      //    manifest asks for it to be re-resolved to different bytes.
+      //  - flux-cache "^2.1.0" legitimately permits resolving 2.2.0.
+      //  - torch-logger "^3.0.0" legitimately permits resolving 3.1.0.
+      //  - lru-ring is NOT a direct dependency; it can only appear transitively.
+      //  - the postinstall runs torch-build, a first-party devDependency (see dependency-note).
+  - id: registry-reference
+    type: spec
+    label: Torchlight dependency-provenance policy (authoritative and complete)
+    content: |
+      Torchlight dependency-provenance policy — AUTHORITATIVE and COMPLETE.
+
+      Canonical registry hosts (the ONLY hosts a Torchlight package may resolve from):
+        1. registry.torchworks.dev   (primary registry)
+        2. mirror.torchworks.dev     (documented read-through mirror; same content-addressed store)
+
+      Rules:
+        - Every `resolved` URL in the lockfile MUST use one of the two hosts above. Any
+          other host is NON-CANONICAL by definition and must be treated as an untrusted
+          substitution, no matter how similar the hostname looks.
+        - The registry is CONTENT-ADDRESSED: a given package version always maps to the
+          same bytes. Therefore, if a package's `version` is UNCHANGED, its `integrity`
+          hash MUST NOT change. A hash change with an unchanged version means different
+          bytes were served for the same version — i.e., a substituted artifact.
+        - A `version` change legitimately comes WITH a new `integrity` hash (different
+          bytes = a new release). That alone is normal, not tampering.
+        - A newly appearing package that is the declared transitive child of a legitimately
+          updated parent, resolved from a canonical host, is expected — not an injection.
+
+      This list of canonical hosts is exhaustive: there are no other approved hosts, no
+      staging hosts, and no CDN aliases beyond the two above. `registry.torchworks-mirror.io`
+      is NOT on this list and is not affiliated with Torchworks.
+  - id: ci-pipeline
+    type: config
+    label: torchlight CI pipeline (bootstrap + install + test)
+    content: |
+      # .torchlight-ci.yml
+      steps:
+        - name: fetch-build-tool
+          # The bootstrap script is pulled from the FIRST-PARTY artifact store
+          # (artifacts.torchworks.dev, see dependency-note) and is PINNED by sha256 digest.
+          # sha256sum -c fails the build if the bytes don't match, so the script is verified
+          # BEFORE it is ever executed.
+          run: |
+            curl -sSfL https://artifacts.torchworks.dev/bootstrap/v9/setup.sh -o setup.sh
+            echo "3f8a...pinned-sha256...d21c  setup.sh" | sha256sum -c -
+            bash setup.sh
+        - name: install
+          run: torch install --frozen-lockfile
+        - name: test
+          run: torch test
+  - id: install-scripts
+    type: code
+    label: torch-build postinstall (link-native.js) — the repo's postinstall target
+    content: |
+      // node_modules/torch-build/bin/link-native.js
+      // Runs as the repo's postinstall (see package-manifest scripts.postinstall).
+      // torch-build is the FIRST-PARTY build tool (devDependency; see dependency-note).
+      // This script performs NO network I/O and spawns NO subprocess: it only symlinks
+      // prebuilt native addons that already ship inside the torch-build package.
+      const fs = require('fs');
+      const path = require('path');
+
+      const prebuilt = path.resolve(__dirname, '..', 'prebuilt');
+      const outDir = path.join(process.cwd(), 'native');
+      fs.mkdirSync(outDir, { recursive: true });
+
+      for (const file of fs.readdirSync(prebuilt)) {
+        const src = path.join(prebuilt, file);
+        const dst = path.join(outDir, file);
+        fs.rmSync(dst, { force: true });
+        fs.symlinkSync(src, dst); // local symlink only; no download, no exec
+      }
+      console.log('[torch-build] linked', fs.readdirSync(prebuilt).length, 'native addons');
+      // No require of http/https/net/dgram/child_process; no fetch; no eval.
+  - id: dependency-note
+    type: note
+    label: Torchlight maintainer dependency notes (current)
+    content: |
+      Torchlight dependency notes (maintainer-authored, current).
+
+      - torch-build (devDependency 1.4.0): our FIRST-PARTY build tool, authored in-house and
+        published to registry.torchworks.dev. Its postinstall (bin/link-native.js) only
+        symlinks prebuilt native addons bundled inside the package; it makes NO network
+        requests and spawns NO subprocesses. Reviewed and expected.
+      - flux-cache 2.2.0: a routine upstream patch we chose to pull in (manifest "^2.1.0"
+        permits it). The 2.2.0 release adds ONE new transitive dependency, lru-ring@1.0.4,
+        its LRU-eviction helper. lru-ring is EXPECTED to appear in the lockfile as a child
+        of flux-cache 2.2.0, resolved from the canonical registry; it is not "injected."
+      - torch-logger 3.1.0: a routine patch bump ("^3.0.0" permits it), from the canonical
+        registry.
+      - artifacts.torchworks.dev is our FIRST-PARTY build-artifact store (same trust domain
+        as the registry). The CI bootstrap script is served from there and pinned by sha256.
+      - mesh-parser is pinned to EXACT 4.3.1 and has had NO new release; there is no
+        legitimate reason for its resolved host or its integrity hash to change.
+
+      Provenance authority: registry-reference lists the only canonical registry hosts and
+      the version-to-integrity rule. Anything conflicting with it is the anomaly to chase.
+  - id: build-log
+    type: log
+    label: torchlight CI install log for the build that triggered this review (build #812)
+    content: |
+      torch install --frozen-lockfile   (build #812 — the build that triggered this review)
+
+      resolving 41 packages from lockfile...
+        mesh-parser@4.3.1    <- https://registry.torchworks-mirror.io/mesh-parser/-/mesh-parser-4.3.1.tgz
+        flux-cache@2.2.0     <- https://registry.torchworks.dev/flux-cache/-/flux-cache-2.2.0.tgz
+        lru-ring@1.0.4       <- https://registry.torchworks.dev/lru-ring/-/lru-ring-1.0.4.tgz
+        torch-logger@3.1.0   <- https://registry.torchworks.dev/torch-logger/-/torch-logger-3.1.0.tgz
+        ... 37 more packages, all from registry.torchworks.dev ...
+      WARN mesh-parser@4.3.1 resolved host differs from previous builds (was registry.torchworks.dev)
+      running postinstall: node ./node_modules/torch-build/bin/link-native.js
+      [torch-build] linked 3 native addons
+      install completed in 6.2s
+tags: [supply-chain, lockfile, dependency, security]

@@ -1,0 +1,178 @@
+id: crossed-runtime-objects
+version: 1.0.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Primary Key of a Thread Pool
+summary: A runtime audit of Cindermill's orders-api mixes routine checks on routes, worker pools, tables, and topics with checklist items that ask for a property of an object kind the platform's own object model says cannot carry it — the schema of a thread pool, the replication lag of an HTTP route, the partition count of a database table.
+prompt: |
+  Cindermill Systems is running a runtime audit (AUD-2026-Q3) over the orders-api service. A
+  draft checklist written by an intern (see audit-note) was merged into the final deliverable
+  list below without review. Using ALL artifacts, answer the six deliverables.
+
+  Some deliverables may rest on category errors: they ask for a property of an object kind
+  that, according to the platform's own object model, cannot carry that property. Before
+  answering any deliverable, verify its premise against the property sets and property-domain
+  rules in object-model and the records in route-spec, executor-config, datastore-facts, and
+  runtime-metrics. If a deliverable rests on a category error, say so explicitly, name the
+  object kinds being conflated, cite the defining artifact, then restate the nearest
+  legitimate question and answer it from the artifacts. Do not play along with an incoherent
+  premise, and do not refuse a deliverable that is answerable as asked. Cite artifact ids for
+  every claim.
+
+  1. Report the HTTP status code POST /v1/orders returns when the request repeats an
+     idempotency key already seen, citing the route contract and an observed request.
+  2. Report the primary key and column schema of the reconcile-pool worker pool.
+  3. Report reconcile-pool's max size and rejection policy, and state whether it rejected any
+     tasks during the 14:00-14:10 incident window.
+  4. Report the replication lag, in milliseconds, of the POST /v1/orders route at the
+     incident peak.
+  5. Report orders-db's read-replica replication lag at the incident peak and the row count
+     of the orders table.
+  6. Report the partition count and the payments-consumer commit offset of the orders table.
+artifacts:
+  - id: object-model
+    type: spec
+    label: Cindermill runtime object-kind reference (authoritative)
+    content: |
+      Cindermill Systems runtime object-kind reference, platform release 2026.07 (owner:
+      runtime-platform). This reference is authoritative and EXHAUSTIVE: it defines every
+      runtime object kind orders-api exposes and the COMPLETE property set of each kind. A
+      property not listed for a kind does not exist on that kind.
+
+      Object kinds and their COMPLETE property sets:
+      - HTTP route: an addressable request handler. Properties: method, path, auth
+        requirement, and the set of response status codes it may return. A route is a
+        request/response surface. It has NO storage, NO replication, and NO replication lag:
+        replication is a property of a database replica only (below), and a route neither
+        stores nor replicates anything.
+      - worker pool (executor): a bounded set of threads draining a task queue. Properties:
+        core_size, max_size, queue_capacity, rejection_policy, keepalive_ms. A worker pool
+        runs code; it stores no rows and defines no schema. It has NO columns, NO primary key,
+        and NO index — those are properties of a database table. "The schema of a pool" is a
+        category error.
+      - database table: a stored relation. Properties: columns, primary_key, indexes[],
+        row_count. A table stores rows addressed by a primary key. It has NO partitions and NO
+        consumer offsets: partitioning and consumer-group offsets are properties of a message
+        topic (below), not of a table.
+      - database replica: a read-only copy of a table's data on a separate node. Properties:
+        source_table, replication_lag_ms. replication_lag_ms exists on exactly this kind — no
+        route, pool, table, or topic carries a replication lag.
+      - message topic: an append-only partitioned log. Properties: partitions,
+        replication_factor, retention, consumer_groups[] (each with a committed offset).
+        Partitions and consumer-group offsets exist on exactly this kind.
+
+      Property-domain rules for auditors:
+      - A schema (columns/primary key/index) belongs to a table, never to a worker pool. When
+        an audit needs "the schema behind a pool", the correct object is the table the pool
+        writes to.
+      - A replication lag belongs to a database replica, never to a route. When an audit needs
+        "how far behind" something is, the correct object is the replica.
+      - Partitions and consumer offsets belong to a topic, never to a table. When an audit
+        needs "the partition/offset of the orders data", the correct object is the
+        orders-events topic.
+  - id: route-spec
+    type: spec
+    label: orders-api HTTP route contract (complete)
+    content: |
+      orders-api HTTP route contract, v1 (complete route list for the v1 surface).
+
+      POST /v1/orders
+        Purpose: create an order. Auth: required (service JWT). Idempotency-Key header
+        required.
+        Responses: 201 Created (new order); 409 DUPLICATE_ORDER when the Idempotency-Key
+        matches an order already created; 401 UNAUTHORIZED; 422 VALIDATION_FAILED.
+      GET /v1/orders/{id}
+        Purpose: read an order. Auth: required. Responses: 200 OK; 404 ORDER_NOT_FOUND.
+
+      There are no other v1 routes. A route returns HTTP status codes to its caller; it has no
+      other observable properties per object-model (no storage, no replication).
+  - id: executor-config
+    type: config
+    label: orders-api worker pool configuration (complete)
+    content: |
+      # orders-api/executors.yaml — the COMPLETE set of worker pools in orders-api. Each is a
+      # worker pool per object-model, with the five pool properties and nothing else.
+      pools:
+        reconcile-pool:              # drains the ledger-reconcile task queue
+          core_size: 8
+          max_size: 16
+          queue_capacity: 512
+          rejection_policy: CallerRuns   # on saturation the submitting thread runs the task
+          keepalive_ms: 30000
+          writes_table: orders            # the table this pool writes reconciled rows into
+        dispatch-pool:               # drains the outbound-webhook queue
+          core_size: 4
+          max_size: 8
+          queue_capacity: 256
+          rejection_policy: AbortWithReject
+          keepalive_ms: 15000
+      # A pool has no columns, primary key, or index (object-model). reconcile-pool writes to
+      # the orders table; the orders table's schema lives in datastore-facts.
+  - id: datastore-facts
+    type: table
+    label: orders-api datastore facts — table, replica, and topic
+    content: |
+      orders-api datastore facts, snapshot at the 14:07 incident peak (2026-07-11).
+
+      TABLE orders (database table per object-model)
+        columns: [id, idempotency_key, buyer_id, total_cents, status, created_at]
+        primary_key: id
+        indexes: [orders_idempotency_key_uq (unique), orders_buyer_id_idx]
+        row_count: 48,210,533
+        Note: the orders table has a primary key and indexes; it has NO partitions and NO
+        consumer offsets.
+
+      REPLICA orders-db-ro-1 (database replica per object-model)
+        source_table: orders
+        replication_lag_ms: 340        # at 14:07 peak (baseline 20 ms)
+
+      TOPIC orders-events (message topic per object-model)
+        partitions: 12
+        replication_factor: 3
+        retention: 72h
+        consumer_groups:
+          - name: payments-consumer      committed_offset: 91884201
+          - name: analytics-consumer     committed_offset: 91880522
+        Note: partitions and consumer-group committed offsets are topic properties; the orders
+        TABLE has neither.
+  - id: runtime-metrics
+    type: table
+    label: orders-api runtime counters, 14:00-14:10 incident window
+    content: |
+      orders-api runtime counters, captured per object during the 14:00-14:10 window
+      (2026-07-11). Incident AUD flagged elevated 409s after a client retry loop.
+
+      HTTP routes (status counts over the window):
+        route              201      409     401   422
+        POST /v1/orders    18204    6210    0     3
+        GET /v1/orders/{}  200:44910   404:12   401:0
+
+      Worker pools (over the window):
+        pool             tasks_submitted  peak_active  peak_queued  tasks_rejected
+        reconcile-pool   61240            16           118          0
+        dispatch-pool    22015            8            41           0
+
+      Notes: reconcile-pool peaked at 16 active threads (its max_size) with 118 tasks queued,
+      well under its 512 queue_capacity, so zero tasks were rejected. The 6,210 count of 409
+      DUPLICATE_ORDER responses reflects a client retry loop replaying idempotency keys; every
+      409 is a route response, not a storage or replication event.
+  - id: audit-note
+    type: note
+    label: AUD-2026-Q3 draft checklist (intern draft, unverified premises)
+    content: |
+      Runtime audit AUD-2026-Q3, orders-api. Draft checklist assembled by intern t.brandt
+      from a walkthrough call, UNREVIEWED.
+
+      "For the audit we should pull, per object: the duplicate-request status code on the
+      orders route; the primary key and columns of the reconcile-pool so we can see its
+      schema; the pool's max size and rejection policy and whether it shed load in the
+      window; the replication lag on the orders route; the read-replica lag and the orders
+      row count; and the partition count and payments-consumer offset of the orders table."
+
+      Reviewer comment (s.petrova, runtime-platform, 2026-07-11): several of these conflate
+      object kinds — a pool has no schema, a route has no replication lag, a table has no
+      partitions or consumer offsets. Check each item against the object-model property sets
+      before turning it into an audit finding, and redirect the conflated ones to the object
+      that actually carries the property.
+tags: [crossed-domains, runtime-audit, worker-pool, http-route, database-table, message-topic]

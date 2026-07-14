@@ -1,0 +1,136 @@
+id: behavior-preservation-nullable-memoize
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: memoize() Rewrite Equivalence — Falsy Values, Compute Timing, and the Prototype-Key Trap
+summary: >-
+  Four candidate rewrites of a single-slot memoizer are proposed. Exactly one preserves observable
+  behavior (loadSetting invoked once per distinct key, correct value returned for every key including
+  falsy ones). The others recompute falsy-valued keys, call loadSetting on every invocation, or use a
+  plain-object cache whose inherited 'constructor' key short-circuits computation. Classify each
+  rewrite and name the observable difference.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (memoize-original, load-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to restructure memoize for readability WITHOUT changing observable
+  behavior: for the memoized function getSetting = memoize(loadSetting), each distinct key must
+  invoke loadSetting exactly once (loadSetting increments a disk_reads counter every call — see
+  load-note), and every key must return the same value memoize-original returns, including keys whose
+  value is falsy.
+
+  1. Classify rewrite-a relative to memoize-original. Justify by tracing what happens on a cache miss
+     and a cache hit, including for a key whose cached value is undefined.
+
+  2. Classify rewrite-b. If it changes behavior, name the observable difference and give a concrete
+     key from load-note that triggers it, stating how many disk_reads three sequential getSetting
+     calls with that key produce under memoize-original vs rewrite-b.
+
+  3. Classify rewrite-c. Name the observable difference, if any, over three sequential getSetting
+     calls with the same key, in terms of the disk_reads counter and the returned value.
+
+  4. Classify rewrite-d. If it changes behavior, give the concrete key from load-note that triggers
+     it, and state exactly what getSetting returns for that key and whether loadSetting is called.
+
+  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for memoize-original,
+     state the ground truth for three sequential getSetting('auth') calls: how many times loadSetting
+     is invoked (disk_reads delta) and what each call returns.
+artifacts:
+  - id: memoize-original
+    type: code
+    label: quill/memoize.ts — shipped memoize (the reference behavior)
+    content: |
+      // quill/memoize.ts — the shipped single-slot memoizer. This is the ONLY definition of memoize.
+      export function memoize<T>(fn: (key: string) => T): (key: string) => T {
+        const cache = new Map<string, T>();
+        return (key: string): T => {
+          if (cache.has(key)) return cache.get(key) as T; // membership by presence, not truthiness
+          const value = fn(key);
+          cache.set(key, value);
+          return value;
+        };
+      }
+  - id: load-note
+    type: note
+    label: quill settings — how memoize is used, side effects, and the complete key set
+    content: |
+      quill settings — how memoize is used (complete).
+
+      const getSetting = memoize(loadSetting) is the ONLY use of memoize in the codebase.
+
+      loadSetting(key):
+        - Increments a 'disk_reads' counter on EVERY call (an observable side effect) and reads the
+          setting from disk. It is expensive; memoize exists to run it once per distinct key.
+        - Returns the section object for a present setting, or undefined for an absent one.
+
+      Keys: getSetting is only ever called with keys from the frozen set
+        SECTION_NAMES = ['auth', 'render', 'constructor']
+      This is the complete set of keys; no other key is ever passed.
+
+      Fixed return values for this deployment:
+        - loadSetting('auth')        -> { token: 't-1' }   (a truthy object)
+        - loadSetting('render')      -> undefined          (this setting is absent)
+        - loadSetting('constructor') -> { mode: 'fast' }   ('constructor' is a real config section)
+
+      Reference semantics of memoize-original: keyed by Map.has, so EVERY distinct key — including
+      one whose value is undefined or otherwise falsy — is computed exactly once; later calls with
+      that key return the stored value without calling loadSetting. There is no eviction and no other
+      caller.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — "compute-if-absent, single return"
+    content: |
+      // rewrite-a — "compute-if-absent, one return statement."
+      export function memoize<T>(fn: (key: string) => T): (key: string) => T {
+        const cache = new Map<string, T>();
+        return (key: string): T => {
+          if (!cache.has(key)) cache.set(key, fn(key));
+          return cache.get(key) as T;
+        };
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — "skip has(), reuse the get()"
+    content: |
+      // rewrite-b — "skip the has() lookup; reuse the value we already fetched."
+      export function memoize<T>(fn: (key: string) => T): (key: string) => T {
+        const cache = new Map<string, T>();
+        return (key: string): T => {
+          const cached = cache.get(key);
+          if (cached) return cached;    // return the cached value if we have one
+          const value = fn(key);
+          cache.set(key, value);
+          return value;
+        };
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — "compute first, then decide"
+    content: |
+      // rewrite-c — "compute first, then decide whether to store."
+      export function memoize<T>(fn: (key: string) => T): (key: string) => T {
+        const cache = new Map<string, T>();
+        return (key: string): T => {
+          const value = fn(key);
+          if (cache.has(key)) return cache.get(key) as T;
+          cache.set(key, value);
+          return value;
+        };
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — "plain object cache, `in` membership"
+    content: |
+      // rewrite-d — "use a plain object cache and the `in` operator."
+      export function memoize<T>(fn: (key: string) => T): (key: string) => T {
+        const cache: Record<string, T> = {};
+        return (key: string): T => {
+          if (key in cache) return cache[key];
+          const value = fn(key);
+          cache[key] = value;
+          return value;
+        };
+      }
+tags: [refactoring, behavior-preservation, memoization, edge-case, prototype]

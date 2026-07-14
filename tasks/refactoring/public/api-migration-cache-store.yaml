@@ -1,0 +1,155 @@
+id: api-migration-cache-store
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrating cache call sites to the store client at Petrichor Media
+summary: Six call sites are moving from the legacy cache helper to the new store client. TTL units (seconds vs milliseconds), the omitted-TTL default (never-expire vs 60s), the get-fallback argument, delete vs put, bulk ordering, and set's previous-value return all differ. Classify each migrated call site as behavior-preserving or changes-behavior, citing the exact mismatch.
+prompt: |
+  The platform team at Petrichor Media is retiring the legacy `cache` helper in favor of the new
+  `store` client. A migration PR rewrites six call sites (proposed-migrations M1..M6), each replacing
+  an original in call-sites (C1..C6).
+
+  Answer each deliverable using ONLY the supplied artifacts (legacy-api, new-api, mapping-note,
+  call-sites, proposed-migrations). Cite the artifact id(s) for every claim.
+
+  For each migrated call site below, classify it as exactly one of:
+    - behavior-preserving  (the rewrite produces the same observable behavior as the original)
+    - changes-behavior     (the rewrite alters observable behavior; name the single defect)
+
+  "Observable behavior" includes the value returned to the caller, which key is written or removed,
+  the effective time-to-live of an entry (in real time), the order of values returned from a bulk
+  read, and whether a conditional branch that reads a return value still runs. Assume the two backends
+  store and expire entries identically given the same key, value, and real-time TTL.
+
+  1. Classify M1 (the migration of C1).
+  2. Classify M2 (the migration of C2).
+  3. Classify M3 (the migration of C3).
+  4. Classify M4 (the migration of C4).
+  5. Classify M5 (the migration of C5).
+  6. Classify M6 (the migration of C6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, state the single citable defect and, where relevant, a concrete
+  condition that witnesses the difference.
+artifacts:
+  - id: legacy-api
+    type: spec
+    label: legacy cache helper — signature, defaults, semantics
+    content: |
+      // cache/legacy.ts — the cache helper being retired.
+      // This is the COMPLETE set of methods cache exposes; there are no others.
+
+      cache.get<T>(key: string, fallback?: T): T | undefined;
+        // Returns the stored value for key, or `fallback` if the key is ABSENT.
+        // `fallback` defaults to undefined. (Present entries always hold non-null values here — see
+        // mapping-note — so "absent" is the only case that yields the fallback.)
+
+      cache.set(key: string, value: unknown, ttlSeconds?: number): unknown;
+        // Stores value under key. ttlSeconds is the time-to-live in SECONDS.
+        // If ttlSeconds is OMITTED, the entry NEVER expires (it persists until explicitly deleted).
+        // set RETURNS the PREVIOUS value stored under key (or undefined if there was none).
+
+      cache.del(key: string): void;
+        // Removes key from the cache.
+
+      cache.mget(keys: string[]): unknown[];
+        // Returns values in the SAME ORDER as `keys`; an absent key yields undefined at its position.
+  - id: new-api
+    type: spec
+    label: new store client — signature, defaults, semantics
+    content: |
+      // store/client.ts — the replacement client. This is the COMPLETE method set for store.
+
+      store.read<T>(key: string): T | undefined;
+        // Returns the stored value for key, or undefined if absent. There is NO fallback argument.
+
+      store.put(req: { key: string; value: unknown; ttlMs?: number }): void;
+        // Stores value under key. ttlMs is the time-to-live in MILLISECONDS.
+        // If ttlMs is OMITTED, the entry expires after the DEFAULT 60000 ms (60 seconds).
+        // To make an entry NEVER expire, pass ttlMs: Infinity.
+        // store.put RETURNS nothing (void).
+
+      store.remove(key: string): void;
+        // Removes key from the store.
+
+      store.readMany(keys: string[]): (unknown | undefined)[];
+        // Returns values in the SAME ORDER as `keys`; an absent key yields undefined at its position.
+  - id: mapping-note
+    type: note
+    label: intended migration rules (platform team)
+    content: |
+      How to move a cache call to store without changing behavior. These rules are exhaustive for the
+      differences between the two APIs. Every value stored through these call sites is a non-null
+      object or string, so a present entry never reads back as null/undefined.
+
+      1. READ + FALLBACK. cache.get(k) -> store.read(k) (identical for a plain read). cache.get(k, fb)
+         returns fb ONLY when k is absent; store.read has no fallback, so translate to
+         `store.read(k) ?? fb`. Because stored values are non-null, `?? fb` returns fb exactly when the
+         key is absent — the same condition as cache.get. Dropping the `?? fb` loses the fallback.
+
+      2. TTL UNIT. cache.set ttlSeconds is in SECONDS; store.put ttlMs is in MILLISECONDS. The faithful
+         mapping is ttlMs = ttlSeconds * 1000. Copying the number across (ttlMs = ttlSeconds) shortens
+         the real-time lifetime by a factor of 1000.
+
+      3. TTL DEFAULT (OMITTED). cache.set with NO ttl NEVER expires; store.put with NO ttlMs expires
+         after 60000 ms. So a set() that omitted the TTL must migrate to `ttlMs: Infinity` to keep the
+         entry permanent. Omitting ttlMs makes a formerly-permanent entry expire after 60 seconds.
+
+      4. RETURN VALUE. cache.set RETURNS the previous value; store.put returns void. A call site that
+         USES set()'s return must be reworked; a call site that ignores the return is unaffected by
+         the change.
+
+      5. DELETE. cache.del(k) -> store.remove(k) (identical).
+
+      6. BULK ORDER. cache.mget(keys) -> store.readMany(keys); both return values in the same order as
+         `keys`. Keep the key list in the same order; do not reorder or sort it.
+  - id: call-sites
+    type: code
+    label: original cache call sites (C1..C6)
+    content: |
+      // C1 — cache a rendered page for 5 minutes
+      cache.set('page:home', html, 300);
+
+      // C2 — cache the flags blob permanently (no TTL)
+      cache.set('config:flags', flags);
+
+      // C3 — read a user's theme, defaulting to 'light' when unset
+      const theme = cache.get('theme:u1', 'light');
+      applyTheme(theme);
+
+      // C4 — evict a session
+      cache.del('sess:abc');
+
+      // C5 — read three counters, in order, for the dashboard row
+      const [a, b, c] = cache.mget(['ctr:a', 'ctr:b', 'ctr:c']);
+      renderRow(a, b, c);
+
+      // C6 — take a job lock for 30s; if someone held it before, log that we stole it
+      const prevHolder = cache.set('lock:job', 'worker-7', 30);
+      if (prevHolder) log(`stole lock from ${prevHolder}`);
+  - id: proposed-migrations
+    type: code
+    label: proposed store rewrites (M1..M6)
+    content: |
+      // M1 — migration of C1
+      store.put({ key: 'page:home', value: html, ttlMs: 300 });
+
+      // M2 — migration of C2
+      store.put({ key: 'config:flags', value: flags });
+
+      // M3 — migration of C3
+      const theme = store.read('theme:u1') ?? 'light';
+      applyTheme(theme);
+
+      // M4 — migration of C4
+      store.remove('sess:abc');
+
+      // M5 — migration of C5
+      const [a, b, c] = store.readMany(['ctr:a', 'ctr:b', 'ctr:c']);
+      renderRow(a, b, c);
+
+      // M6 — migration of C6
+      const prevHolder = store.put({ key: 'lock:job', value: 'worker-7', ttlMs: 30000 });
+      if (prevHolder) log(`stole lock from ${prevHolder}`);
+tags: [api-migration, refactoring, cache, ttl, behavior-preservation]

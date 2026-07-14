@@ -31,7 +31,7 @@ export interface RunTriage {
   seed: string;
   firstTimestamp: string;
   matches: number;
-  outcomes: { judged: number; forfeit: number; 'no-contest': number };
+  outcomes: { judged: number; forfeit: number; 'no-contest': number; 'speed-decided': number };
   totalCostUsd: number;
   errorClasses: Record<string, number>;
   models: Record<string, ModelTriage>;
@@ -89,7 +89,7 @@ export function triageJournal(results: MatchResult[]): RunTriage[] {
       seed: runResults[0]!.seed,
       firstTimestamp: runResults[0]!.timestamp,
       matches: runResults.length,
-      outcomes: { judged: 0, forfeit: 0, 'no-contest': 0 },
+      outcomes: { judged: 0, forfeit: 0, 'no-contest': 0, 'speed-decided': 0 },
       totalCostUsd: 0,
       errorClasses: {},
       models: {},
@@ -202,7 +202,7 @@ export function formatTriage(reports: RunTriage[]): string {
   for (const report of reports) {
     lines.push(`run ${report.runId} (seed "${report.seed}", ${report.firstTimestamp})`);
     lines.push(
-      `  matches ${report.matches} | judged ${report.outcomes.judged}, forfeit ${report.outcomes.forfeit}, no-contest ${report.outcomes['no-contest']} | spend $${report.totalCostUsd.toFixed(4)}`,
+      `  matches ${report.matches} | judged ${report.outcomes.judged}, speed-decided ${report.outcomes['speed-decided']}, forfeit ${report.outcomes.forfeit}, no-contest ${report.outcomes['no-contest']} | spend $${report.totalCostUsd.toFixed(4)}`,
     );
     if (Object.keys(report.errorClasses).length > 0) {
       lines.push(

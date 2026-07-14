@@ -1,0 +1,154 @@
+id: dead-code-public-api-switch
+version: 1.0.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Auditing a dead-code cleanup PR for the Aurora ledger-reducer
+summary: A cleanup PR deletes six items from a reducer module, each claimed to be dead. Reachability runs through a switch over a self-declared-complete set of dispatched action types, a public export surface consumed by another package, and transitive helpers. One action case is never dispatched, one helper is shared by live cases, and one export has no internal caller but is public. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
+prompt: |
+  A cleanup PR (removal-pr) deletes six items from the Aurora `ledger-reducer` module, each labelled
+  "dead code." Reachability is fully determined by three self-declared-complete artifacts: the
+  action-manifest (the only entry points, the complete set of dispatched action types, and the
+  no-reflection guarantee), the public-api (the complete public export surface), and the consumers-note
+  (the complete set of external packages that import this module). The module source is in
+  module-source.
+
+  Answer each deliverable using ONLY the supplied artifacts (action-manifest, public-api,
+  consumers-note, module-source, removal-pr). Cite the artifact id(s) for every claim.
+
+  For removals D1..D6, classify each as exactly one of:
+    - behavior-preserving  (the item is truly unreachable; deleting it changes nothing observable)
+    - changes-behavior     (the item is reachable — via a dispatched action case, a live helper chain,
+                            or the public export surface; deleting it removes live behavior)
+
+  A switch case for an action type that IS dispatched (per action-manifest) is reachable; a case for a
+  type that is never dispatched is unreachable. A symbol on the public export surface (public-api) is
+  reachable even with no internal caller, because an external package (consumers-note) imports it. A
+  helper is reachable if any reachable path calls it.
+
+  1. Classify D1 (remove applyReverse and its `case 'reverse'`).
+  2. Classify D2 (remove formatEntry).
+  3. Classify D3 (remove computeFee).
+  4. Classify D4 (remove applyInterest).
+  5. Classify D5 (remove migrateV1).
+  6. Classify D6 (remove the `default` branch of the switch).
+  7. GOAL. Taking the elimination goal as "remove all and only truly-dead code," does this PR
+     meet-goal or fails-goal? If fails-goal, name every reachable item it wrongly removes AND any
+     truly-dead item it leaves behind.
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, name the reachability path (dispatched action case, live helper
+  chain, or public export) that keeps the item alive.
+artifacts:
+  - id: action-manifest
+    type: spec
+    label: ledger-reducer reachability manifest (complete)
+    content: |
+      Aurora `ledger-reducer` module — reachability surface. This manifest is COMPLETE.
+
+      Entry points (the ONLY ways execution enters this module):
+        - reduce(state, action) — the store calls it for EVERY dispatched action.
+        - the module's PUBLIC EXPORTS (see public-api) — imported and called by OTHER packages
+          (see consumers-note). An exported symbol is reachable even if nothing inside this module
+          calls it.
+
+      Dispatched action types (COMPLETE set): the store only ever dispatches actions whose `type` is
+      one of:
+        ['credit', 'debit', 'transfer']
+      The store VALIDATES action.type against this set and REJECTS any action with a type outside it
+      BEFORE dispatch, so reduce() is never called with any other type. Actions of type 'reverse' (or
+      any other unlisted type) cannot occur at runtime.
+
+      Dynamic behavior: apart from the switch in reduce(), the module uses NO reflection, NO eval, NO
+      dynamic import, and NO string-keyed dispatch. A function is reachable ONLY IF (a) a static call
+      chain from reduce() reaches it through a switch case whose action type is in the dispatched set,
+      OR (b) it is on the public export surface (public-api).
+
+      Therefore a defined symbol is truly dead iff it is NOT publicly exported AND its only static
+      callers are switch cases for action types that are never dispatched (or it has no static caller
+      at all).
+  - id: public-api
+    type: spec
+    label: package public export surface (complete)
+    content: |
+      // index.ts — the COMPLETE public export surface of the ledger-reducer package. Downstream
+      // packages import ONLY the symbols re-exported here; any symbol NOT listed is internal to the
+      // module.
+
+      export { reduce, applyInterest } from './reducer';
+
+      // reduce        — the store's reducer (an entry point).
+      // applyInterest — part of the public API; called by an external package (see consumers-note).
+      // Nothing else is re-exported. formatEntry, computeFee, applyReverse, applyCredit, applyDebit,
+      // applyTransfer, and migrateV1 are internal-only (not importable by other packages).
+  - id: consumers-note
+    type: note
+    label: external consumers of this package (complete)
+    content: |
+      External consumers of the ledger-reducer package (COMPLETE).
+
+      - The `billing` package imports { applyInterest } from 'ledger-reducer' and calls it in its
+        nightly interest job. This is a live, external caller of applyInterest.
+      - The `store` runtime imports { reduce } and dispatches actions to it.
+
+      No other package imports anything from ledger-reducer, and no package reaches an internal
+      (non-exported) symbol. So among the module's symbols, only reduce and applyInterest have an
+      external caller; every other symbol is reachable ONLY if an in-module reachable path calls it.
+  - id: module-source
+    type: code
+    label: ledger-reducer source
+    content: |
+      // reducer.ts
+
+      export function reduce(state: State, action: Action): State {
+        switch (action.type) {
+          case 'credit':   return applyCredit(state, action.amount);
+          case 'debit':    return applyDebit(state, action.amount);
+          case 'transfer': return applyTransfer(state, action);
+          case 'reverse':  return applyReverse(state, action); // 'reverse' is never dispatched
+          default:         return state;                       // never reached: type is pre-validated
+        }
+      }
+
+      function applyCredit(s: State, amt: number): State {
+        return { ...s, balance: s.balance + amt, fee: computeFee(amt) };  // 'credit' is dispatched
+      }
+      function applyDebit(s: State, amt: number): State {
+        return { ...s, balance: s.balance - amt, fee: computeFee(amt) };  // 'debit' is dispatched
+      }
+      function applyTransfer(s: State, a: Action): State {
+        return applyDebit(applyCredit(s, a.amount), a.amount);            // 'transfer' is dispatched
+      }
+      function applyReverse(s: State, a: Action): State {                 // only caller: case 'reverse'
+        return { ...s, balance: s.balance + a.amount, note: formatEntry(a) };
+      }
+
+      function computeFee(amt: number): number { return Math.round(amt * 0.01); } // used by credit+debit
+      function formatEntry(a: Action): string { return `${a.type}:${a.amount}`; } // only caller: applyReverse
+
+      export function applyInterest(s: State, rate: number): State {              // public export (billing)
+        return { ...s, balance: s.balance + Math.round(s.balance * rate) };
+      }
+
+      function migrateV1(old: OldState): State {                                  // no caller; not exported
+        return { balance: old.bal, fee: 0 };
+      }
+
+      function legacyChecksum(s: State): string {                                 // no caller; not exported
+        return `${s.balance}:${s.fee}`;
+      }
+  - id: removal-pr
+    type: diff
+    label: proposed dead-code cleanup PR
+    content: |
+      PR #501 "prune dead code from ledger-reducer". Proposed deletions:
+
+      D1  delete function applyReverse and its `case 'reverse'` in reduce  (reason: "'reverse' is never dispatched")
+      D2  delete function formatEntry                                       (reason: "only used by applyReverse")
+      D3  delete function computeFee                                        (reason: "internal helper, no external callers")
+      D4  delete function applyInterest                                     (reason: "no caller inside this module")
+      D5  delete function migrateV1                                         (reason: "no callers")
+      D6  delete the `default: return state` branch of the switch          (reason: "unreachable — all action types are handled")
+
+      The PR does NOT touch legacyChecksum (the author did not notice it).
+tags: [dead-code-elimination, refactoring, reducer, public-api, reachability]

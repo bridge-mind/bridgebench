@@ -1,0 +1,158 @@
+id: stateful-arena-allocator
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: First-Fit Arena Allocator Trace With Splitting, Coalescing, and Invalid Frees
+summary: >-
+  Replay an interleaved sequence of alloc/free operations against a 32-slot first-fit arena allocator
+  with block splitting and immediate-neighbor coalescing, then report every returned address, the
+  final free list, the one allocation that fails to fragmentation, every no-op free, and how a
+  proposed switch to best-fit would change the trace.
+prompt: |
+  SlabArena is a fixed 32-slot bump-and-free allocator. Every allocation and free in [op-log] is
+  applied in order against the rules in [allocator-spec] and the parameters in [arena-config]; the
+  requested size of each alloc is in [alloc-requests]. [triage-note] is an engineer's partial
+  reconstruction (treat every line as a claim to verify). [proposed-change] switches the placement
+  policy and is evaluated only in the deliverable that names it.
+
+  Addresses and lengths are in slots (0..31). The free list is the complete and exclusive record of
+  free space; a slot is either inside exactly one live allocation or inside exactly one free block.
+  Answer every deliverable by applying the rules step by step — the log is not annotated with results.
+
+  1. Allocation results. In operation order, give the address returned by every successful alloc
+     (G, P, H, Q, R, S, U, V) and name the single alloc that FAILS, with the reason.
+  2. Final free list. After the last operation, give the free list as an ordered list of
+     (start, length) blocks and the total number of free slots.
+  3. Coalescing accounting. For every free() that merged with a neighbor, name the neighbor block(s)
+     and the side (left/right) it merged on. Then name every free() call that was a NO-OP and state
+     why it changed nothing.
+  4. Fragmentation. At the moment the failing alloc is attempted, give the size of the largest
+     contiguous free block, name the two free blocks whose lengths sum to the requested size, name the
+     live block sitting between them, and state the general operation that would be required to satisfy
+     the request.
+  5. Best-fit counterfactual. Under [proposed-change] (first-fit -> best-fit), identify the FIRST
+     allocation whose returned address differs from the shipped first-fit run, give the address it
+     returns under each policy, and adjudicate the claim that best-fit would have let the failing alloc
+     succeed.
+  6. Live set. List the exact set of live allocations after the last operation as (address, length),
+     and confirm the arena is fully accounted for (live slots + free slots = 32).
+artifacts:
+  - id: allocator-spec
+    type: spec
+    label: SlabArena placement and free rules
+    content: |
+      ARENA
+        - A contiguous array of slots addressed 0..31. Block metadata lives out of band in an
+          allocation table; a header occupies no slots. A block is (start, length) in slots.
+        - The FREE LIST is the set of currently-free blocks, kept sorted by ascending start address.
+          It begins as a single block (0, 32).
+
+      ALLOC(n)  (n = requested length in slots, see [alloc-requests])
+        - FIRST-FIT: scan the free list from the lowest start address and pick the FIRST block whose
+          length >= n.
+        - Allocate from the LOW end of that block: the returned address is the block's start.
+            * if length == n: remove the block from the free list.
+            * if length  > n: shrink the block in place to (start + n, length - n). The allocated
+              region is (start, n); the remaining region (start + n, length - n) stays free. There is
+              no minimum split size (see [arena-config] split_min = 1).
+        - If NO free block has length >= n, the allocation FAILS: it returns no address and changes
+          nothing (the free list and every live block are untouched). Failure is NOT an error state;
+          later operations proceed normally.
+
+      FREE(addr)
+        - addr must be the START address of a currently-live allocation. Look up that allocation's
+          length in the allocation table, then insert (addr, length) back into the free list.
+        - COALESCE with immediate physical neighbors, on both sides, exactly once:
+            * LEFT merge: if some free block ends exactly at addr (its start + its length == addr),
+              merge the two into one block.
+            * RIGHT merge: if some free block starts exactly at addr + length, merge the two.
+          Coalescing joins only blocks that are physically adjacent AND both free. A live block
+          between two free regions blocks coalescing across it.
+        - INVALID FREE: if addr is NOT the start of a currently-live allocation — because it is an
+          interior slot of some allocation, a slot inside a free block, or a block that was already
+          freed — the call is a NO-OP: it returns an error and changes nothing. It never adds a block.
+
+      WORKED EXAMPLE (illustrative; not this task's log). Free list [(0, 6), (10, 4)], live block at
+      (6, 4). alloc(2): first-fit picks (0, 6), returns 0, shrinks it to (2, 4) -> free list
+      [(2, 4), (10, 4)]. Then free(6) (length 4): insert (6, 4); left neighbor (2, 4) ends at 6 ->
+      merge to (2, 8); right neighbor would start at 10 and (10, 4) does start at 10 -> merge to
+      (2, 12); result [(2, 12)]. free(6) again would now be an INVALID FREE (6 is no longer a live
+      start) and is a no-op.
+  - id: arena-config
+    type: config
+    label: Arena parameters
+    content: |
+      arena_slots: 32                 # addresses 0..31
+      placement_policy: first-fit     # see [proposed-change] for the best-fit alternative
+      split_min: 1                    # any leftover >= 1 slot stays as a free block; always split
+      coalesce: immediate-neighbors   # merge with a directly-adjacent free block on each side
+      header_slots: 0                 # metadata is out of band; blocks are exactly their length
+      free_list_order: ascending-start
+      note: |
+        placement_policy is the ONLY parameter [proposed-change] alters. Splitting, coalescing, and
+        the invalid-free rule are unchanged under any placement policy.
+  - id: op-log
+    type: log
+    label: Ordered operation stream (raw; results not annotated)
+    content: |
+      # Applied top to bottom. alloc results (addresses) are NOT shown — derive them.
+      # Each alloc binds its result to a name (G, P, H, ...); each free names an address.
+      seq | op            | binds
+      1   | alloc(8)      | G
+      2   | alloc(4)      | P
+      3   | alloc(4)      | H
+      4   | alloc(4)      | Q
+      5   | free(0)       | -     # frees whichever live block starts at 0
+      6   | free(12)      | -
+      7   | alloc(4)      | R
+      8   | alloc(4)      | S
+      9   | alloc(16)     | T
+      10  | free(8)       | -
+      11  | free(12)      | -
+      12  | alloc(8)      | U
+      13  | free(16)      | -
+      14  | alloc(16)     | V
+  - id: alloc-requests
+    type: table
+    label: Requested sizes per alloc
+    content: |
+      # The length (in slots) requested by each alloc op, so block sizes are unambiguous.
+      seq | name | requested_slots
+      1   | G    | 8
+      2   | P    | 4
+      3   | H    | 4
+      4   | Q    | 4
+      7   | R    | 4
+      8   | S    | 4
+      9   | T    | 16
+      12  | U    | 8
+      14  | V    | 16
+      note: free() ops take an address; the freed block's length is the length that address was
+      allocated with (look it up from the alloc that returned that address and is still live).
+  - id: triage-note
+    type: note
+    label: Engineer's partial reconstruction (unverified)
+    content: |
+      Notes jotted while eyeballing the log (NOT verified; each line is a claim to check):
+        - "free(12) at seq 6 merges the low free block with the one after it, so by seq 7 we have one
+          big block at the bottom of the arena." (Check whether a live block sits between them.)
+        - "R lands at address 12 — the allocator picks the tightest hole it can find."
+        - "The alloc(16) at seq 9 is fine: there are 16 free slots at that point, so it fits."
+        - "free(12) at seq 11 returns those 4 slots to the pool."
+        - "At the end there are still a couple of free slots left over somewhere."
+      Do not assume any of these is correct; several are wrong.
+  - id: proposed-change
+    type: diff
+    label: Proposed placement-policy change
+    content: |
+      --- arena-config (current)
+      +++ arena-config (proposed)
+      - placement_policy: first-fit
+      + placement_policy: best-fit     # "pick the smallest hole that fits to cut fragmentation"
+      Best-fit definition: among all free blocks with length >= n, choose the one with the SMALLEST
+      length; break ties by the lowest start address. Allocation, splitting, and coalescing are
+      otherwise identical to [allocator-spec].
+      Rationale attached to the change: "First-fit wastes big holes on small requests. Best-fit would
+      have packed things tighter and let the 16-slot allocation succeed."
+tags: [memory-allocator, free-list, first-fit, coalescing, fragmentation, stateful-execution]

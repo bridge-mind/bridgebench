@@ -1,0 +1,242 @@
+id: taint-config-proto-pollution
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Loomstate Settings-Merge Prototype-Pollution Taint Flow
+summary: >-
+  Trace five tenant-supplied objects through the Loomstate settings service and
+  classify each source-to-sink path. A key-guarded merge, an allowlisted assign, a
+  read-only echo, and an internal loopback-only merge surround one field that
+  reaches a recursive merge with no dangerous-key guard. Identify the single
+  reachable, unsafe prototype-pollution path — reachability reasoning only, no
+  payloads.
+prompt: |
+  You are reviewing "Loomstate", a per-tenant settings service. Tenants submit JSON
+  objects that the service merges into stored settings. The security concern is
+  PROTOTYPE POLLUTION: a merge that recursively follows a key named `__proto__`,
+  `constructor`, or `prototype` from attacker input can write onto Object.prototype
+  and affect every object in the process. merge-reference is authoritative for how
+  each merge helper behaves.
+
+  Five tenant-supplied inputs exist: preferences, flags, theme, profile, defaults.
+  For each numbered deliverable, answer using ONLY the supplied artifacts
+  (settings-controller, merge-lib, merge-reference, internal-admin, deploy-config,
+  merge-map, service-note). Cite the artifact id(s) you rely on for every claim. If
+  a field is not merged, not reachable, or not a sink in the artifacts, say so
+  explicitly and cite why.
+
+  This is an analysis task: give reachability reasoning only. Do NOT write a
+  pollution payload, a crafted key chain, or step-by-step exploitation. Naming the
+  dangerous key names as a mechanism is fine; a working attack object is not. The
+  verdict is the traced source-to-sink path and its classification.
+
+  Classify each input's source-to-sink path as exactly one of: reachable-unsafe /
+  key-guarded / allowlisted / not-a-sink / unreachable — and give the file-to-file
+  chain (which artifact carries the field to which merge helper, and what neutralizes
+  it, if anything).
+
+  1. Classify the path for `preferences`.
+  2. Classify the path for `flags`.
+  3. Classify the path for `theme`.
+  4. Classify the path for `profile`.
+  5. Classify the path for `defaults`.
+  6. Name the ONE input whose path is reachable AND unsafe, state the precondition
+     under which a tenant reaches the recursive merge, and state the process-wide
+     impact of polluting the prototype. Justify from the artifacts.
+  7. Give the minimal fix that closes exactly that one path (without changing the
+     other four classifications).
+artifacts:
+  - id: settings-controller
+    type: code
+    label: Loomstate public settings controller
+    content: |
+      // loomstate/settings.controller.ts — tenant-facing settings API.
+      import { deepMerge, safeMerge, pickAssign } from './merge-lib';
+      import { store } from './store';
+
+      const THEME_KEYS = ['mode', 'accent', 'density'] as const;
+
+      // PATCH /settings/preferences — merge the tenant's preferences object into
+      // their stored preferences.
+      export async function updatePreferences(req, res) {
+        const prefs = await store.getPrefs(req.tenantId);
+        // deepMerge recurses through every key of req.body.preferences.
+        const merged = deepMerge(prefs, req.body.preferences ?? {});
+        await store.putPrefs(req.tenantId, merged);
+        res.json({ ok: true });
+      }
+
+      // PUT /settings/flags — merge tenant feature flags.
+      export async function updateFlags(req, res) {
+        const flags = await store.getFlags(req.tenantId);
+        // safeMerge recurses too, but drops dangerous keys (see merge-reference).
+        const merged = safeMerge(flags, req.body.flags ?? {});
+        await store.putFlags(req.tenantId, merged);
+        res.json({ ok: true });
+      }
+
+      // PUT /settings/theme — apply theme settings.
+      export async function updateTheme(req, res) {
+        const theme = await store.getTheme(req.tenantId);
+        // pickAssign copies ONLY the allowlisted top-level keys (see merge-reference).
+        const next = pickAssign(theme, req.body.theme ?? {}, THEME_KEYS);
+        await store.putTheme(req.tenantId, next);
+        res.json({ ok: true });
+      }
+
+      // GET /settings — return the tenant's stored settings, including the profile
+      // object the tenant last submitted. profile is echoed back as JSON; it is not
+      // merged into anything on this path.
+      export async function getSettings(req, res) {
+        const all = await store.getAll(req.tenantId);
+        res.json({ profile: all.profile, flags: all.flags, theme: all.theme });
+      }
+  - id: merge-lib
+    type: code
+    label: Loomstate merge helpers (the three merge/assign primitives)
+    content: |
+      // loomstate/merge-lib.ts — the ONLY merge/assign primitives in the service.
+
+      // deepMerge: recursively copies every own key of `src` into `dst`, descending
+      // into nested objects. It does NOT skip any key name.
+      export function deepMerge(dst: any, src: any): any {
+        for (const k of Object.keys(src)) {
+          if (src[k] && typeof src[k] === 'object' && typeof dst[k] === 'object') {
+            deepMerge(dst[k], src[k]);      // descends on the SAME key, including __proto__
+          } else {
+            dst[k] = src[k];
+          }
+        }
+        return dst;
+      }
+
+      // safeMerge: identical recursion, but refuses the three prototype-reaching keys.
+      const BLOCKED = new Set(['__proto__', 'constructor', 'prototype']);
+      export function safeMerge(dst: any, src: any): any {
+        for (const k of Object.keys(src)) {
+          if (BLOCKED.has(k)) continue;     // dangerous keys never descended or assigned
+          if (src[k] && typeof src[k] === 'object' && typeof dst[k] === 'object') {
+            safeMerge(dst[k], src[k]);
+          } else {
+            dst[k] = src[k];
+          }
+        }
+        return dst;
+      }
+
+      // pickAssign: shallow copy of ONLY the allowlisted top-level keys. It never
+      // recurses and never assigns a key outside `allow`, so a nested or dangerous
+      // key in `src` is never followed.
+      export function pickAssign(dst: any, src: any, allow: readonly string[]): any {
+        for (const k of allow) {
+          if (Object.prototype.hasOwnProperty.call(src, k)) dst[k] = src[k];
+        }
+        return dst;
+      }
+  - id: merge-reference
+    type: spec
+    label: Loomstate merge-helper semantics (authoritative)
+    content: |
+      Authoritative semantics for the three merge helpers in merge-lib. This is the
+      complete and exhaustive description of how tenant keys are handled.
+
+      deepMerge(dst, src) — UNSAFE for untrusted src. It recurses into nested objects
+      on the SAME key. If src contains a key named `__proto__` (or `constructor` then
+      `prototype`) whose value is an object, the recursion descends into dst's
+      prototype and assigns onto it. Because objects share Object.prototype, a write
+      there is PROCESS-WIDE: it adds or overrides a property visible on EVERY object in
+      the running process (every config default, every options bag, every access-check
+      object that reads a missing property). deepMerge applies NO key filtering.
+
+      safeMerge(dst, src) — SAFE. Same recursion as deepMerge EXCEPT it skips the keys
+      `__proto__`, `constructor`, and `prototype` entirely (never descended, never
+      assigned). A tenant cannot reach the prototype through safeMerge.
+
+      pickAssign(dst, src, allow) — SAFE. Copies ONLY the top-level keys named in
+      `allow`, shallowly. It never recurses and never assigns any key outside `allow`,
+      so `__proto__`/`constructor`/`prototype` (and any nested structure) are never
+      followed. Prototype pollution is not reachable through pickAssign regardless of
+      what `src` contains.
+
+      Echoing a value into a JSON response (returning it to the caller) performs NO
+      assignment or merge; it is not a pollution sink.
+  - id: internal-admin
+    type: code
+    label: Loomstate internal defaults-reset (ops only)
+    content: |
+      // loomstate/internal-admin.ts — mounted on the INTERNAL loopback listener only
+      // (see deploy-config), NOT on the public router. `defaults` comes from an ops
+      // request body, not from tenant input.
+
+      import { deepMerge } from './merge-lib';
+      import { store } from './store';
+
+      // POST /internal/settings/reset-defaults — re-seed a tenant's defaults.
+      export async function resetDefaults(req, res) {
+        const base = await store.getDefaults(req.params.tenantId);
+        // deepMerge again (no guard), but the source is an ops-supplied `defaults`
+        // object on the internal listener — not reachable from tenant input.
+        const merged = deepMerge(base, req.body.defaults ?? {});
+        await store.putDefaults(req.params.tenantId, merged);
+        res.json({ ok: true });
+      }
+  - id: deploy-config
+    type: config
+    label: Loomstate listener bindings (production)
+    content: |
+      # loomstate/deploy-config — listeners (production).
+      # COMPLETE: these are all listeners the service runs. A route not mounted on a
+      # listener below is not served.
+      listeners:
+        public:                          # tenant-facing API, exposed to the internet
+          bind: 0.0.0.0:8080
+          routes:
+            - PATCH /settings/preferences
+            - PUT   /settings/flags
+            - PUT   /settings/theme
+            - GET   /settings
+        internal:                        # ops-only; NOT routable from the internet
+          bind: 127.0.0.1:9010           # loopback; reachable only from the host / ops VPN
+          routes:
+            - POST /internal/settings/reset-defaults
+  - id: merge-map
+    type: table
+    label: Loomstate merge map (COMPLETE — every place a tenant field reaches an assign/merge)
+    content: |
+      Loomstate merge map — COMPLETE. Every input field, the listener its route is on,
+      the merge/assign helper it reaches (if any), and whether that helper guards the
+      dangerous keys. A field NOT in this table reaches no merge and no assignment.
+
+      input        | route                              | listener | helper reached | dangerous-key guard?
+      -------------|------------------------------------|----------|----------------|---------------------------
+      preferences  | PATCH /settings/preferences        | public   | deepMerge      | NO (no key filter)
+      flags        | PUT   /settings/flags              | public   | safeMerge      | YES (skips __proto__ etc.)
+      theme        | PUT   /settings/theme              | public   | pickAssign     | YES (allowlist, no recurse)
+      profile      | GET   /settings                    | public   | (none)         | n/a (echoed as JSON, not merged)
+      defaults     | POST  /internal/settings/reset-... | internal | deepMerge      | NO — but internal listener only
+  - id: service-note
+    type: note
+    label: Loomstate settings design note (current)
+    content: |
+      Loomstate settings — design note (current).
+
+      Invariant we intend to hold: any tenant-supplied object that is MERGED into
+      stored settings must go through a helper that guards the prototype-reaching keys
+      (safeMerge or pickAssign). deepMerge is for TRUSTED, internal sources only. (This
+      note states the intended invariant; it does not certify every call obeys it.)
+
+      The five tenant-supplied inputs are exactly: preferences, flags, theme (merged
+      or assigned into settings), profile (stored and echoed back, never merged on the
+      read path), and defaults (ops-only). merge-map is the complete list of where each
+      one lands; a field absent from it reaches no merge.
+
+      The internal defaults-reset route is mounted only on the internal loopback
+      listener (deploy-config listeners.internal, bind 127.0.0.1:9010) and takes its
+      `defaults` object from an ops request, not from tenant input; it is not reachable
+      from the public API even though it uses deepMerge.
+
+      This note, the code files, merge-reference, deploy-config, and merge-map are the
+      COMPLETE settings-merge surface. There is no other merge helper and no other
+      place a tenant field reaches an assignment.
+tags: [security, taint-flow, prototype-pollution, object-merge, reachability]

@@ -31,6 +31,10 @@ export const ModelCompletionSchema = z.object({
   latencyMs: z.number().finite().nonnegative(),
   finishReason: z.string(),
   attempts: z.number().int().positive().optional(),
+  /** Time from request start to the first non-empty content delta (speed arena metric). */
+  ttftMs: z.number().finite().nonnegative().optional(),
+  /** Request start to stream completion for the successful attempt (speed arena metric). */
+  totalMs: z.number().finite().nonnegative().optional(),
 });
 export type ModelCompletion = z.infer<typeof ModelCompletionSchema>;
 

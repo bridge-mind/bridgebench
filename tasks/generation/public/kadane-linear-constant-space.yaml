@@ -1,0 +1,175 @@
+id: kadane-linear-constant-space
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: Which maxSubarray Candidate Meets the O(n) Time, O(1) Space, and Purity Constraints
+summary: A spec requires maxSubarray(nums) to compute the maximum contiguous-subarray sum under four declared NON-functional constraints — single linear O(n) scan, O(1) auxiliary space, purity/no-input-mutation, and the correctness contract. All five candidates compute the correct maximum on the vector, so the only axis is the constraints. One decoy allocates an O(n) prefix array, one uses a nested O(n^2) loop, one mutates the input. Classify each conforms/violates and cite the exact violating construct.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (spec, correctness-vector,
+  candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite
+  the artifact id(s) for every claim. Do not execute anything — reason about each
+  candidate's structure using the definitions in `reading-guide`.
+
+  All five candidates return the CORRECT maximum on every correctness-vector row (verify
+  by reading if you wish); the ONLY axis that separates them is the four declared
+  constraints C1–C4 in `spec`. Verdict vocabulary: a candidate CONFORMS if it satisfies
+  ALL FOUR constraints; it VIOLATES if it breaks any one of them.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or
+     violates. For every violator, name the exact constraint number (C1, C2, or C3) it
+     breaks and quote the exact construct responsible.
+
+  2. State the complete set of conforming candidates. candidate-e uses a different loop
+     shape than candidate-a — confirm it still satisfies every constraint.
+
+  3. candidate-b returns the right answer. Quote the construct that makes its auxiliary
+     space O(n) rather than O(1), and explain why it fails C2 even though it is a single
+     pass.
+
+  4. candidate-d returns the right answer. Name the single constraint it breaks and
+     state the exact caller-visible consequence of running it.
+
+  5. A reviewer approves candidate-c, arguing "it's fine, it only uses two variables."
+     Rebut this using C1 and the exact structure of candidate-c.
+artifacts:
+  - id: spec
+    type: spec
+    label: maxSubarray specification (function + non-functional constraints)
+    content: |
+      FUNCTION maxSubarray(nums)
+
+      Purpose: return the largest sum obtainable from a NON-EMPTY contiguous subarray of
+      `nums`. `nums` is a non-empty array of numbers that may include negatives; when all
+      values are negative the answer is the greatest single element.
+
+      This function ships on a hot path. It MUST satisfy ALL of the following declared
+      constraints. Each is a hard requirement, not a preference:
+
+        C1  TIME: a single linear scan of `nums`, i.e. O(n) in nums.length. Exactly one
+            pass over the array. No nested iteration over `nums`, and no sort.
+        C2  SPACE: O(1) auxiliary space — a constant number of scalar variables. The
+            function MUST NOT allocate any array, Set, Map, or object whose size grows
+            with nums.length.
+        C3  PURITY: pure and deterministic. It reads only `nums` and returns a number. It
+            MUST NOT mutate `nums` (no assignment into nums[i]), MUST NOT use Math.random,
+            Date.now, or any I/O, and MUST return the same result for the same input on
+            every call.
+        C4  CORRECTNESS: returns the maximum non-empty contiguous-subarray sum for the
+            declared input domain (see correctness-vector).
+
+      A candidate CONFORMS iff it satisfies C1 AND C2 AND C3 AND C4. Breaking any single
+      constraint means it VIOLATES.
+  - id: correctness-vector
+    type: table
+    label: correctness vector (all candidates return these)
+    content: |
+      These rows fix the correct output (constraint C4). Every one of the five candidates
+      returns the value in the `max` column for the matching `nums`; you can confirm by
+      tracing, but the point of this task is the C1–C3 constraints, not C4.
+
+      nums                                   max   why
+      [-2,1,-3,4,-1,2,1,-5,4]                 6     subarray [4,-1,2,1] sums to 6
+      [-3,-1,-2]                              -1    all negative -> greatest single element
+      [5]                                     5     single element
+      [1,2,3]                                 6     the whole array
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function maxSubarray(nums) {
+        let best = nums[0];
+        let cur = nums[0];
+        for (let i = 1; i < nums.length; i++) {
+          cur = Math.max(nums[i], cur + nums[i]);
+          best = Math.max(best, cur);
+        }
+        return best;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function maxSubarray(nums) {
+        const pre = [0];
+        let minPre = 0, best = -Infinity;
+        for (let i = 0; i < nums.length; i++) {
+          pre.push(pre[i] + nums[i]);
+          best = Math.max(best, pre[i + 1] - minPre);
+          minPre = Math.min(minPre, pre[i + 1]);
+        }
+        return best;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function maxSubarray(nums) {
+        let best = -Infinity;
+        for (let i = 0; i < nums.length; i++) {
+          let sum = 0;
+          for (let j = i; j < nums.length; j++) {
+            sum += nums[j];
+            if (sum > best) best = sum;
+          }
+        }
+        return best;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function maxSubarray(nums) {
+        let best = nums[0];
+        for (let i = 1; i < nums.length; i++) {
+          nums[i] = Math.max(nums[i], nums[i] + nums[i - 1]);
+          if (nums[i] > best) best = nums[i];
+        }
+        return best;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function maxSubarray(nums) {
+        let best = -Infinity;
+        let run = 0;
+        for (let i = 0; i < nums.length; i++) {
+          run = run + nums[i];
+          if (run > best) best = run;
+          if (run < 0) run = 0;
+        }
+        return best;
+      }
+  - id: reading-guide
+    type: note
+    label: how to read the constraints (definitions + scope)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of submissions. Every one of
+      them returns the correct maximum on every correctness-vector row, so C4 holds for
+      all five. Judge them ONLY on whether they also satisfy C1, C2, and C3.
+
+      How to read each constraint from the code (no execution needed):
+        C1 (O(n), single scan): a single `for` loop over `nums` doing O(1) work per
+           element is O(n) and satisfies C1. A loop NESTED inside another loop, where
+           each ranges up to nums.length, performs about n*n steps — that is O(n^2) and
+           does NOT satisfy the single linear-scan requirement. A call to .sort() is also
+           not O(n).
+        C2 (O(1) auxiliary space): a fixed number of scalar variables (numbers) is O(1).
+           An array/Set/Map/object that receives one entry PER element (e.g. via .push in
+           the loop) grows to size proportional to nums.length — that is O(n) auxiliary
+           space and does NOT satisfy C2. Reusing the input array as storage does not
+           count as new allocation (that is a C3 concern, not C2).
+        C3 (purity / no mutation): the function must read `nums` and return a number
+           without writing back into it. An assignment of the form `nums[i] = ...` mutates
+           the caller's array and breaks C3, regardless of whether the returned number is
+           correct. Use of Math.random, Date.now, or I/O also breaks C3.
+
+      A candidate that produces the correct number still VIOLATES if it breaks C1, C2, or
+      C3. Cite the exact line/construct when you assign a violation.
+tags: [algorithm, complexity, purity, constraint-satisfaction, generation]

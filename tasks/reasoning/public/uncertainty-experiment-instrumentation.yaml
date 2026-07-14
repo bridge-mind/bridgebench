@@ -1,0 +1,153 @@
+id: uncertainty-experiment-instrumentation
+version: 1.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: An A/B Conversion Drop That Is a Client-Side Measurement Artifact, Not a Worse Redesign
+summary: >-
+  A checkout redesign's treatment arm shows a large conversion drop on the analytics dashboard and the
+  team wants to roll it back, but several signals are unreliable and the server-side order data tells a
+  different story. Rank the hypotheses, identify the untrustworthy signals, commit to the one
+  best-supported conclusion, rule out a real regression and the decoys, and give a proportionate plan
+  plus the decisive measurement.
+prompt: |
+  Experiment checkout-flow-v2 splits traffic 50/50 between the current checkout (control) and a
+  redesign (treatment). The analytics funnel shows treatment converting far below control, and on-call
+  wants to roll the redesign back. Some evidence is measured in ways that make it misleading, but the
+  artifacts still support one best-supported, non-regression conclusion.
+
+  This is not a "cannot be determined" task, and the redesign is not guilty by default: weigh the
+  evidence and commit to the mechanism the artifacts most support, then respond proportionately.
+
+  Deliverables (answer every one, and show the reasoning that supports it):
+
+  1. Rank these hypotheses from best-supported to least-supported, weighing specific evidence for and
+     against each: (a) a client-side measurement artifact, (b) a genuine UX regression in the redesign,
+     (c) seasonality or time-of-day, (d) sample-ratio mismatch / broken randomization.
+
+  2. Identify which signals are unreliable and give the concrete artifact-grounded reason for each (for
+     example a client-emitted event blocked for a subset, or a dashboard built on that event). Say what
+     each unreliable signal can and cannot support.
+
+  3. State the single best-supported conclusion and its mechanism, and explain specifically why the
+     measured drop is about 35% relative rather than 0% or 100%.
+
+  4. Explain why the redesign is NOT the cause, and why seasonality and sample-ratio mismatch are also
+     ruled out. Cite the single strongest piece of evidence that discriminates among these.
+
+  5. Give proportionate remediation priorities and state explicitly what NOT to do. Do not roll back a
+     feature on measurement evidence alone, and do not disable the experiment without cause.
+
+  6. Give the one additional measurement that would make the conclusion decisive, and state which
+     result confirms it and which refutes it.
+artifacts:
+  - id: incident-summary
+    type: note
+    label: Incident summary and on-call theories
+    content: |
+      P2 opened on checkout-flow-v2. The growth dashboard shows treatment (redesign) converting at
+      4.1% vs control at 6.3% since the experiment ramped to 50/50 this morning — a ~35% relative drop.
+      All hosts hold NTP sync (offsets < 30 ms).
+
+      On-call's proposed action: "The redesign is clearly worse. Roll back checkout-flow-v2 to control
+      and call the experiment a loss." Theories on the bridge (do not assume any is correct):
+        - Engineer A: "The new checkout confuses users; conversion is down. Ship control."
+        - Engineer B: "Mornings skew differently; it's just time-of-day noise."
+        - Engineer C: "Maybe assignment is broken and treatment is getting worse traffic."
+      Decide from the artifacts whether the redesign is actually worse before rolling anything back.
+  - id: experiment-config
+    type: config
+    label: checkout-flow-v2 experiment configuration
+    content: |
+      experiment: checkout-flow-v2
+      assignment: deterministic hash(userId) -> {control, treatment}, target 50/50
+      arms_run: concurrently, same time window (both arms live 09:00-now today)
+      primary_metric: purchase_completed        # the conversion event counted by the dashboard
+      metric_source:
+        control:   purchase_completed emitted SERVER-SIDE by the backend after payment capture
+        treatment: purchase_completed emitted CLIENT-SIDE by the analytics SDK on the confirmation
+                   screen (the redesign moved this emission into the browser; see event-pipeline)
+      note: the two arms count the SAME conversion via DIFFERENT emission paths. This asymmetry was
+      introduced by the redesign and is not part of the experiment design.
+  - id: funnel-dashboard
+    type: table
+    label: Analytics funnel by arm (client analytics; primary conversion is a client event for treatment)
+    content: |
+      # Per-arm funnel today (sessions in thousands). Percentages are of that arm's sessions.
+      step                | control_pct | treatment_pct
+      session_start       | 100.0       | 100.0
+      begin_checkout      | 41.0        | 41.3
+      add_payment_info    | 22.4        | 22.1
+      purchase_completed  | 6.3         | 4.1          <- the alarming divergence
+      # Every funnel step up to add_payment_info is within noise across arms; ONLY the terminal
+      # purchase_completed diverges. For treatment, purchase_completed is the client-emitted event
+      # (experiment-config), so this row's treatment value depends on the client beacon being delivered.
+  - id: server-orders
+    type: table
+    label: Paid orders from the orders database (authoritative, unsampled, server-side)
+    content: |
+      # Source of truth for revenue: rows in the orders table with status=paid, counted server-side,
+      # unsampled. Independent of any client analytics beacon. Percentages are of that arm's sessions.
+      arm       | sessions_k | paid_orders | paid_rate_pct
+      control   | 50.1       | 3106        | 6.2
+      treatment | 49.9       | 3044        | 6.1
+      # Actual paid conversion is essentially EQUAL across arms (6.2% vs 6.1%). The money says the two
+      # checkouts convert the same; only the analytics-dashboard number for treatment is low.
+  - id: event-pipeline
+    type: spec
+    label: How purchase_completed is emitted per arm
+    content: |
+      control: after payment capture, the backend order service emits purchase_completed to the
+      analytics collector over a server-to-server call. No browser involvement; nothing on the client
+      can block it.
+
+      treatment (redesign): the confirmation screen calls the analytics vendor SDK in the browser,
+      which sends a purchase_completed beacon to the vendor endpoint https://collect.metrix.example.
+      If that browser request is blocked (by Content-Security-Policy, a consent manager, or tracking
+      protection), the beacon never leaves the browser and the conversion is NOT counted — even though
+      the order was placed and captured server-side. The redesign moved this emission from the backend
+      to the browser; that is the only measurement change it introduced.
+
+      This is the complete description of how the conversion event is produced in each arm. There is no
+      other counter feeding the dashboard's purchase_completed metric.
+  - id: csp-change
+    type: config
+    label: Checkout page Content-Security-Policy and consent defaults (recent change)
+    content: |
+      # edge/csp.conf  — tightened this morning alongside the ramp
+      Content-Security-Policy:
+        connect-src 'self' https://pay.acme.example;    # collect.metrix.example was REMOVED today
+      # Effect: browsers that ENFORCE CSP block the treatment purchase_completed beacon to
+      # collect.metrix.example. Additionally the consent manager now DEFAULTS analytics to "denied"
+      # until the user accepts, which suppresses the same beacon for not-yet-consented sessions
+      # (predominantly EU). Control's server-side emission is unaffected by either.
+      # Browsers with strict tracking protection (Safari ITP, Firefox ETP) also drop the beacon.
+  - id: browser-breakdown
+    type: table
+    label: Treatment arm — measured vs server-side conversion by segment
+    content: |
+      # Treatment sessions only, split by browser/region. "measured" = client purchase_completed on the
+      # dashboard; "server" = paid orders from the orders DB for the same sessions.
+      segment        | share_of_treatment | measured_pct | server_pct
+      Chrome / US     | 34%                | 6.1          | 6.2
+      Safari / US     | 21%                | 3.1          | 6.1
+      Chrome / EU     | 26%                | 4.2          | 6.0
+      Firefox / EU    | 19%                | 2.4          | 6.1
+      # In the ONE segment where the beacon is delivered (Chrome/US, CSP tolerant, consented), treatment
+      # measured (6.1) matches server (6.2) and control. In every segment where CSP/consent/tracking-
+      # protection blocks the beacon, measured falls far below server, while server stays ~6.0-6.2
+      # everywhere. Real conversion is uniform across segments; only the MEASURED value tracks whether
+      # the beacon got through.
+  - id: randomization-note
+    type: note
+    label: Assignment, timing, and error checks
+    content: |
+      - Sample ratio: control got 50.1% of sessions, treatment 49.9% (server-orders sessions_k). This
+        is within the expected 50/50; there is no sample-ratio mismatch and assignment is not broken.
+      - Timing: both arms ran concurrently in the same window today (experiment-config), so any
+        time-of-day or seasonal effect hits both arms equally and cannot explain an arm difference.
+      - Payment errors: checkout-api returned 3 HTTP 500s in the window, split ~evenly across arms
+        (2 control, 1 treatment), matching the pre-experiment baseline. Not an arm-specific failure.
+      - The traffic mix (browser/region shares) is the same across arms; treatment is not receiving
+        "worse" traffic.
+tags: [experimentation, ab-testing, instrumentation, csp, telemetry, uncertainty]

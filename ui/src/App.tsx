@@ -428,7 +428,11 @@ function HowItWorks({
             <p>
               {category === 'hallucination'
                 ? 'Both competitors face the same trap-laden task — false premises, missing evidence, fabrication bait. Neither knows its opponent.'
-                : 'Both competitors answer the same fully determinable reasoning task. Neither knows its opponent.'}
+                : category === 'security'
+                  ? 'Both competitors analyze the same code for one real vulnerability hidden among benign look-alikes, false positives, and shallow patches. Neither knows its opponent.'
+                  : category === 'bullshit'
+                    ? 'Both competitors face the same task seeded with confident nonsense — fabricated concepts, impossible quantities, loaded assumptions — mixed with legitimate deliverables. Neither knows its opponent.'
+                    : 'Both competitors answer the same fully determinable reasoning task. Neither knows its opponent.'}
             </p>
           </div>
         </li>
