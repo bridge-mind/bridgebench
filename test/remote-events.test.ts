@@ -110,12 +110,7 @@ describe('RemoteArenaEventSink', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const cancelRequests = vi.fn();
-    const sink = new RemoteArenaEventSink(
-      config,
-      'run-fixture',
-      () => {},
-      cancelRequests,
-    );
+    const sink = new RemoteArenaEventSink(config, 'run-fixture', () => {}, cancelRequests);
     sink.sink(makeEvent('delta-1', 0));
     await vi.advanceTimersByTimeAsync(1_000);
     sink.sink(makeEvent('delta-2', 1));
@@ -136,12 +131,7 @@ describe('RemoteArenaEventSink', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const cancelRequests = vi.fn();
-    const sink = new RemoteArenaEventSink(
-      config,
-      'run-fixture',
-      () => {},
-      cancelRequests,
-    );
+    const sink = new RemoteArenaEventSink(config, 'run-fixture', () => {}, cancelRequests);
     sink.sink(makeEvent('delta-1', 0));
     await sink.close();
     expect(cancelRequests).not.toHaveBeenCalled();
