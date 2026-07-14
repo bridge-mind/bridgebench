@@ -27,6 +27,7 @@ function makeEvent(id: string, offsetMs: number): ArenaEvent {
 
 describe('RemoteArenaEventSink', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -48,5 +49,66 @@ describe('RemoteArenaEventSink', () => {
     expect(init.method).toBe('POST');
     const body = JSON.parse(String(init.body)) as { events: ArenaEvent[] };
     expect(body.events).toHaveLength(2);
+  });
+
+  it('requeues a failed flush and delivers the events in order on retry', async () => {
+    vi.useFakeTimers();
+    const delivered: string[] = [];
+    let failNext = true;
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('socket hang up');
+      }
+      const body = JSON.parse(String(init.body)) as { events: ArenaEvent[] };
+      delivered.push(...body.events.map((event) => event.id));
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            imported: body.events.length,
+            skipped: 0,
+            cursor: 1,
+          }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const failures: boolean[] = [];
+    const sink = new RemoteArenaEventSink(config, 'run-fixture', (_m, fatal) =>
+      failures.push(fatal),
+    );
+    sink.sink(makeEvent('delta-1', 0));
+    sink.sink(makeEvent('delta-2', 1));
+
+    // First flush fails, retry fires after backoff and succeeds.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const closing = sink.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await closing;
+
+    expect(delivered).toEqual(['delta-1', 'delta-2']);
+    expect(failures).toEqual([false]);
+  });
+
+  it('close surrenders the mirror instead of throwing when the API stays down', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const failures: boolean[] = [];
+    const sink = new RemoteArenaEventSink(config, 'run-fixture', (_m, fatal) =>
+      failures.push(fatal),
+    );
+    sink.sink(makeEvent('delta-1', 0));
+
+    const closing = sink.close();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(closing).resolves.toBeUndefined();
+
+    // The final attempt reports a fatal degradation, not a crash.
+    expect(failures.at(-1)).toBe(true);
+    // Once degraded, new events are dropped silently.
+    sink.sink(makeEvent('delta-2', 1));
   });
 });

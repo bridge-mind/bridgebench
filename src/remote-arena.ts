@@ -173,7 +173,9 @@ export async function runRemoteArena(
 
   const resultsRoot = remoteResultsRoot(config.category, mock);
   const store = new ArenaStore(remoteStoreConfig(config.category, resultsRoot));
-  const eventSink = new RemoteArenaEventSink(apiConfig, runKey);
+  const eventSink = new RemoteArenaEventSink(apiConfig, runKey, (message, fatal) => {
+    logger.warn(fatal ? 'events.mirror-degraded' : 'events.flush-retry', { message });
+  });
   const gateway: OpenRouterGateway = mock
     ? new MockOpenRouterGateway({ judgeWinner: 'MODEL_A' })
     : new OpenRouterClient(process.env.OPENROUTER_API_KEY ?? '', logger);
