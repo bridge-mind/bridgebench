@@ -37,7 +37,11 @@ Every competitor and judge request uses OpenRouter with exact, pinned slugs;
 behavior through one aggregator's routing rather than direct provider APIs.
 
 The canonical roster and request policies live in
-[`src/models.ts`](../src/models.ts). Judges are never eligible competitors.
+[`src/models.ts`](../src/models.ts). A model may hold both roles: a
+dual-role entry (competitor with a `judgeRequest` policy) competes in the
+arena and keeps its seat on the judge panel, judging its own matches under
+the same blind protocol as any other match (anonymized sides, identity
+redaction, per-judge permutation). Grok 4.5 is the first dual-role model.
 OpenRouter generation records can be retrieved later with
 `npm run arena -- generation <id>` for independent cost, token, and routing
 checks.

@@ -6,7 +6,7 @@ import {
   throwIfCancelled,
 } from './cancellation.js';
 import { noopLogger, type ArenaLogger } from './logger.js';
-import { getModel, listModels } from './models.js';
+import { getJudgeModel, listModels } from './models.js';
 import { parseJudgeVerdict, sanitizeError } from './openrouter.js';
 import type {
   BenchmarkCategory,
@@ -315,7 +315,9 @@ export class JudgePanel {
       input.responseA,
       input.responseB,
     );
-    const judge = getModel(judgeId);
+    // Judge-view resolution: a dual-role competitor judges with its judge
+    // request policy, not its competitor one.
+    const judge = getJudgeModel(judgeId);
     let accumulated: ModelCompletion | null = null;
 
     try {

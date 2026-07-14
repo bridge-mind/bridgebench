@@ -34,7 +34,7 @@ A **run** is deterministic from a versioned manifest:
 
 ## Blind three-judge panel
 
-Judged matches go to a fixed, cross-vendor panel of three model judges. Independence is enforced structurally:
+Judged matches go to a fixed, cross-vendor panel of three model judges. A panel judge may also compete in the arena (a dual-role model): its own matches are judged by the same fixed panel under the full blind protocol below, so it votes on its own anonymized answer exactly as it votes on any other. The redaction and permutation controls bound — but cannot fully eliminate — self-preference on those matches; the match record makes every such vote auditable. Independence is enforced structurally:
 
 1. **Anonymization.** Before an answer crosses into a judge prompt, explicit competitor identity terms (IDs, canonical slugs, display names, vendors) and family names (Claude, GPT, Kimi, Opus, …) are redacted (`src/judges.ts`). Judges see only `Model A` and `Model B`.
 2. **Per-judge order permutation.** Whether A/B are swapped for a given judge is a deterministic hash of `matchId|judgeId`, so position bias can't systematically favor one side and the permutation is replayable.

@@ -1,4 +1,4 @@
-import type { ModelRegistryEntry } from './types.js';
+import type { ModelRegistryEntry, ModelRequestPolicy } from './types.js';
 
 // Expert-depth tasks: multi-part deliverables plus hidden reasoning need real
 // headroom, and judges now digest ~10k-token payloads before writing verdicts.
@@ -100,14 +100,18 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     enabled: true,
     request: judgeRequest,
   },
+  // Dual role: competes in the arena AND keeps its seat on the judge panel.
+  // Judge-side calls use `judgeRequest`; its own matches are judged under the
+  // same blind protocol as every other match.
   'x-ai/grok-4.5': {
     id: 'x-ai/grok-4.5',
     canonicalSlug: 'x-ai/grok-4.5-20260708',
     displayName: 'Grok 4.5',
     vendor: 'x-ai',
-    role: 'judge',
+    role: 'competitor',
     enabled: true,
-    request: judgeRequest,
+    request: competitorRequest,
+    judgeRequest,
   },
   'z-ai/glm-5.2': {
     id: 'z-ai/glm-5.2',
@@ -125,10 +129,36 @@ export const SOL_FABLE_PILOT_COMPETITOR_IDS = [
   'anthropic/claude-fable-5',
 ] as const;
 
+/**
+ * A model sits on the judge panel if judging is its primary role or if it is
+ * a dual-role competitor carrying a `judgeRequest` policy.
+ */
+function sitsOnJudgePanel(model: ModelRegistryEntry): boolean {
+  return model.role === 'judge' || model.judgeRequest !== undefined;
+}
+
+/**
+ * The entry as it acts on the judge panel: role `judge`, judge request
+ * policy. Pure-judge entries pass through unchanged.
+ */
+function asJudge(model: ModelRegistryEntry): ModelRegistryEntry {
+  if (model.role === 'judge') return model;
+  return { ...model, role: 'judge', request: model.judgeRequest as ModelRequestPolicy };
+}
+
 export function listModels(role?: ModelRegistryEntry['role']): ModelRegistryEntry[] {
-  return Object.values(MODEL_REGISTRY).filter(
-    (model) => model.enabled && (!role || model.role === role),
-  );
+  const enabled = Object.values(MODEL_REGISTRY).filter((model) => model.enabled);
+  if (role === 'judge') return enabled.filter(sitsOnJudgePanel).map(asJudge);
+  return enabled.filter((model) => !role || model.role === role);
+}
+
+/** Resolve a judge-panel member as its acting-judge view, or throw. */
+export function getJudgeModel(modelId: string): ModelRegistryEntry {
+  const model = MODEL_REGISTRY[modelId];
+  if (!model || !model.enabled || !sitsOnJudgePanel(model)) {
+    throw new Error(`Unknown or disabled judge model: ${modelId}`);
+  }
+  return asJudge(model);
 }
 
 /**

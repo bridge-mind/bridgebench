@@ -3,7 +3,11 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { ArenaRunner } from '../src/arena.js';
-import { MODEL_REGISTRY, SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
+import {
+  MODEL_REGISTRY,
+  SOL_FABLE_PILOT_COMPETITOR_IDS,
+  listModels,
+} from '../src/models.js';
 import type {
   ArenaEvent,
   ArenaRunConfig,
@@ -165,11 +169,15 @@ describe('arena cancellation', () => {
       expect(result).toMatchObject({ completed: 0, cancelled: true, stoppedForBudget: false });
       expect(gateway.completionCalls).toBe(0);
       expect(gateway.validationCalls).toBe(5);
-      expect(
-        gateway.validatedModelIds.filter(
-          (modelId) => MODEL_REGISTRY[modelId]?.role === 'competitor',
-        ),
-      ).toEqual([...SOL_FABLE_PILOT_COMPETITOR_IDS]);
+      // Registry role no longer discriminates run participants — a dual-role
+      // competitor (Grok 4.5) sits on the judge panel. Pin the full validated
+      // set instead: the two scheduled competitors plus the judge panel.
+      expect([...gateway.validatedModelIds].sort()).toEqual(
+        [
+          ...SOL_FABLE_PILOT_COMPETITOR_IDS,
+          ...listModels('judge').map((judge) => judge.id),
+        ].sort(),
+      );
       expect(store.readAll()).toEqual([]);
       expectCancellationLifecycle(events);
       expect(events.some((event) => event.type === 'run.completed')).toBe(false);

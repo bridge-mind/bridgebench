@@ -19,6 +19,14 @@ export interface ModelRegistryEntry {
   role: ModelRole;
   enabled: boolean;
   request: ModelRequestPolicy;
+  /**
+   * Set on a competitor that also sits on the judge panel (dual role).
+   * Judge-side calls use this policy instead of `request`. A dual-role
+   * model judges its own matches under the same blind protocol as any
+   * other judge: anonymized sides, identity redaction, per-judge
+   * permutation.
+   */
+  judgeRequest?: ModelRequestPolicy;
 }
 
 export const ModelCompletionSchema = z.object({
