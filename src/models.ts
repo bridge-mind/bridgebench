@@ -100,9 +100,9 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     enabled: true,
     request: judgeRequest,
   },
-  // Dual role: competes in the arena AND keeps its seat on the judge panel.
-  // Judge-side calls use `judgeRequest`; its own matches are judged under the
-  // same blind protocol as every other match.
+  // Dual role (Grok 4.5, GLM 5.2): they compete in the arena AND keep their
+  // seats on the judge panel. Judge-side calls use `judgeRequest`; their own
+  // matches are judged under the same blind protocol as every other match.
   'x-ai/grok-4.5': {
     id: 'x-ai/grok-4.5',
     canonicalSlug: 'x-ai/grok-4.5-20260708',
@@ -118,9 +118,10 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     canonicalSlug: 'z-ai/glm-5.2-20260616',
     displayName: 'GLM 5.2',
     vendor: 'z-ai',
-    role: 'judge',
+    role: 'competitor',
     enabled: true,
-    request: judgeRequest,
+    request: competitorRequest,
+    judgeRequest,
   },
 };
 
