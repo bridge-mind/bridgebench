@@ -7,6 +7,8 @@ const AppendEventsResponseSchema = z.object({
   imported: z.number().int().nonnegative(),
   skipped: z.number().int().nonnegative(),
   cursor: z.number().int().nonnegative(),
+  // Older APIs omit this; absence means "not cancelled".
+  cancelRequested: z.boolean().optional(),
 });
 
 const MAX_BATCH_SIZE = 50;
@@ -26,11 +28,19 @@ export class RemoteArenaEventSink {
   private closed = false;
   private consecutiveFailures = 0;
   private degraded = false;
+  private cancelNotified = false;
 
   constructor(
     private readonly config: ApiConfig,
     private readonly runKey: string,
     private readonly onFlushError: FlushErrorHandler = () => {},
+    /**
+     * Fired once when an append response reports `cancelRequested` — an
+     * admin cancelled the run on the API. The event stream doubles as the
+     * cancel back-channel because it is the only request a runner repeats
+     * for the whole life of a run.
+     */
+    private readonly onCancelRequested: () => void = () => {},
   ) {}
 
   readonly sink = (event: ArenaEvent): void => {
@@ -81,12 +91,16 @@ export class RemoteArenaEventSink {
     const batches = chunk(pending, batchSize);
     for (let index = 0; index < batches.length; index += 1) {
       try {
-        await postJson(
+        const response = await postJson(
           this.config,
           `/arena/runs/${encodeURIComponent(this.runKey)}/events`,
           { events: batches[index] },
           AppendEventsResponseSchema,
         );
+        if (response.cancelRequested && !this.cancelNotified) {
+          this.cancelNotified = true;
+          this.onCancelRequested();
+        }
       } catch (error) {
         // Requeue every unsent event, in order, ahead of anything that
         // arrived while this flush was in flight.

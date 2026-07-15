@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +9,7 @@ import {
   createRemoteRun,
   fetchExecutionPack,
   remoteResultsRoot,
+  runRemoteArena,
   shouldPublishRemoteMatches,
 } from '../src/remote-arena.js';
 import { SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
@@ -123,6 +126,66 @@ describe('remote speed run', () => {
     // The whole point: a speed manifest carries no judges and no private hashes.
     expect(postedBody!.manifest.judges).toEqual([]);
     expect(postedBody!.manifest.tasks.every((task) => task.privateHash === null)).toBe(true);
+  });
+});
+
+describe('remote run failure reporting', () => {
+  it('reports run.failed to the API when the run dies mid-flight', async () => {
+    const resultsDir = mkdtempSync(path.join(os.tmpdir(), 'bridgebench-test-'));
+    const previousResultsDir = process.env.BRIDGEBENCH_RESULTS_DIR;
+    process.env.BRIDGEBENCH_RESULTS_DIR = resultsDir;
+    const appendedEvents: Array<{ type: string; data: { error?: string } }> = [];
+    // The pack serves speed tasks to a reasoning run, so the engine accepts
+    // the pack and creates the run, then dies inside ArenaRunner.run on the
+    // category mismatch — a failure after the run row exists, exactly the
+    // case that must be reported so the arena does not stay live forever.
+    const pack = speedPack();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const target = String(url);
+        if (init?.method === 'POST' && target.endsWith('/events')) {
+          const body = JSON.parse(init.body as string) as {
+            events: Array<{ type: string; data: { error?: string } }>;
+          };
+          appendedEvents.push(...body.events);
+          return jsonResponse({
+            imported: body.events.length,
+            skipped: 0,
+            cursor: appendedEvents.length,
+          });
+        }
+        if (init?.method === 'POST') {
+          const body = JSON.parse(init.body as string) as { runKey: string };
+          return jsonResponse({
+            created: true,
+            run: { runKey: body.runKey, status: 'queued' },
+          });
+        }
+        return jsonResponse(pack);
+      }),
+    );
+
+    const config: ArenaRunConfig = {
+      category: 'reasoning',
+      seed: 'failure-seed',
+      matches: 2,
+      maxCostUsd: 5,
+      resume: false,
+      competitorIds: SOL_FABLE_PILOT_COMPETITOR_IDS,
+    };
+    try {
+      await expect(
+        runRemoteArena(apiConfig, { config, mock: true, publishMatches: false }),
+      ).rejects.toThrow(/another arena/);
+      const failed = appendedEvents.find((event) => event.type === 'run.failed');
+      expect(failed).toBeDefined();
+      expect(failed?.data.error).toContain('another arena');
+    } finally {
+      if (previousResultsDir === undefined) delete process.env.BRIDGEBENCH_RESULTS_DIR;
+      else process.env.BRIDGEBENCH_RESULTS_DIR = previousResultsDir;
+      rmSync(resultsDir, { recursive: true, force: true });
+    }
   });
 });
 
