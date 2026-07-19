@@ -95,9 +95,7 @@ function makeLavaTask(probes: UiProbe[] | null): UiBenchFullTask {
     ],
     prompt: 'p',
     probes,
-    // SwiftShader can rasterize WebGL particle edges slightly differently
-    // between replays even when the serialized application state is exact.
-    scoringOverrides: { determinismMaxChangedPct: 2.5 },
+    scoringOverrides: null,
   };
 }
 
