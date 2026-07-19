@@ -1,0 +1,117 @@
+id: semantic-equivalence-sql-left-join
+version: 1.0.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Simplify a PostgreSQL Deployment Report Without Changing NULL or Multiplicity Semantics
+summary: >-
+  A PostgreSQL report preserves projects with no deployments while computing successful counts and
+  latest successful time. Four proposed simplifications differ under failed-only projects,
+  duplicate joins, NULL aggregates, and deterministic ordering; one is equivalent and meets the
+  single-aggregate refactoring goal.
+prompt: |
+  Use only original-query, sql-contract, datasets, rewrites, and manifest. Cite artifact ids. Give
+  behavior-preserving / changes-behavior and meets-goal / fails-goal for every rewrite.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For every behavior change, give the first D1..D5 dataset and exact differing rows/order.
+  3. Identify the unique rewrite that preserves behavior and meets the goal.
+  4. Derive every output row for D4 under the original and accepted rewrite.
+  5. Explain why moving status='success' from aggregate FILTER to WHERE changes the outer join.
+  6. Evaluate reviewer Gio's claim that COUNT(*) and COUNT(d.id) are interchangeable after LEFT JOIN.
+artifacts:
+  - id: original-query
+    type: code
+    label: Existing PostgreSQL 16 query
+    content: |
+      WITH successful AS (
+        SELECT project_id, COUNT(*) AS success_count, MAX(finished_at) AS latest_success
+        FROM deployments
+        WHERE status = 'success'
+        GROUP BY project_id
+      )
+      SELECT p.id,
+             COALESCE(s.success_count, 0)::bigint AS success_count,
+             s.latest_success
+      FROM projects p
+      LEFT JOIN successful s ON s.project_id = p.id
+      WHERE p.archived_at IS NULL
+      ORDER BY success_count DESC, p.id ASC;
+  - id: sql-contract
+    type: spec
+    label: Complete schema, behavior, and goal
+    content: |
+      projects(id text primary key, archived_at timestamptz null).
+      deployments(id bigint primary key, project_id text references projects, status text,
+                  finished_at timestamptz null). status may be success, failed, or running.
+
+      S1 return every unarchived project exactly once, even with no deployments or failed-only rows.
+      S2 success_count counts successful deployment rows, including those with NULL finished_at.
+      S3 latest_success is MAX finished_at among successful rows or SQL NULL when none/all are NULL.
+      S4 success_count output type is bigint and zero rather than NULL.
+      S5 order count descending then project id ascending using database C collation.
+      S6 no deployment multiplicity may duplicate a project row.
+
+      Goal G: remove the CTE and express the report with one LEFT JOIN plus one grouped aggregate query.
+  - id: datasets
+    type: table
+    label: Authoritative SQL witnesses
+    content: |
+      D1 unarchived A, no deployments -> (A,0,NULL).
+      D2 unarchived A with one failed row -> (A,0,NULL).
+      D3 unarchived A with success finished_at NULL -> (A,1,NULL).
+      D4 projects A,B,C; A successes at t1,t3 plus failed t9; B success t2; C failed only
+         -> (A,2,t3),(B,1,t2),(C,0,NULL).
+      D5 A and B each one success -> rows ordered A then B. Archived Z is absent even if successful.
+  - id: rewrites
+    type: code
+    label: Four proposed query rewrites
+    content: |
+      -- rewrite-a
+      SELECT p.id,
+             COUNT(d.id) FILTER (WHERE d.status='success')::bigint AS success_count,
+             MAX(d.finished_at) FILTER (WHERE d.status='success') AS latest_success
+      FROM projects p LEFT JOIN deployments d ON d.project_id=p.id
+      WHERE p.archived_at IS NULL
+      GROUP BY p.id
+      ORDER BY success_count DESC, p.id ASC;
+
+      -- rewrite-b
+      SELECT p.id, COUNT(d.id)::bigint AS success_count, MAX(d.finished_at) AS latest_success
+      FROM projects p LEFT JOIN deployments d ON d.project_id=p.id
+      WHERE p.archived_at IS NULL AND d.status='success'
+      GROUP BY p.id ORDER BY success_count DESC, p.id ASC;
+
+      -- rewrite-c
+      SELECT p.id, COUNT(*)::bigint AS success_count,
+             MAX(d.finished_at) FILTER (WHERE d.status='success') AS latest_success
+      FROM projects p LEFT JOIN deployments d
+        ON d.project_id=p.id AND d.status='success'
+      WHERE p.archived_at IS NULL
+      GROUP BY p.id ORDER BY success_count DESC, p.id ASC;
+
+      -- rewrite-d
+      WITH successful AS (
+        SELECT project_id,COUNT(*) success_count,MAX(finished_at) latest_success
+        FROM deployments WHERE status='success' GROUP BY project_id)
+      SELECT p.id,COALESCE(s.success_count,0)::bigint,s.latest_success
+      FROM projects p LEFT JOIN successful s ON s.project_id=p.id
+      WHERE p.archived_at IS NULL ORDER BY COALESCE(s.success_count,0) DESC,p.id ASC;
+  - id: postgres-semantics
+    type: note
+    label: Frozen aggregate and join semantics
+    content: |
+      PostgreSQL COUNT(expression) returns bigint and ignores NULL; FILTER excludes rows before the
+      aggregate. COUNT(*) counts the null-extended row produced by LEFT JOIN. MAX ignores NULL and
+      returns NULL for no included non-NULL values. A WHERE predicate rejecting NULL on the right
+      side removes null-extended rows. p.id functionally determines p columns and is unique.
+  - id: manifest
+    type: note
+    label: Complete proposals and reviewer claim
+    content: |
+      rewrite-a through rewrite-d are complete. Aliases resolve in ORDER BY as shown. rewrite-d is
+      semantically the original query with cosmetic spelling changes and therefore does not achieve
+      Goal G. No row-level security or concurrent mutation affects the snapshots.
+
+      Gio's COUNT claim fails on a null-extended row: COUNT(*) is 1 while COUNT(d.id) is 0.
+tags: [refactoring, semantic-equivalence, sql, postgresql, null-semantics]

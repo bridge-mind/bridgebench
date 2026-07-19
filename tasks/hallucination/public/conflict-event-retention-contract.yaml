@@ -1,0 +1,114 @@
+id: conflict-event-retention-contract
+version: 1.0.0
+category: hallucination
+cluster: conflicting-sources
+difficulty: expert
+title: Reconcile Event Retention and Schema Guarantees Across Runtime, IaC, Docs, and Failed Changes
+summary: Resolve a platform contract whose broker runtime, Terraform, handbook, changelog, restore config, and schema docs disagree, applying explicit authority rules while preserving conflicts the supplied sources cannot adjudicate.
+prompt: |
+  Document the current Helix Events contract. When sources disagree, enumerate their values and apply
+  [authority-rules] only within its stated scope. If sources disagree and no authoritative source is
+  included, classify the answer as CONFLICTING rather than silently choosing or averaging. If only an
+  unsupported non-authoritative claim exists, classify the answer as NOT DETERMINABLE.
+
+  1. What retention does topic `orders.v2` actually enforce now, in milliseconds and hours? Reconcile
+     runtime, Terraform, handbook, and changelog values.
+  2. What retention would a successful apply of the checked-in Terraform request, and did change
+     `chg-941` apply it?
+  3. What is the current Schema Registry compatibility mode for subject `orders.v2-value`?
+  4. How long are restorable archive copies retained? Give one exact answer only if the artifacts and
+     authority rules permit it.
+  5. Does field `created_at` mean producer event time or broker ingest time in the current event
+     contract?
+  6. Is topic `orders.v1` officially deprecated, and on what removal date?
+  7. Produce a correction table for each non-authoritative document: its stated value, the supported
+     correction or unresolved conflict, and the artifact that governs.
+artifacts:
+  - id: runtime-snapshot
+    type: config
+    label: Authoritative broker and registry runtime snapshot at 2026-07-19T06:00Z
+    content: |
+      broker.cluster: helix-prod
+      topic.orders.v2.retention.ms: 259200000
+      topic.orders.v2.cleanup.policy: delete
+      registry.subject.orders.v2-value.compatibility: BACKWARD
+      snapshotSource: live admin APIs
+
+      This snapshot is complete for current broker topic properties and Schema Registry modes. It does
+      not describe archives, field semantics, or lifecycle/deprecation decisions.
+  - id: terraform
+    type: config
+    label: Checked-in desired infrastructure
+    content: |
+      resource "helix_topic" "orders_v2" {
+        name         = "orders.v2"
+        retention_ms = 604800000 # 168 hours
+      }
+      resource "helix_schema_subject" "orders_v2" {
+        subject       = "orders.v2-value"
+        compatibility = "FULL"
+      }
+
+      git commit: d87c991 (merged 2026-07-18). Checked-in desired state is not proof of successful apply.
+  - id: change-log
+    type: log
+    label: Infrastructure change execution log
+    content: |
+      chg-940 2026-06-01 APPLIED orders.v2 retention 604800000 -> 259200000
+      chg-941 2026-07-18 FAILED before apply: policy check denied maintenance_window=closed
+        requested: retention 259200000 -> 604800000; compatibility BACKWARD -> FULL
+        resources_changed: 0
+      chg-942 2026-07-19 PLANNED, not started
+
+      No out-of-band broker or registry mutation occurred after chg-940. Runtime snapshot confirms the
+      still-deployed values.
+  - id: platform-handbook
+    type: note
+    label: Developer handbook page
+    content: |
+      "orders.v2 events remain in Kafka for 30 days and in the archive for 14 days. The subject uses
+      FULL compatibility. `created_at` is the time the producer created the business event. orders.v1
+      was deprecated on 2026-06-01 and will be removed on 2026-09-01."
+
+      Page last reviewed 2026-04-10. The handbook is explanatory documentation and can lag all systems.
+  - id: archive-sources
+    type: config
+    label: Conflicting archive retention sources
+    content: |
+      restore-service runtime config captured 2026-07-19:
+        bucketPrefix: helix/orders
+        deleteAfterDays: 21
+
+      storage runbook revised 2026-07-18:
+        "Compliance archive objects for orders.v2 are retained 14 days."
+
+      No bucket lifecycle API snapshot, compliance registry entry, deletion audit, or authority record
+      for archive retention is included. Both sources claim current behavior and disagree.
+  - id: schema-semantics
+    type: spec
+    label: Conflicting event field descriptions
+    content: |
+      OpenAPI event schema (generated 2026-07-15):
+        created_at: "RFC3339 timestamp when the producer created the business event"
+
+      Consumer SDK comment (release 4.8.0, 2026-07-17):
+        createdAt: string; // timestamp assigned by broker ingest gateway
+
+      Both use the same wire field. No producer schema, gateway code, dated semantic migration, or event
+      sample with two clocks is included.
+  - id: authority-rules
+    type: spec
+    label: Complete source authority rules
+    content: |
+      A1. Current broker topic properties and registry modes: live runtime snapshot wins. Terraform is
+          desired state only after a successful apply; failed changes alter nothing.
+      A2. Requested future infrastructure: checked-in Terraform states intent, not current behavior.
+      A3. Archive retention: the bucket lifecycle API is authoritative. If it is absent and retained
+          sources conflict, no exact current duration may be selected.
+      A4. Event field semantics: the versioned producer schema is authoritative. OpenAPI and SDK prose
+          cannot break a conflict when the producer schema is absent.
+      A5. Topic deprecation/removal: only the lifecycle registry is authoritative. A handbook statement
+          alone cannot establish official status or a date.
+      A6. The handbook is never authoritative over the systems above merely because it uses confident
+          language. These rules are exhaustive.
+tags: [conflicting-sources, kafka, terraform, retention, schema-registry]

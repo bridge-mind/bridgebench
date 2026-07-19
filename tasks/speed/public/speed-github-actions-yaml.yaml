@@ -1,0 +1,49 @@
+id: speed-github-actions-yaml
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: hard
+title: Generate a GitHub Actions Workflow YAML for CI/CD
+summary: >-
+  Produce a valid GitHub Actions workflow YAML configuration that triggers on specific events, configures
+  environment variables, caches dependencies, runs tests, and conditionally deploys.
+prompt: |
+  Given [workflow-spec], output a valid GitHub Actions YAML file that implements the complete workflow. Emit YAML only.
+
+  1. Configure triggers for `push` on `main` and `pull_request` on all branches.
+  2. Define global environment variables and a single `build-and-test` job running on `ubuntu-latest`.
+  3. Implement steps for checkout, Node.js setup, dependency caching, npm install, linting, testing, and conditional deployment.
+artifacts:
+  - id: workflow-spec
+    type: spec
+    label: GitHub Actions Workflow Specification
+    content: |
+      Workflow Name: "CI/CD Pipeline"
+
+      Triggers:
+      - On push to the "main" branch.
+      - On pull request to any branch.
+
+      Global Environment Variables:
+      - NODE_ENV: "test"
+      - API_URL: "https://api.staging.bridgemind.ai"
+
+      Job: "build-and-test"
+      - Runs on: "ubuntu-latest"
+      - Steps:
+        1. Checkout code: Use `actions/checkout@v4`.
+        2. Set up Node.js: Use `actions/setup-node@v4` with Node version `20`.
+        3. Cache npm dependencies: Use `actions/cache@v4` with:
+           - path: `~/.npm`
+           - key: `${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}`
+           - restore-keys: `${{ runner.os }}-node-`
+        4. Install dependencies: Run `npm ci`.
+        5. Run linter: Run `npm run lint`.
+        6. Run tests: Run `npm run test:cov`.
+        7. Deploy step (Conditional):
+           - Only run if the event is a `push` AND the branch is `main`.
+           - Name: "Deploy to Staging"
+           - Run: `npm run deploy`
+           - Env for this step:
+             - DEPLOY_TOKEN: `${{ secrets.STAGING_DEPLOY_TOKEN }}`
+tags: [github-actions, yaml, devops, workflow]

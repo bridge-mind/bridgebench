@@ -1,0 +1,48 @@
+id: speed-rust-drop-unwind-trace
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: expert
+title: Trace Rust Drop Order Through Unwinding
+summary: Determine exact construction, partial move, panic, catch, and destructor output under a pinned Rust ownership contract.
+prompt: |
+  Trace [program] using [rust-rules] without running it.
+
+  1. Give the exact comma-separated output.
+  2. At the panic, list each live value and which scope owns it.
+  3. Give destructor order during unwinding and explain why the moved field is not dropped twice.
+  4. State the final result returned by `catch_unwind`.
+artifacts:
+  - id: rust-rules
+    type: spec
+    label: Pinned Rust rules for this trace
+    content: |
+      Rust edition 2024, panic=unwind. Locals drop in reverse declaration order. Struct
+      fields drop in declaration order when the whole struct is dropped, except fields
+      previously moved out are no longer part of that drop. A moved value becomes a new
+      local and drops according to that local's scope. During unwinding, destructors run
+      before catch_unwind returns Err. `print!` output is synchronous for this task.
+      The requested sequence is stdout produced by `print!`; ignore the panic hook's stderr.
+  - id: program
+    type: code
+    label: Program to trace
+    content: |
+      use std::panic::{catch_unwind, AssertUnwindSafe};
+
+      struct Tag(&'static str);
+      impl Drop for Tag { fn drop(&mut self) { print!("drop:{},", self.0); } }
+      struct Pair { left: Tag, right: Tag }
+
+      fn main() {
+        print!("start,");
+        let result = catch_unwind(AssertUnwindSafe(|| {
+          let outer = Tag("outer");
+          let pair = Pair { left: Tag("left"), right: Tag("right") };
+          let moved = pair.left;
+          let inner = Tag("inner");
+          print!("panic,");
+          panic!("boom");
+        }));
+        print!("caught:{},", result.is_err());
+      }
+tags: [rust, ownership, drop, unwind, trace]

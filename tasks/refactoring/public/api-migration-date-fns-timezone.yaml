@@ -1,0 +1,186 @@
+id: api-migration-date-fns-timezone
+version: 1.1.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrating Harbor Reports From moment-timezone to date-fns-tz
+summary: >-
+  Six report call sites move from moment-timezone to date-fns / date-fns-tz. Format tokens (YYYY vs
+  yyyy), zone direction (zonedTimeToUtc vs formatInTimeZone), omitted-zone defaults, and start-of-day
+  locality all differ. Classify each migrated call site as behavior-preserving or changes-behavior.
+prompt: |
+  The reporting team at Harbor Analytics is retiring moment-timezone in favor of date-fns and
+  date-fns-tz. A migration PR rewrites six call sites (proposed-migrations M1..M6), each replacing an
+  original in call-sites (C1..C6).
+
+  Answer each deliverable using ONLY the supplied artifacts (legacy-api, new-api, mapping-note,
+  call-sites, proposed-migrations). Cite the artifact id(s) for every claim.
+
+  For each migrated call site below, classify it as exactly one of:
+    - behavior-preserving  (the rewrite produces the same observable string/Date behavior)
+    - changes-behavior     (the rewrite alters observable behavior; name the single defect)
+
+  "Observable behavior" includes the formatted string, the UTC instant a "wall time in zone" parses
+  to, and which calendar day startOfDay selects in the declared zone.
+
+  1. Classify M1 (the migration of C1).
+  2. Classify M2 (the migration of C2).
+  3. Classify M3 (the migration of C3).
+  4. Classify M4 (the migration of C4).
+  5. Classify M5 (the migration of C5).
+  6. Classify M6 (the migration of C6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, state the single citable defect and a concrete witness from
+  mapping-note where relevant.
+artifacts:
+  - id: legacy-api
+    type: spec
+    label: moment-timezone helpers in use — signatures and semantics
+    content: |
+      // reports/legacy-moment.ts — the COMPLETE moment helpers these call sites use.
+
+      moment.tz(input, zone)
+        // When `input` is an ISO date-only string 'YYYY-MM-DD', interprets that calendar date as
+        // midnight WALL TIME in `zone`, and returns a moment whose UTC instant is that wall time.
+        // Example (mapping-note W1): moment.tz('2026-03-08', 'America/New_York') is 2026-03-08
+        // 05:00:00.000Z (EST, UTC-5).
+
+      moment.utc(isoInstant).tz(zone).format(pattern)
+        // Takes a UTC instant (ISO with Z), converts to wall time in `zone`, formats with moment
+        // tokens. Moment token YYYY = calendar year. Moment token DD = day of month.
+
+      moment.tz(isoInstant, zone).startOf('day').toISOString()
+        // Interprets isoInstant in `zone`, moves to the start of that zone's calendar day, returns
+        // the UTC ISO string of that instant.
+
+      // No other moment helpers appear at these call sites.
+  - id: new-api
+    type: spec
+    label: date-fns / date-fns-tz helpers — signatures and semantics
+    content: |
+      // reports/date-fns-surface.ts — the COMPLETE replacement surface for this migration.
+
+      fromZonedTime(dateStr, zone)   // date-fns-tz
+        // Interprets a wall-time calendar date/time in `zone` as a UTC Date.
+        // For 'yyyy-MM-dd' date-only strings, midnight wall time in `zone`.
+        // Equivalent to moment.tz(dateStr, zone).toDate() for date-only inputs.
+
+      toZonedTime(date, zone)        // date-fns-tz
+        // Returns a Date object whose UTC fields mirror the wall-time fields of `date` in `zone`.
+        // This is NOT a substitute for formatInTimeZone when the goal is a display string.
+
+      formatInTimeZone(date, zone, pattern)  // date-fns-tz
+        // Formats the UTC instant `date` as wall time in `zone` using date-fns Unicode tokens.
+        // date-fns token yyyy = calendar year. date-fns token YYYY = ISO week-numbering year
+        // (NOT the same as moment's YYYY). date-fns token dd = day of month.
+
+      format(date, pattern)          // date-fns (no zone)
+        // Formats using the runtime's LOCAL timezone, ignoring any business zone.
+
+      startOfDay(date)               // date-fns (no zone)
+        // Start of calendar day in the runtime's LOCAL timezone.
+
+      // There is no date-fns helper named zonedStartOfDay in this codebase; to start a day in a
+      // zone, mapping-note gives the required composition.
+  - id: mapping-note
+    type: note
+    label: intended migration rules (Harbor reporting) — exhaustive
+    content: |
+      How to move a moment-timezone call to date-fns-tz without changing behavior. Exhaustive for
+      these call sites. Runtime local timezone for this service is declared as UTC (so format()/
+      startOfDay() without a zone use UTC wall time — still wrong when the business zone is not UTC).
+
+      1. PARSE DATE-ONLY IN ZONE.
+         moment.tz('YYYY-MM-DD', zone) → fromZonedTime('yyyy-MM-dd', zone)
+         Witness W1: input '2026-03-08', zone 'America/New_York' → UTC instant 2026-03-08T05:00:00.000Z.
+
+      2. FORMAT UTC INSTANT IN ZONE.
+         moment.utc(iso).tz(zone).format('YYYY-MM-DD') →
+           formatInTimeZone(new Date(iso), zone, 'yyyy-MM-dd')
+         Using date-fns `format(date, 'yyyy-MM-dd')` (no zone) formats in the runtime local zone
+         (UTC here), which disagrees with New York whenever the UTC calendar date differs from the
+         NY wall date. Witness W2: instant 2026-12-31T03:00:00.000Z → NY wall 2026-12-30 22:00 →
+         calendar string '2026-12-30'; UTC-local `format` yields '2026-12-31'.
+
+      3. CALENDAR YEAR TOKEN.
+         Moment token YYYY is calendar year. date-fns token YYYY is ISO week-numbering year; calendar
+         year is yyyy. Witness W3: instant 2024-12-29T12:00:00.000Z in 'UTC' with date-fns 'YYYY' is
+         week-year 2025 while 'yyyy' (and moment YYYY) is 2024. Harbor requires calendar year.
+
+      4. START OF DAY IN ZONE.
+         moment.tz(iso, zone).startOf('day').toISOString() →
+           fromZonedTime(
+             formatInTimeZone(new Date(iso), zone, 'yyyy-MM-dd') + ' 00:00:00',
+             zone,
+           ).toISOString()
+         Using startOfDay(new Date(iso)) uses runtime local day (UTC here), not `zone`.
+         Witness W4: instant 2026-03-08T10:00:00.000Z in America/New_York → start of NY day is
+         2026-03-08T04:00:00.000Z (EDT); UTC startOfDay is 2026-03-08T00:00:00.000Z.
+
+      5. DO NOT use toZonedTime as a formatter substitute for formatInTimeZone.
+
+      Call-site zones used below: 'America/New_York' or 'UTC' as written in call-sites.
+  - id: call-sites
+    type: code
+    label: original moment call sites C1..C6
+    content: |
+      // C1 — parse a report date as midnight in New York
+      const d1 = moment.tz(reportDate /* '2026-03-08' */, 'America/New_York').toDate();
+
+      // C2 — format a UTC instant as a calendar date in New York
+      const s2 = moment.utc(eventIso /* '2026-12-31T03:00:00.000Z' */)
+        .tz('America/New_York')
+        .format('YYYY-MM-DD');
+
+      // C3 — format a UTC instant as calendar year in UTC
+      const s3 = moment.utc('2024-12-29T12:00:00.000Z').tz('UTC').format('YYYY');
+
+      // C4 — start of civil day in New York for an instant
+      const s4 = moment.tz(eventIso /* '2026-03-08T10:00:00.000Z' */, 'America/New_York')
+        .startOf('day')
+        .toISOString();
+
+      // C5 — format in New York with month/day
+      const s5 = moment.utc('2026-07-04T15:00:00.000Z')
+        .tz('America/New_York')
+        .format('YYYY-MM-DD');
+
+      // C6 — parse date-only in UTC zone
+      const d6 = moment.tz('2026-01-01', 'UTC').toDate();
+  - id: proposed-migrations
+    type: code
+    label: proposed date-fns migrations M1..M6
+    content: |
+      import { format, startOfDay } from 'date-fns';
+      import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz';
+
+      // M1 — migration of C1
+      const d1 = fromZonedTime(reportDate /* '2026-03-08' */, 'America/New_York');
+
+      // M2 — migration of C2
+      const s2 = format(
+        new Date(eventIso /* '2026-12-31T03:00:00.000Z' */),
+        'yyyy-MM-dd',
+      );
+
+      // M3 — migration of C3
+      const s3 = formatInTimeZone(
+        new Date('2024-12-29T12:00:00.000Z'),
+        'UTC',
+        'YYYY',
+      );
+
+      // M4 — migration of C4
+      const s4 = startOfDay(new Date(eventIso /* '2026-03-08T10:00:00.000Z' */)).toISOString();
+
+      // M5 — migration of C5
+      const s5 = formatInTimeZone(
+        new Date('2026-07-04T15:00:00.000Z'),
+        'America/New_York',
+        'yyyy-MM-dd',
+      );
+
+      // M6 — migration of C6
+      const d6 = fromZonedTime('2026-01-01', 'UTC');
+tags: [refactoring, api-migration, date-fns, timezone, moment]

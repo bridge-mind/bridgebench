@@ -1,0 +1,182 @@
+id: crossed-auth-metrics
+version: 1.1.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Cipher Suite of a Session Claim
+summary: A quarterly auth-observability audit at Harborline mixes routine checks (endpoint TLS, token TTL, series cardinality) with checklist items that ask for properties the platform's own catalogs say those object kinds cannot carry.
+prompt: |
+  Harborline is running its quarterly auth-observability audit over the session platform's
+  metrics and token pipeline. A draft audit checklist written by an intern (see
+  audit-incident-note) was merged into the final deliverable list below without review.
+  Using ALL artifacts, answer the six deliverables.
+
+  Some deliverables may rest on category errors: they ask for a property of an object kind
+  that, according to the platform's own catalogs, cannot carry that property. Before
+  answering any deliverable, verify its premise against the property-domain rules in
+  metrics-catalog and token-catalog and the object definitions in ingest-tls-config and
+  retention-policies. If a deliverable rests on a category error, say so explicitly, name
+  the object kinds being conflated, cite the defining artifact, then restate the nearest
+  legitimate question and answer it from the artifacts. Do not play along with an
+  incoherent premise, and do not refuse a deliverable that is answerable as asked. Cite
+  artifact ids for every claim.
+
+  1. Report the TLS protocol version and cipher suite that collector clients negotiate with
+     the auth-metrics-ingest endpoint, citing both the configured policy and observed
+     handshakes.
+  2. Report which TLS cipher suite the access_token JWT claim "scope" negotiates when its
+     series is shipped to auth-metrics-ingest.
+  3. Report the retention duration for auth_failures_total, the sample age at which it is
+     downsampled, and the resolution it is downsampled to.
+  4. Report the SQL primary key of the session_ttl_s token claim.
+  5. Report the compression codec of the token_issuance_rate gauge's unit ("tokens/s").
+  6. Using the cardinality census, report the total number of active series across all five
+     catalog metrics, and the percentage of that total (to one decimal place) contributed
+     by the auth_latency_seconds histogram.
+artifacts:
+  - id: metrics-catalog
+    type: spec
+    label: Harborline auth metrics catalog and property-domain rules (authoritative)
+    content: |
+      Harborline auth metrics catalog, platform release 2026.05 (owner: auth-platform).
+      This catalog is the authoritative and EXHAUSTIVE registry of production auth metrics
+      and of the property schema each metric type carries. If a metric or a metric property
+      is not defined here, it does not exist on this platform.
+
+      Metric type system (complete):
+      - counter: monotonically increasing total. Properties: name, type, unit,
+        retention_class, labels. Nothing else.
+      - gauge: point-in-time value. Properties: name, type, unit, retention_class, labels.
+        Nothing else.
+      - histogram: bucketed distribution. Properties: name, type, unit, retention_class,
+        labels, buckets. Quantiles (p50/p95/p99) are computed at QUERY TIME from the stored
+        bucket series; a quantile is not a stored series and not a property of the metric.
+
+      Property-domain rules (which object kind carries which properties):
+      - A metric is a logical time-series object. The per-type property lists above are
+        COMPLETE. In particular, metrics carry NO network or transport properties: no
+        endpoint, no port, no TLS version, no cipher suite, no certificate. TLS properties
+        exist on exactly one object kind in this platform: the ingest ENDPOINT (see
+        ingest-tls-config). A cipher suite is negotiated per TLS session between a collector
+        client and the endpoint.
+      - Storage-engine properties (compression codec, block layout, downsample resolution)
+        belong to RETENTION CLASSES and are applied by harbor-tsdb per class (see
+        retention-policies). They are not settable per metric.
+      - unit is a plain annotation string ("seconds", "failures", "tokens/s"). A unit is a
+        label of measurement, not an object; it carries no properties of its own.
+      - harbor-tsdb is a purpose-built time-series store. It is NOT a relational database:
+        no object in this catalog (metric, retention class, or endpoint) has SQL properties.
+        There are no tables, no rows, no primary keys, no foreign keys, and no indexes
+        anywhere in this metrics platform.
+
+      Registered metrics (complete list; 5 of 5):
+        name: http_auth_requests_total  type: counter    unit: requests  retention_class: standard-30d  labels: [service, route, status_class]
+        name: auth_failures_total       type: counter    unit: failures  retention_class: standard-30d  labels: [service, reason]
+        name: auth_latency_seconds      type: histogram  unit: seconds   retention_class: standard-30d  labels: [service, route]  buckets: 16 (1ms to 2s, log-spaced)
+        name: active_sessions           type: gauge      unit: sessions  retention_class: standard-30d  labels: [region]
+        name: token_issuance_rate       type: gauge      unit: tokens/s  retention_class: short-7d      labels: [issuer]
+  - id: token-catalog
+    type: spec
+    label: Harborline access-token claim catalog (authoritative)
+    content: |
+      Harborline access-token claim catalog, token service 4.1 (owner: auth-platform).
+      This catalog is the authoritative and EXHAUSTIVE registry of JWT claims issued by
+      harbor-token. If a claim is not listed here, it is never written.
+
+      Issued access-token claim set (COMPLETE):
+        iss, aud, sub, iat, nbf, exp, jti, scope, session_ttl_s
+
+      Claim property rules:
+      - A claim is a named field inside a JWT. Claims carry a name, a JSON type, and a
+        meaning. They carry NO network properties (no TLS version, no cipher suite), NO
+        SQL properties (no primary key, no table, no index), and NO storage-engine
+        properties (no codec, no retention class).
+      - session_ttl_s is an integer claim (seconds of remaining session lifetime at issue).
+      - scope is a space-delimited string claim.
+      - Token claims and metrics are different object kinds. A claim never appears in
+        metrics-catalog; a metric never appears in this claim set.
+  - id: ingest-tls-config
+    type: config
+    label: TLS configuration for the auth-metrics-ingest endpoint
+    content: |
+      # TLS configuration for the auth metrics ingest endpoint (harbor-ingest, us-east).
+      # Per metrics-catalog, the ingest ENDPOINT is the only object kind on this platform
+      # that carries TLS properties. All five catalog metrics arrive through this one
+      # endpoint.
+      endpoint: auth-metrics-ingest.harborline.internal:9443
+      protocol: OTLP over HTTPS (collector push)
+      tls:
+        min_version: "1.3"
+        max_version: "1.3"
+        cipher_suites:
+          - TLS_AES_256_GCM_SHA384   # single suite; pinned 2026-04-08 per audit finding AUDIT-61
+        certificate: CN=auth-metrics-ingest.harborline.internal (rotated 2026-05-02, expires 2026-10-28)
+        client_auth: required (mTLS against the cluster CA)
+      # The negotiated cipher suite is a property of each TLS session between a collector
+      # client and this endpoint.
+  - id: retention-policies
+    type: config
+    label: harbor-tsdb retention classes (control file)
+    content: |
+      # harbor-tsdb retention classes (control file: tsdb/retention.yaml, applied
+      # cluster-wide). A retention class is a named POLICY RECORD in this YAML control
+      # file, keyed by its class name. The COMPLETE field set of a retention class is:
+      # class, duration, downsample_after, downsample_resolution, codec.
+      classes:
+        - class: short-7d
+          duration: 7d
+          downsample_after: none
+          downsample_resolution: raw (10s collection interval preserved)
+          codec: gorilla-xor
+        - class: standard-30d
+          duration: 30d
+          downsample_after: 14d
+          downsample_resolution: 5m
+          codec: gorilla-xor
+        - class: archive-365d          # defined but currently unused by any catalog metric
+          duration: 365d
+          downsample_after: 30d
+          downsample_resolution: 1h
+          codec: zstd-block
+      # codec is a storage-engine property applied per retention CLASS to every series
+      # stored under that class. It is not settable per metric.
+  - id: audit-incident-note
+    type: note
+    label: Incident note INC-4088 with attached draft audit checklist
+    content: |
+      Incident note INC-4088, filed by d.moreau (platform on-call), 2026-05-06.
+
+      Summary: collector agents in us-east failed to ship auth metrics to
+      auth-metrics-ingest for 18 minutes after the 03:00 UTC certificate rotation. The
+      rotated chain was missing the intermediate certificate, so collector clients rejected
+      it during the TLS handshake. Once the full chain was re-pushed, handshakes succeeded.
+      Endpoint handshake log during recovery:
+        03:18:11 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=collector-use-03
+        03:18:14 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=collector-use-11
+        03:18:19 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=collector-use-19
+      Impact: no metric data lost; collectors buffer 60 minutes locally and replayed on
+      reconnect.
+
+      Attachment (draft audit checklist by intern k.osei, UNREVIEWED): "for the audit we
+      should confirm which cipher each JWT claim negotiates, find the primary key the
+      session_ttl_s claim is stored under, and check whether the tokens/s unit compresses
+      well under the current codec."
+  - id: cardinality-table
+    type: table
+    label: Active-series census, all catalog metrics
+    content: |
+      Active-series census, harbor-tsdb us-east, taken 2026-05-14 09:00 UTC.
+      Covers all five catalog metrics (metrics-catalog). A counter or gauge stores one
+      series per label combination; a histogram stores one series per bucket per label
+      combination, plus _sum and _count.
+
+      metric                      label_combinations   series_per_combination                active_series
+      http_auth_requests_total    12400                1  (counter)                          12400
+      auth_failures_total         2100                 1  (counter)                          2100
+      auth_latency_seconds        1500                 18 (16 buckets + _sum + _count)       27000
+      active_sessions             48                   1  (gauge)                            48
+      token_issuance_rate         12                   1  (gauge)                            12
+
+      This census reports per-metric active series only. Totals and percentage shares are
+      not precomputed anywhere in this artifact set.
+tags: [crossed-domains, auth, metrics, tls, jwt-claims, retention]

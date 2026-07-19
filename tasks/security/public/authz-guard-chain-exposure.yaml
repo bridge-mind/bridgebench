@@ -1,5 +1,5 @@
 id: authz-guard-chain-exposure
-version: 1.1.0
+version: 1.2.0
 category: security
 cluster: authz-boundary
 difficulty: expert
@@ -7,9 +7,9 @@ title: Cobalt API Global Guard Chain — Route Exposure Analysis
 summary: >-
   The Cobalt service protects routes with a global guard chain (authentication →
   role → tier → CSRF) plus per-controller @UseGuards and route decorators.
-  Several admin-looking routes appear risky; exactly one is a genuine
-  unauthenticated exposure. Classify five named routes against declared intent,
-  identify the single real exposure, and state the fix — using only the artifacts.
+  Classify each unauthenticated-reachable route as intended or a genuine
+  exposure against the declared intent, and state the fix for any real
+  exposure — using only the artifacts.
 prompt: |
   You are reviewing authorization on the "Cobalt" API. Guards are registered
   globally and also, redundantly, per controller; individual routes carry

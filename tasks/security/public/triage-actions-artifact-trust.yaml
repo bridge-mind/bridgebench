@@ -1,0 +1,119 @@
+id: triage-actions-artifact-trust
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Privileged Release Workflow Signs an Artifact Produced by Fork Code
+summary: >-
+  A scanner reports six GitHub Actions issues across an unprivileged pull-request build and a privileged
+  workflow_run release. Correlate event provenance, permissions, artifact lineage, expression placement,
+  action pinning, environments, and signature sinks to identify the reachable artifact-poisoning chain
+  without promoting benign workflow idioms into vulnerabilities.
+prompt: |
+  Triage the fictional EmberDesk workflows using ONLY the supplied artifacts. Cite artifact ids for every
+  verdict. Classify F1 through F6 as real-vulnerability, mitigated, or false-positive; assign severity to
+  real findings. Do not provide malicious workflow changes or weaponized artifacts.
+
+  1. Reconstruct trust boundaries and permissions for pull_request build and workflow_run release, from
+     fork checkout through artifact download, signing, and publication.
+  2. For each F1 through F6, trace or break the claimed source-to-sink chain. Include action ref mutability,
+     shell interpolation, token permissions, environment approval, and artifact provenance.
+  3. Identify the complete reachable escalation chain and state exactly which attacker-controlled bytes
+     reach which privileged sinks. Bound impact using the supplied release credentials.
+  4. Explain why artifact name equality, a successful test job, SHA-pinned actions, and environment approval
+     do not establish that bytes came from a trusted commit.
+  5. Evaluate fixes P1 through P4. State a secure event/commit/artifact identity invariant and why filtering
+     only by branch display name is inadequate for fork pull requests.
+  6. Provide a regression matrix covering same-repo main, same-repo feature, fork PR, rerun, artifact
+     substitution, rejected approval, and a trusted tag release.
+
+  Workflow files and GitHub event semantics are exhaustive; assume symbolic action SHAs are immutable.
+artifacts:
+  - id: pr-workflow
+    type: config
+    label: .github/workflows/pr.yml
+    content: |
+      name: PR Build
+      on: pull_request
+      permissions: { contents: read }
+      jobs:
+        build:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@1111111111111111111111111111111111111111
+            - run: npm ci && npm test && npm run package
+            - uses: actions/upload-artifact@2222222222222222222222222222222222222222
+              with: { name: desktop-bundle, path: dist/desktop.tar }
+      Pull-request jobs receive no repository secrets and GITHUB_TOKEN cannot write contents or packages.
+      Fork code controls package scripts and the bytes uploaded as desktop-bundle.
+  - id: release-workflow
+    type: config
+    label: .github/workflows/promote.yml
+    content: |
+      name: Promote
+      on:
+        workflow_run:
+          workflows: ["PR Build"]
+          types: [completed]
+      permissions: { contents: write, packages: write, id-token: write }
+      jobs:
+        promote:
+          if: github.event.workflow_run.conclusion == 'success'
+          environment: production
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/download-artifact@3333333333333333333333333333333333333333
+              with:
+                github-token: ${{ secrets.RELEASE_READER }}
+                run-id: ${{ github.event.workflow_run.id }}
+                name: desktop-bundle
+            - name: Record title
+              env: { PR_TITLE: "${{ github.event.workflow_run.display_title }}" }
+              run: printf '%s\n' "$PR_TITLE" >> release-notes.txt
+            - run: cosign sign-blob --yes --output-signature desktop.sig desktop.tar
+            - run: gh release upload nightly desktop.tar desktop.sig --clobber
+      production requires one human approval, but approvers see repository, run id, and artifact name only;
+      no digest or head SHA is displayed or checked. Release credentials become available after approval.
+  - id: event-semantics
+    type: spec
+    label: authoritative GitHub event and artifact behavior
+    content: |
+      workflow_run executes in the default branch context with its secrets and write token even when the
+      triggering workflow ran fork code. workflow_run.id identifies the exact unprivileged run, not a
+      trusted source. `head_repository.full_name`, `head_sha`, and `event` identify provenance. Artifact
+      names are caller-chosen labels and upload-artifact does not attest source. Expressions assigned to
+      env are data; direct expression interpolation inside run script text would be shell syntax.
+  - id: controlled-trace
+    type: log
+    label: fork pull request execution trace
+    content: |
+      PR #418 head_repository=outside/emberdesk-fork head_sha=F0RK event=pull_request
+      PR build: tests exit 0; package script emits desktop.tar hash=FORKBYTES
+      upload artifact name=desktop-bundle run-id=771
+      Promote run triggered by run-id=771 conclusion=success; production approved
+      download hash=FORKBYTES; cosign identity=emberdesk/promote.yml@refs/heads/main
+      nightly release replaced with desktop.tar hash=FORKBYTES and a valid project signature
+      No secret was exposed to the PR job; bytes crossed later through the downloaded artifact.
+  - id: finding-list
+    type: note
+    label: scanner findings F1 through F6
+    content: |
+      F1 pull_request checks out fork code, so RELEASE_READER is directly exposed in pr.yml.
+      F2 workflow_run consumes an artifact from an untrusted fork and signs/publishes it with write/OIDC.
+      F3 display_title causes command injection in Record title.
+      F4 actions/checkout, upload-artifact, and download-artifact use mutable action refs.
+      F5 GITHUB_TOKEN in pr.yml has excessive write access.
+      F6 production approval fully mitigates artifact provenance because a human clicked approve.
+  - id: patch-candidates
+    type: diff
+    label: proposed workflow changes
+    content: |
+      P1: Add `if: workflow_run.head_branch == 'main'`. Forks can name their head branch main; display branch
+          is not repository identity, and PR merge/reference semantics remain ambiguous.
+      P2: Keep consuming the PR artifact but show its filename to the environment approver.
+      P3: Build release bytes only in a trusted push/tag workflow after checking out the protected repository
+          at an allowlisted commit; bind provenance subject/digest and head SHA before signing. If workflow_run
+          remains for tests, require expected event, exact head_repository, protected head_sha reachability,
+          and independently rebuild rather than promoting untrusted artifacts.
+      P4: Give the PR token packages:write so upload-artifact can attest the bundle.
+tags: [security, finding-triage, github-actions, artifact-poisoning, cicd]

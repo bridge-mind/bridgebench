@@ -1,0 +1,137 @@
+id: spec-conformance-base64url
+version: 1.1.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: encodeBase64Url — Which Submission Matches Every RFC-Style Clause
+summary: A frozen base64url encoder spec defines six clauses covering alphabet mapping, padding removal, empty-input behavior, deterministic output, and whitespace prohibition. Five submissions are under review. Classify all submissions against the clauses and cite the distinguishing test vector for any violation.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (encoding-spec, acceptance-vectors,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent requirements the spec omits and do not ignore one it states. The verdict
+  vocabulary is exactly: conforms / violates.
+
+  encoding-spec defines clauses B1..B6 and is the complete contract. submission-manifest declares
+  candidate-1..candidate-5 the complete set.
+
+  1. Classify each of candidate-1..candidate-5 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single clause (one of B1..B6) it breaks and
+     provide one concrete input vector from acceptance-vectors where its output differs from the
+     spec-correct output. State both outputs.
+
+  3. Identify which candidates, if any, `conform`, and state the output a conforming
+     implementation returns for input bytes [251, 255].
+
+  4. In reviewer-thread, @mina claims candidate-2 conforms because "keeping '=' padding is still
+     valid base64 and therefore valid base64url." State candidate-2's verdict and cite the clause
+     and vector that refute this claim.
+
+  5. Name the candidate that emits whitespace in output and provide its output for bytes
+     [102, 111, 111, 98, 97, 114] versus the spec-correct output.
+artifacts:
+  - id: encoding-spec
+    type: spec
+    label: base64url encoder specification (frozen, complete)
+    content: |
+      encodeBase64Url(inputBytes: byte[]): string
+
+      Given raw bytes, return a URL-safe Base64 string. The clauses below are the COMPLETE contract.
+
+      B1  BASE ENCODING. First encode input bytes using standard Base64 (RFC 4648 section 4).
+
+      B2  URL-SAFE ALPHABET. In the Base64 output, replace "+" with "-" and "/" with "_".
+
+      B3  NO PADDING. Remove all trailing "=" padding characters.
+
+      B4  EMPTY INPUT. If inputBytes is empty, return the empty string "".
+
+      B5  OUTPUT CHARACTER SET. Output may contain only [A-Z], [a-z], [0-9], "-" and "_".
+          No other printable characters are allowed.
+
+      B6  DETERMINISTIC, NO WHITESPACE. Output must be deterministic and contain no spaces,
+          tabs, or newline characters.
+
+      This is the complete specification.
+  - id: acceptance-vectors
+    type: table
+    label: authoritative input and expected output vectors
+    content: |
+      A conforming implementation reproduces every row exactly.
+
+      #   input bytes                         expected
+      --  ---------------------------------   ----------------
+      AV1 []                                  ""
+      AV2 [102]                               "Zg"
+      AV3 [102, 111]                          "Zm8"
+      AV4 [102, 111, 111]                     "Zm9v"
+      AV5 [255]                               "_w"
+      AV6 [251]                               "-w"
+      AV7 [251, 255]                          "-_8"
+      AV8 [102, 111, 111, 98, 97, 114]        "Zm9vYmFy"
+
+      Notes:
+        - AV5 verifies "/" -> "_" mapping.
+        - AV6 verifies "+" -> "-" mapping.
+        - AV1 and AV2 verify no "=" padding in outputs.
+  - id: candidates-a
+    type: code
+    label: shared helper plus candidate-1, candidate-2, candidate-3
+    content: |
+      // Shared helper:
+      // stdBase64(bytes) returns RFC 4648 standard base64 (with possible "=" padding).
+
+      // ---- candidate-1 ----
+      function candidate1(bytes) {
+        if (bytes.length === 0) return '';
+        return stdBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(bytes) {
+        return stdBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_');
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(bytes) {
+        return stdBase64(bytes).replace(/\+/g, '-').replace(/=+$/g, '');
+      }
+  - id: candidates-b
+    type: code
+    label: candidate-4 and candidate-5
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(bytes) {
+        if (bytes.length === 0) return 'AA';
+        return stdBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(bytes) {
+        const core = stdBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+        return core.replace(/(.{4})/g, '$1\n').replace(/\n$/g, '');
+      }
+  - id: reviewer-thread
+    type: note
+    label: review discussion for the five submissions
+    content: |
+      Review thread for encodeBase64Url (PR #7721).
+
+      @mina: "candidate-2 looks conforming. '=' padding is legal base64, so this should still be fine
+      for base64url as long as + and / are replaced."
+
+      @ravi: "The task contract is strict: URL-safe output here explicitly removes trailing '='. Keeping
+      it is not equivalent under this API."
+
+      @nora: "One candidate emits newline characters on long outputs. That breaks token usage in URL
+      params and should fail determinism/no-whitespace."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5.
+      This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against clauses B1..B6 and the
+      acceptance-vectors rows; submissions that satisfy every clause are accepted.
+tags: [generation, spec-conformance, base64url, encoding, code-review]

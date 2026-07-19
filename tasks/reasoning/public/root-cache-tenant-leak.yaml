@@ -1,5 +1,5 @@
 id: root-cache-tenant-leak
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: root-cause-reasoning
 difficulty: expert
@@ -140,8 +140,6 @@ artifacts:
         ttlSeconds: 3600
         namespace: reports
         compression: false
-        # tenantIsolation is consumed ONLY by the legacy per-tenant quota module.
-        # reportCacheKey() and userCacheKey() do not read this flag.
         tenantIsolation: strict
   - id: incident-log
     type: log
@@ -169,17 +167,17 @@ artifacts:
       14:20:55 gateway     req=r7756 GET /v2/reports/q4-forecast tenant=t_epsilon user=u_e05 jwt.tenant=t_epsilon authz=ok locale=en
       14:20:55 report-svc  req=r7756 slug=q4-forecast tenant=t_epsilon cacheKey=report:q4-forecast:en
       14:20:55 redis       GET report:q4-forecast:en -> HIT bytes=4096
-      14:20:55 report-svc  req=r7756 200 source=cache rowTenant=t_alpha   # epsilon also leaked alpha's rep_88
+      14:20:55 report-svc  req=r7756 200 source=cache rowTenant=t_alpha
       14:21:03 gateway     req=r7760 GET /v2/reports/q4-forecast tenant=t_delta user=u_d02 jwt.tenant= authz=deny
       14:21:03 gateway     req=r7760 warn jwt.tenant claim missing/blank user=u_d02 -> 401 (request not forwarded)
       14:21:20 gateway     req=r7765 GET /v2/reports/q4-forecast tenant=t_alpha user=u_a04 jwt.tenant=t_alpha authz=ok locale=en
       14:21:20 report-svc  req=r7765 slug=q4-forecast tenant=t_alpha cacheKey=report:q4-forecast:en
       14:21:20 redis       GET report:q4-forecast:en -> HIT bytes=4096
-      14:21:20 report-svc  req=r7765 200 source=cache rowTenant=t_alpha   # alpha served alpha's own data (correct only because alpha filled the key)
+      14:21:20 report-svc  req=r7765 200 source=cache rowTenant=t_alpha
       14:21:40 gateway     req=r7772 GET /v2/reports/q4-forecast tenant=t_beta user=u_b07 jwt.tenant=t_beta authz=ok locale=en
       14:21:40 report-svc  req=r7772 slug=q4-forecast tenant=t_beta cacheKey=report:q4-forecast:en
       14:21:40 redis       GET report:q4-forecast:en -> HIT bytes=4096
-      14:21:40 report-svc  req=r7772 200 source=cache rowTenant=t_alpha   # payload was built for t_alpha at 14:20:12
+      14:21:40 report-svc  req=r7772 200 source=cache rowTenant=t_alpha
       14:22:05 gateway     req=r7781 GET /v2/reports/q4-forecast tenant=t_beta user=u_b11 jwt.tenant=t_beta authz=ok locale=en
       14:22:05 report-svc  req=r7781 slug=q4-forecast tenant=t_beta cacheKey=report:q4-forecast:en
       14:22:05 redis       GET report:q4-forecast:en -> HIT bytes=4096
@@ -193,7 +191,7 @@ artifacts:
       14:22:50 gateway     req=r7799 GET /v2/reports/hiring-plan tenant=t_zeta user=u_z09 jwt.tenant=t_zeta authz=ok locale=en
       14:22:50 report-svc  req=r7799 slug=hiring-plan tenant=t_zeta cacheKey=report:hiring-plan:en
       14:22:50 redis       GET report:hiring-plan:en -> HIT bytes=5120
-      14:22:50 report-svc  req=r7799 200 source=cache rowTenant=t_alpha   # zeta leaked alpha's hiring-plan (rep_10, cached at 14:19:58)
+      14:22:50 report-svc  req=r7799 200 source=cache rowTenant=t_alpha
       14:23:10 report-svc  incident opened: t_beta user u_b07 reports q4-forecast shows t_alpha figures
   - id: schema-note
     type: note

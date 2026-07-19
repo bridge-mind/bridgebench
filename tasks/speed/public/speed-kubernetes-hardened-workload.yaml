@@ -1,0 +1,31 @@
+id: speed-kubernetes-hardened-workload
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: expert
+title: Emit Hardened Kubernetes Workload Manifests
+summary: Produce exact multi-document Kubernetes YAML for a least-privilege deployment, service account, service, and default-deny network policy.
+prompt: |
+  Using [manifest-contract], output Kubernetes YAML only as four `---`-separated documents
+  in the required order.
+artifacts:
+  - id: manifest-contract
+    type: spec
+    label: Complete Kubernetes manifest contract
+    content: |
+      Namespace is `payments`; all names and selector label are `settlement-worker`.
+      Document order: ServiceAccount, Deployment, Service, NetworkPolicy. ServiceAccount
+      automountServiceAccountToken=false. Deployment apps/v1, 3 replicas,
+      RollingUpdate maxUnavailable=0 maxSurge=1, image
+      `registry.example/settlement@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`,
+      imagePullPolicy=IfNotPresent, containerPort 8080, readOnlyRootFilesystem=true,
+      allowPrivilegeEscalation=false, runAsNonRoot=true, runAsUser=10001, seccomp RuntimeDefault,
+      capabilities drop ALL, requests cpu=100m memory=128Mi, limits cpu=500m memory=256Mi,
+      writable emptyDir mounted at /tmp, HTTP readiness `/ready` and liveness `/live` on
+      port 8080. Pod and container security context must both carry their applicable fields.
+      Service is ClusterIP port 80 -> targetPort 8080. NetworkPolicy networking.k8s.io/v1
+      selects the workload, policyTypes Ingress and Egress, allows ingress only from pods
+      with label `gateway=true` in the same namespace to TCP 8080, and allows egress only
+      to pods labeled `postgres=true` in the same namespace on TCP 5432. No wildcard rules,
+      host namespaces, privilege, latest tags, or inline secret values.
+tags: [kubernetes, yaml, hardening, network-policy]

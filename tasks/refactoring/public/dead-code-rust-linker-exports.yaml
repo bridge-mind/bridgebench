@@ -1,0 +1,96 @@
+id: dead-code-rust-linker-exports
+version: 1.0.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Prune Rust Functions Across Feature Flags, Linker Sections, and C Exports
+summary: >-
+  A Rust crate's source-level call graph is incomplete: build profiles expose C ABI symbols and a
+  linker-collected plugin descriptor, while feature-gated CLI code changes reachability. Four PRs
+  remove different apparently unused items; one exactly matches the supported build matrix.
+prompt: |
+  Use only crate-source, build-contract, build-matrix, patches, and manifest. Cite artifact ids. Give
+  behavior-preserving / changes-behavior and meets-goal / fails-goal for every patch.
+
+  1. Classify patch-a through patch-d on both axes.
+  2. For every change, give the first B1..B6 build/run witness and exact symbol/plugin/output failure.
+  3. Identify the unique safe patch meeting the dead-code goal.
+  4. Trace how REGISTER survives release linking without a Rust call edge.
+  5. Explain why cfg(feature="cli") cannot be judged from the default build alone.
+  6. Evaluate reviewer Cal's claim that pub extern functions without Rust callers are dead in a cdylib.
+artifacts:
+  - id: crate-source
+    type: code
+    label: Complete relevant Rust crate source
+    content: |
+      // lib.rs, crate-type = ["rlib","cdylib"]
+      #[no_mangle] pub extern "C" fn bridge_version() -> u32 { 3 }
+      fn transform_v3(x:u32)->u32 { x*2 }
+      fn abandoned_v1(x:u32)->u32 { x+1 }
+
+      #[used]
+      #[link_section = "bridge_plugins"]
+      static REGISTER: Descriptor = Descriptor { name: b"transform\0", call: transform_v3 };
+
+      #[cfg(feature="cli")]
+      pub fn print_schema() { println!("{}", schema_json()); }
+      #[cfg(feature="cli")]
+      fn schema_json()->String { "{\"v\":3}".into() }
+
+      fn debug_probe()->u64 { 99 }
+  - id: build-contract
+    type: spec
+    label: Supported builds and cleanup goal
+    content: |
+      L1 default release builds rlib and cdylib. Native hosts dlsym bridge_version and scan the
+         bridge_plugins linker section for Descriptor entries.
+      L2 transform_v3 is reachable through REGISTER.call even without a direct Rust call expression.
+      L3 feature cli is supported and a binary calls print_schema; schema_json is therefore live only
+         in that feature build.
+      L4 abandoned_v1 is absent from every export, descriptor, cfg build, test, macro, build script,
+         doc test, and dynamic-name table.
+      L5 debug_probe is likewise unreachable in every supported build and has no required symbol.
+      L6 release linker garbage collection is enabled but honors #[used] linker sections.
+
+      Goal G: remove exactly abandoned_v1 and debug_probe, reducing dead code while preserving every
+      supported artifact and feature build.
+  - id: build-matrix
+    type: table
+    label: Authoritative build and runtime witnesses
+    content: |
+      B1 default cargo build --release -> rlib+cdylib; bridge_version dlsym returns 3.
+      B2 native scan -> one transform descriptor; call(6)->12.
+      B3 cargo build --release --features cli -> binary print_schema emits {"v":3}.
+      B4 cargo test default -> no cli module required but build still succeeds.
+      B5 symbol/section audit finds no required abandoned_v1 or debug_probe entry.
+      B6 all-features lint has no dangling reference after deleting both dead functions.
+  - id: patches
+    type: diff
+    label: Four complete Rust cleanup PRs
+    content: |
+      patch-a: delete abandoned_v1 and debug_probe only.
+      patch-b: delete every function absent from the default-feature Rust call graph, including
+               bridge_version, abandoned_v1, schema_json, and debug_probe.
+      patch-c: delete REGISTER and transform_v3 because cargo's Rust call graph marks them unused.
+      patch-d: delete abandoned_v1, debug_probe, print_schema, and schema_json because default feature
+               coverage never executes cli.
+
+      No patch changes Cargo features, crate type, linker script, descriptor ABI, tests, or consumers.
+  - id: linker-model
+    type: note
+    label: Frozen compiler and linker reachability
+    content: |
+      no_mangle extern C defines a dynamic symbol consumed outside Rust's call graph. #[used] forces
+      REGISTER emission; the link section scanner treats each descriptor as a root, and its function
+      pointer relocation retains transform_v3. cfg removes code only from builds where its predicate
+      is false; all supported feature combinations must be considered before deletion.
+  - id: manifest
+    type: note
+    label: Exhaustive reflection and reviewer claim
+    content: |
+      patch-a through patch-d are complete. build-contract exhausts dynamic loading, procedural macros,
+      generated code, and tests. Compiler warnings alone are not the acceptance oracle.
+
+      Cal's claim is false for a cdylib: bridge_version's caller is the native host resolved through
+      dlsym, not a Rust call expression.
+tags: [refactoring, dead-code-elimination, rust, linker, feature-flags]

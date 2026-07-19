@@ -1,5 +1,5 @@
 id: impossible-id-bitfields
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: impossible-quantities
 difficulty: expert
@@ -69,25 +69,19 @@ artifacts:
         timestamp = (id >> 22) & 0x1FFFFFFFFFF       (next 41 bits) ms since epoch
         wall_clock = epoch + timestamp (ms)
 
-      Uniqueness (by construction, not by probability):
+      Uniqueness (by construction):
       - U1. node_ids are assigned disjointly by the assignment authority (node-inventory): no
         two live generators ever share a node_id. This partitions the id space by node.
       - U2. Within one node and one millisecond, sequence is a strictly increasing counter
         0..4095 with the block-until-next-ms rule (F2), so (timestamp, node_id, sequence) is
         unique for every id a node emits.
-      - U3. Therefore (timestamp, node_id, sequence) is globally unique for every id, and two
-        distinct ids can never collide. Collisions are IMPOSSIBLE under this format, not merely
-        improbable: there is no collision probability to quote or reduce, because U1-U2 make
-        the joint key injective. A duplicate could arise only by violating U1 (assigning a
-        node_id twice) or U2 (a generator bug emitting past sequence 4095), each of which is a
-        defect to be counted (generator-counters), not a probability of the format.
+      - U3. Therefore (timestamp, node_id, sequence) is globally unique for every id.
   - id: id-gen-config
     type: config
     label: id-gen running configuration (bit allocation and epoch)
     content: |
       # id-gen/config.yaml — running configuration. The bit-width entries below RECORD the
-      # fixed format constants (id-format-spec); they are not knobs. Changing a width would
-      # change the id format itself (a new 64-bit layout or a wider integer), not a setting.
+      # fixed format constants (id-format-spec) and the epoch.
       format:
         total_bits: 64
         timestamp_bits: 41
@@ -111,10 +105,6 @@ artifacts:
         free node_ids remaining         976  (48..1023)
         max addressable nodes (format)  1024
         per-node ceiling (format)       4096 ids per millisecond  (sequence 0..4095)
-
-      No node_id outside 0..1023 exists or can be assigned; the 10-bit node field cannot
-      represent one. Adding nodes beyond 1,024 is not an assignment action — it has no
-      representable node_id under the format.
   - id: captured-ids
     type: log
     label: id-gen capture tool output (decoded fields)
@@ -143,7 +133,7 @@ artifacts:
     label: id-gen fleet counters, trailing 30 days
     content: |
       id-gen fleet counters, trailing 30 days ending 2026-07-11. These are counts of real
-      events, not probabilities.
+      events.
 
         counter                              value      meaning
         ids_minted_total                     4.11e11    ids emitted fleet-wide
@@ -153,11 +143,9 @@ artifacts:
                                                         blocked until the next ms (F2 in effect)
         max_sequence_observed_in_one_ms      4095       never 4096 or higher
 
-      duplicate_ids_emitted has been 0 for the life of the service: the format makes collisions
-      impossible by construction (id-format-spec U3), so this counter measures defects, not a
-      residual probability. The v3.2.0 release (2026-06) changed the node bootstrap ordering
-      and did not touch the id format, the field widths, or uniqueness — there was no collision
-      rate before or after it to change.
+      duplicate_ids_emitted has been 0 for the life of the service. The v3.2.0 release
+      (2026-06) changed the node bootstrap ordering and did not touch the id format, the
+      field widths, or uniqueness.
   - id: capacity-note
     type: note
     label: Capacity planner's review request (unverified asks)

@@ -1,5 +1,5 @@
 id: reversed-migration-lock
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: reversed-causality
 difficulty: expert
@@ -108,9 +108,6 @@ artifacts:
       03:15:00  lock waiters on orders: 40 (steady; pool fully checked out and blocked)
       03:20:12  ALTER TABLE released AccessExclusiveLock (rewrite complete); waiters drain
       03:20:40  lock waiters on orders: 0
-      Note: the ALTER acquired the lock at 03:10:00.000 after a 0.0 s wait with zero conflicting
-      locks ahead of it; no query blocked the migration's own acquisition. From 03:10:00 the
-      arrow is ALTER-holds-lock -> queries-wait.
   - id: pool-metrics
     type: table
     label: orders-api connection pool and error metrics, minute by minute
@@ -162,9 +159,7 @@ artifacts:
       Notes: the ALTER TABLE rewrite of the 41M-row orders table emits large WAL on the
       PRIMARY from 03:10 (690 MB) through the rewrite, peaking replica lag at 47,800 ms at
       03:16; total WAL emitted by the rewrite over 03:10-03:20 was ~8.9 GB. replica lag tracks
-      primary WAL volume and the replica's replay rate only. orders-api 500 responses appear
-      nowhere in this table because a 500 writes nothing to the primary and emits no WAL
-      (causality-model).
+      primary WAL volume and the replica's replay rate only.
   - id: trace-samples
     type: log
     label: Sampled traces during INC-7742 (shared NTP clock, skew < 10ms)
@@ -195,17 +190,10 @@ artifacts:
                all blocked on orders-db. pg_locks shows an ALTER TABLE holding ACCESS EXCLUSIVE
                on orders since 03:10:00 - that's the widen-total migration rewriting 41M rows
       03:13:30 b.cole: is the API hammering the DB? pool's at 40/40
-      03:13:55 p.saito: no - the pool is full BECAUSE the queries are blocked on the migration's
-               lock, not the other way around. an exhausted pool sends fewer queries, not more.
-               the lock came first (03:10:00), the pool filled at 03:11, first 500 at 03:12:03
       03:16:10 b.cole: replica lag is 47s - are the 500s backing up replication?
-      03:16:40 p.saito: backwards again. the replica replays the PRIMARY's WAL. the rewrite is
-               emitting gigabytes of WAL - that's the lag. a 500 is a response to a client and
-               writes nothing to the primary; it can't touch replication
       03:20:30 pagerbot: orders-api 5xx 24% and falling - the ALTER released its lock at 03:20:12
       03:21:40 p.saito: recovered. we'll redo the widen online (nullable column + backfill, no
-               rewrite lock). b.cole owns the postmortem - please read the propagation model
-               before you file it
+               rewrite lock). b.cole owns the postmortem
   - id: draft-postmortem
     type: note
     label: Draft postmortem for INC-7742 (unreviewed narrative)

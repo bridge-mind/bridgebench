@@ -1,0 +1,91 @@
+id: root-dns-negative-cache-rollout
+version: 1.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: Resolver-Specific NXDOMAINs After a Headless-Service Rollout Publishes an Empty Endpoint Set
+summary: Trace intermittent worker bootstrap failures through Kubernetes endpoint publication, two resolver caches, readiness timing, and a misleading application retry change to isolate the deployment defect from the cache amplifier.
+prompt: |
+  Workers in one node pool could not resolve `catalog-headless.prod.svc.cluster.local` for several
+  minutes after release R92. Use only the complete evidence below. Distinguish the defect that made
+  the name nonexistent from the mechanism that prolonged failures after endpoints recovered.
+
+  1. Name the root deployment defect, cite its exact manifest fields, and state the violated selector
+     contract.
+  2. Reconstruct the authoritative endpoint/name state at 10:00:00, 10:00:18, and 10:00:41.
+  3. Compute the answer returned by resolver A and resolver B at every query in [query-log], including
+     cache expiry boundaries.
+  4. Explain why only pool-a remained broken after 10:00:41 and rule out CoreDNS crash, search-suffix
+     expansion, application connection pooling, and the catalog image.
+  5. Evaluate patches A-D and select the minimal lossless remediation plus the immediate recovery
+     action for already-poisoned resolver caches.
+  6. Specify two regression tests: one manifest-level and one timed integration test, with exact
+     assertions that distinguish the root fix from merely shortening negative TTL.
+artifacts:
+  - id: dns-contract
+    type: spec
+    label: Headless service and cache contract
+    content: |
+      A headless Service name has A records iff its EndpointSlice has at least one ready address.
+      The controller selects Pods whose labels match every `spec.selector` entry. Pods with
+      `publishNotReadyAddresses=false` appear only after readiness succeeds.
+
+      Each resolver caches NXDOMAIN for its configured negative TTL from the response time. A cached
+      NXDOMAIN is returned without consulting CoreDNS until `now >= storedAt + ttl`; equality expires
+      the entry. Positive answers use a 5-second TTL. Resolvers do not share caches.
+  - id: deployed-manifests
+    type: config
+    label: Release R92 Service and Deployment
+    content: |
+      Service catalog-headless:
+        clusterIP: None
+        publishNotReadyAddresses: false
+        selector: {app: catalog, track: stable}
+
+      Deployment catalog R92 pod template:
+        labels: {app: catalog, release-track: stable}
+        readinessProbe: {path: /ready, initialDelaySeconds: 10}
+
+      R91 used label `track: stable`. No mutating admission controller changes labels.
+  - id: endpoint-timeline
+    type: log
+    label: Authoritative API and controller timeline
+    content: |
+      10:00:00 old R91 pod deleted; EndpointSlice ready addresses becomes []
+      10:00:05 R92 pod Running labels={app:catalog,release-track:stable}
+      10:00:18 readiness probe succeeds; selector still matches zero pods
+      10:00:39 operator adds pod label track=stable
+      10:00:41 EndpointSlice ready addresses=[10.8.4.17]; CoreDNS authoritative A=10.8.4.17
+
+      CoreDNS stayed healthy and observed every EndpointSlice revision. These are all endpoint writes.
+  - id: resolver-config
+    type: config
+    label: Node-local resolver settings
+    content: |
+      pool-a resolver A: negativeTTL=120s, positiveTTL=5s
+      pool-b resolver B: negativeTTL=20s, positiveTTL=5s
+      Both query the same healthy CoreDNS service and use the same fully qualified name.
+  - id: query-log
+    type: table
+    label: Exhaustive resolver queries
+    content: |
+      time      | resolver | query
+      10:00:02  | A        | catalog-headless.prod.svc.cluster.local
+      10:00:03  | B        | catalog-headless.prod.svc.cluster.local
+      10:00:22  | B        | catalog-headless.prod.svc.cluster.local
+      10:00:40  | A        | catalog-headless.prod.svc.cluster.local
+      10:00:42  | B        | catalog-headless.prod.svc.cluster.local
+      10:01:59  | A        | catalog-headless.prod.svc.cluster.local
+      10:02:02  | A        | catalog-headless.prod.svc.cluster.local
+
+      There are no other queries that refresh either cache.
+  - id: candidate-patches
+    type: diff
+    label: Proposed changes
+    content: |
+      A. Change Deployment label `release-track: stable` to `track: stable`; roll pods; flush existing
+         resolver NXDOMAIN entries once EndpointSlice is ready.
+      B. Keep labels mismatched; reduce resolver A negativeTTL to 1 second.
+      C. Set publishNotReadyAddresses=true while keeping the mismatched selector.
+      D. Add five retries to catalog client but leave DNS and manifests unchanged.
+tags: [dns, kubernetes, negative-cache, selectors, root-cause]

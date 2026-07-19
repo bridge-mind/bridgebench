@@ -1,0 +1,188 @@
+id: state-corruption-session-merge
+version: 1.1.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Users Intermittently See Another User's Dashboard After Login
+summary: >-
+  Users intermittently see another user's dashboard after login, and the incidents correlate with
+  high concurrent-request volume. The auth middleware, Redis store, load balancer, and cookie
+  collisions all look guilty. Reconcile the deserializer code, incident trace, Redis dump, and
+  request log to identify the first violated invariant and the adequate fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (deserializer-code, buffer-config,
+  incident-trace, redis-dump, auth-middleware, request-log, fixes). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  After login, some users see another user's dashboard data. The incidents correlate with high
+  concurrent-request volume. Do not stop at the auth middleware or the user-facing symptom; trace to
+  the first violated invariant in the session data pipeline.
+
+  1. FIRST VIOLATED INVARIANT. Name the single defect and cite the exact artifact id and code
+     location. State precisely which data-integrity invariant is broken and at which step in the
+     session pipeline the corruption first occurs.
+  2. CORRUPTION MECHANISM. From incident-trace, trace one incident from the concurrent requests to
+     the corrupted session object. Cite the lines that establish how one request ends up holding
+     another user's session data.
+  3. RED HERRING: AUTH MIDDLEWARE BUG. Explain whether the auth middleware corrupts the session
+     object or only observes what it receives, citing auth-middleware.
+  4. RED HERRING: REDIS DATA CORRUPTION. Explain whether the Redis store contains corrupt data,
+     citing redis-dump, and state where in the pipeline the corruption first appears.
+  5. RED HERRING: LOAD BALANCER / COOKIE COLLISION. Explain why a "broken load balancer routing
+     requests to wrong sessions" and a "cookie ID collision" are not the cause, citing request-log
+     and incident-trace. State the evidence that each request carries the correct session ID for
+     its user and that the load balancer routes correctly.
+  6. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression,
+     and state the invariant it enforces between concurrent deserialization calls.
+  7. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow
+     or harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: deserializer-code
+    type: code
+    label: session-svc/session-deserializer.ts — the session deserialization path (complete)
+    content: |
+      // This is the COMPLETE deserialization path for session data. When a request arrives, the
+      // session middleware reads the raw JSON string from Redis and calls deserializeSession().
+      // There is no other deserialization path, no caching layer, and no proxy that transforms
+      // session data. This function is the SOLE point where raw JSON becomes a Session object.
+
+      // PERFORMANCE OPTIMIZATION: a single StringBuilder instance is allocated at module load
+      // time and reused across all requests to avoid per-request allocation overhead.
+      const sharedBuilder = new StringBuilder(4096);   // module-level singleton, allocated once
+
+      export function deserializeSession(rawJson: string): Session {
+        sharedBuilder.append(rawJson);
+        const parsed = JSON.parse(sharedBuilder.toString());
+        sharedBuilder.clear();
+
+        return {
+          sessionId: parsed.sessionId,
+          userId: parsed.userId,
+          role: parsed.role,
+          email: parsed.email,
+          expiresAt: parsed.expiresAt,
+        };
+      }
+  - id: buffer-config
+    type: config
+    label: session-svc performance configuration (complete)
+    content: |
+      sessionDeserialization:
+        mode: shared-buffer                  # uses a single pre-allocated StringBuilder
+        bufferSizeBytes: 4096                # pre-allocated capacity
+        clearPolicy: after-parse             # buffer is cleared AFTER JSON.parse, not before append
+        threadSafety: none                   # no mutex, lock, or synchronization on the shared builder
+
+      # The shared-buffer mode was introduced as a performance optimization to reduce GC pressure
+      # from per-request string allocations.
+      #
+      # Alternative mode (not currently active):
+      #   mode: per-request                  # allocates a new StringBuilder per deserializeSession call
+      #   threadSafety: not-applicable       # no sharing, no contention
+  - id: incident-trace
+    type: log
+    label: detailed trace of one cross-contamination incident (request R1 and R2)
+    content: |
+      # Two requests arrive concurrently, 0.3ms apart. Both reach deserializeSession() at ~the same time.
+      # The shared StringBuilder is empty at the start (previous request completed its clear()).
+
+      14:22:01.000  R1 (session-id=sess-A, user=alice)  Redis GET sess-A -> '{"sessionId":"sess-A","userId":"alice","role":"admin","email":"alice@co.io","expiresAt":"2025-06-10T15:00:00Z"}'
+      14:22:01.000  R2 (session-id=sess-B, user=bob)    Redis GET sess-B -> '{"sessionId":"sess-B","userId":"bob","role":"viewer","email":"bob@co.io","expiresAt":"2025-06-10T15:30:00Z"}'
+
+      # Parser note: the lenient parser in use returns the first complete JSON object in the input
+      # string; JSON.parse('') throws SyntaxError.
+
+      14:22:01.001  R1  deserializeSession() -> sharedBuilder.append('{"sessionId":"sess-A","userId":"alice",...}')
+                        sharedBuilder content: '{"sessionId":"sess-A","userId":"alice","role":"admin","email":"alice@co.io","expiresAt":"2025-06-10T15:00:00Z"}'
+
+      14:22:01.001  R2  deserializeSession() -> sharedBuilder.append('{"sessionId":"sess-B","userId":"bob",...}')
+                        sharedBuilder content: '{"sessionId":"sess-A",...,"expiresAt":"2025-06-10T15:00:00Z"}{"sessionId":"sess-B","userId":"bob","role":"viewer","email":"bob@co.io","expiresAt":"2025-06-10T15:30:00Z"}'
+
+      14:22:01.002  R1  JSON.parse(sharedBuilder.toString()) -> Session { sessionId: sess-A, userId: alice, ... }
+      14:22:01.002  R1  sharedBuilder.clear()
+
+      14:22:01.002  R2  JSON.parse(sharedBuilder.toString())
+                        sharedBuilder.toString() -> '' -> SyntaxError -> catch block in auth-middleware
+                        re-reads from Redis and parses with a local buffer
+
+      # Interleaving observed in incident INC-4412:
+      14:23:05.100  R3 (sess-C, user=carol)  sharedBuilder.append(carol's JSON)
+      14:23:05.100  R4 (sess-D, user=dave)   sharedBuilder.append(dave's JSON)
+      14:23:05.101  R4  JSON.parse(sharedBuilder.toString())
+                        parser input: '{"sessionId":"sess-C","userId":"carol",...}{"sessionId":"sess-D",...}'
+                        parser output: Session { sessionId: sess-C, userId: carol }
+                        R4's request proceeds with userId=carol; dave's browser renders carol's dashboard
+      14:23:05.101  R4  sharedBuilder.clear()
+      14:23:05.102  R3  JSON.parse(sharedBuilder.toString()) -> '' -> SyntaxError -> fallback
+                        R3's fallback re-read returns its own session
+  - id: redis-dump
+    type: log
+    label: Redis session data for the affected sessions (dumped during incident)
+    content: |
+      # Redis DUMP at 14:23:05Z (during the INC-4412 incident):
+      127.0.0.1:6379> GET session:sess-C
+      "{\"sessionId\":\"sess-C\",\"userId\":\"carol\",\"role\":\"editor\",\"email\":\"carol@co.io\",\"expiresAt\":\"2025-06-10T15:00:00Z\"}"
+
+      127.0.0.1:6379> GET session:sess-D
+      "{\"sessionId\":\"sess-D\",\"userId\":\"dave\",\"role\":\"viewer\",\"email\":\"dave@co.io\",\"expiresAt\":\"2025-06-10T16:00:00Z\"}"
+
+      127.0.0.1:6379> DBSIZE -> 1247 sessions
+      127.0.0.1:6379> RANDOMKEY -> "session:sess-0891"   # all keys follow the session: prefix pattern
+  - id: auth-middleware
+    type: code
+    label: session-svc/auth-middleware.ts — session lookup and authorization (complete)
+    content: |
+      // This middleware runs AFTER deserializeSession. It receives the Session object and checks
+      // authorization. It does NOT modify the session, rewrite any fields, or perform its own
+      // deserialization. It trusts the Session object it receives.
+
+      export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
+        const sessionId = req.cookies['session_id'];      // read from the request cookie
+        if (!sessionId) return res.status(401).json({ error: 'No session' });
+
+        const rawJson = await redis.get(`session:${sessionId}`);
+        if (!rawJson) return res.status(401).json({ error: 'Session expired' });
+
+        const session = deserializeSession(rawJson);
+
+        req.user = { id: session.userId, role: session.role, email: session.email };
+        req.sessionId = session.sessionId;
+        next();
+      }
+  - id: request-log
+    type: log
+    label: load balancer and request routing log for the affected requests
+    content: |
+      # Load balancer access log (L7, session-affinity by session_id cookie):
+      14:23:05.099  R3  src=10.1.2.30  cookie=sess-C  -> session-svc-pod-1  (affinity: sess-C -> pod-1)
+      14:23:05.099  R4  src=10.1.2.45  cookie=sess-D  -> session-svc-pod-1  (affinity: sess-D -> pod-1)
+      # The LB routes by session_id cookie; different session IDs can land on the same pod.
+
+      # Cookie inspection:
+      R3 cookie header: session_id=sess-C   (carol's browser)
+      R4 cookie header: session_id=sess-D   (dave's browser)
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Change the deserialization mode from shared-buffer to per-request: allocate a new
+          StringBuilder (or simply use JSON.parse directly on the raw string) inside each
+          deserializeSession() call.
+
+      F2: Add a mutex (synchronized lock) around the shared StringBuilder so only one
+          deserializeSession() call can use it at a time.
+
+      F3: Move sharedBuilder.clear() from after JSON.parse to before sharedBuilder.append() (i.e.,
+          clear-before-append instead of clear-after-parse).
+
+      F4: Add a session-integrity check after deserialization: verify that the deserialized
+          session.sessionId matches the sessionId from the cookie, and re-read from Redis if it
+          does not.
+
+      Constraints:
+        - The fix must handle arbitrary concurrency (hundreds of concurrent requests per pod).
+        - The fix must not introduce a serialization bottleneck that degrades p99 latency.
+        - The fix must prevent cross-contamination, not merely detect it after the fact.
+tags: [debugging, state-corruption, session, shared-buffer, concurrency, cross-contamination]

@@ -1,0 +1,60 @@
+id: speed-review-matrix-json
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: expert
+title: Emit a Machine-Readable Transaction Review Matrix
+summary: Convert a transaction implementation, invariants, and traces into an exact JSON review matrix with evidence-grounded pass/fail verdicts.
+prompt: |
+  Review [contract], [implementation], and [trace]. Output JSON only, matching [schema].
+  Include the four checks in schema order. Do not add keys or prose outside JSON.
+artifacts:
+  - id: contract
+    type: spec
+    label: Transfer contract
+    content: |
+      C1 Authorization: both account rows must be selected with tenant_id = authenticated tenant.
+      C2 Atomicity: debit, credit, and transfer record occur in one transaction.
+      C3 Concurrency: account rows must be locked in ascending account id order.
+      C4 Idempotency: key uniqueness is tenant-scoped; a duplicate returns the original
+      transfer without applying balances again.
+  - id: implementation
+    type: code
+    label: Transfer service excerpt
+    content: |
+      return db.transaction(async (tx) => {
+        const prior = await tx.transfers.findFirst({ where: eq(transfers.key, key) });
+        if (prior) return prior;
+        const [from, to] = await Promise.all([
+          tx.select().from(accounts).where(eq(accounts.id, fromId)).for("update"),
+          tx.select().from(accounts).where(eq(accounts.id, toId)).for("update"),
+        ]);
+        await tx.update(accounts).set({ balance: from.balance - cents }).where(eq(accounts.id, fromId));
+        await tx.update(accounts).set({ balance: to.balance + cents }).where(eq(accounts.id, toId));
+        return tx.insert(transfers).values({ tenantId, key, fromId, toId, cents }).returning();
+      });
+  - id: trace
+    type: log
+    label: Reproduction and schema facts
+    content: |
+      Schema unique constraint: UNIQUE(tenant_id, key).
+      Reproduction A: tenant red requested fromId=acct-blue-1 and successfully updated it.
+      Reproduction B: T1 locked account b then waited for a; T2 locked a then waited for b.
+      Duplicate in same tenant: first lookup by key returned another tenant's row; no writes followed.
+      Failure injection after debit: transaction rolled back debit; no credit or transfer row remained.
+  - id: schema
+    type: spec
+    label: Required JSON shape and order
+    content: |
+      {
+        "checks": [
+          { "id": "C1", "verdict": "pass|fail", "evidence": ["artifact-id"], "reason": "one sentence" },
+          { "id": "C2", "verdict": "pass|fail", "evidence": ["artifact-id"], "reason": "one sentence" },
+          { "id": "C3", "verdict": "pass|fail", "evidence": ["artifact-id"], "reason": "one sentence" },
+          { "id": "C4", "verdict": "pass|fail", "evidence": ["artifact-id"], "reason": "one sentence" }
+        ],
+        "blocking": ["C1", "C3", "C4"],
+        "verdict": "request-changes"
+      }
+      Evidence arrays may contain multiple ids, but no ids outside the supplied artifacts.
+tags: [json, code-review, transactions, authorization, idempotency]

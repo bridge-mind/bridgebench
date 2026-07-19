@@ -1,0 +1,132 @@
+id: fix-adequacy-utf8-stream-decoder
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: SSE Proxy Decodes UTF-8 Per Chunk and Corrupts Split Characters
+summary: >-
+  A streaming proxy occasionally replaces emoji and non-Latin characters with U+FFFD when a UTF-8
+  sequence straddles network chunks. Four fixes add per-chunk conversion, stateful decoding, base64, or
+  ad-hoc byte carryover. Determine which repair handles all chunk boundaries while preserving SSE text,
+  flush behavior, request isolation, and malformed-input policy.
+prompt: |
+  Evaluate the fictional LiveDraft fixes using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use adequate-fix and shallow-fix.
+
+  1. State the root cause in current-code and trace failing-case bytes into the two replacement characters.
+  2. Derive the decoder invariants from protocol-contract, including request-local state, incomplete-byte
+     retention, EOF flush, malformed input, and unchanged SSE framing.
+  3. Classify P1 through P4. For each shallow fix, identify a supplied case it fails or a compatibility
+     requirement it violates.
+  4. Explain why P2 does not delay complete ASCII chunks and why its final end() call is required even
+     after every data chunk was written.
+  5. Explain why concatenating the entire response before decoding would be correct for characters but
+     still unacceptable for this streaming endpoint.
+  6. Give a test matrix using exact byte partitions for 1/2/3/4-byte characters, multiple characters in
+     one split, malformed EOF, concurrent streams, and the latency assertion.
+
+  Exactly one patch satisfies the complete contract; do not invent browser or upstream behavior.
+artifacts:
+  - id: protocol-contract
+    type: spec
+    label: authoritative upstream and downstream streaming contract
+    content: |
+      - Upstream body bytes are UTF-8 encoded SSE text. Network chunk boundaries are arbitrary and have
+        no character or event semantics.
+      - Valid complete code points must be reproduced exactly. An incomplete sequence may be retained
+        only until later bytes or EOF. At EOF, one truly incomplete/malformed sequence becomes U+FFFD.
+      - Downstream remains `Content-Type: text/event-stream; charset=utf-8`; event bytes are not base64.
+      - Complete text from each incoming chunk must be forwarded immediately; buffering the entire body
+        or waiting for an SSE event terminator violates the latency contract.
+      - Decoder state is isolated per HTTP request and released at completion or error.
+      This is the complete decoding and compatibility contract.
+  - id: current-code
+    type: code
+    label: proxy/live-draft.ts — current complete stream path
+    content: |
+      export async function proxyDraft(upstream: Response, downstream: ServerResponse) {
+        downstream.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        try {
+          for await (const chunk of upstream.body) {
+            downstream.write(Buffer.from(chunk).toString('utf8'));
+          }
+          downstream.end();
+        } catch (error) {
+          downstream.destroy(error as Error);
+        }
+      }
+      // Each Buffer.toString call creates a fresh decoder. No state survives between iterations.
+      // The upstream yields Uint8Array chunks; downstream.write(string) encodes the string as UTF-8.
+  - id: failing-case
+    type: log
+    label: exact bytes and observed text for one SSE event
+    content: |
+      Intended UTF-8 text:  data: A💡B\n\n
+      UTF-8 bytes:          64 61 74 61 3a 20 41 f0 9f 92 a1 42 0a 0a
+      chunk 1:             64 61 74 61 3a 20 41 f0 9f
+      chunk 2:             92 a1 42 0a 0a
+
+      current chunk 1 toString -> "data: A�"  (incomplete f0 9f replaced at decoder EOF)
+      current chunk 2 toString -> "��B\n\n"   (two continuation bytes are malformed as a fresh string)
+      observed downstream:     "data: A���B\n\n"
+      Unsplit control chunk containing all bytes decodes exactly to "data: A💡B\n\n".
+  - id: runtime-api
+    type: spec
+    label: pinned Node decoder semantics used by candidates
+    content: |
+      `new StringDecoder('utf8')` retains an incomplete trailing UTF-8 sequence between write calls.
+      write(buffer) immediately returns all complete text and withholds only an incomplete suffix.
+      end() flushes retained bytes, returning U+FFFD for an incomplete sequence at EOF, then clears state.
+      A separate instance has separate state. Buffer.toString('utf8') is stateless across calls.
+      These semantics are authoritative for the pinned runtime in this task.
+  - id: regression-cases
+    type: table
+    label: required cases and HEAD results
+    content: |
+      case  intended            partition                         HEAD
+      A     ASCII `data:x\n\n`  after every byte                  correct
+      B     `¢` (c2 a2)         c2 | a2                           `��`
+      C     `€` (e2 82 ac)      e2 82 | ac                        `��`
+      D     `💡` (f0 9f 92 a1)  f0 9f | 92 a1                     `���`
+      E     `¢€`                c2 | a2 e2 | 82 ac                corrupts both
+      F     malformed EOF       final bytes e2 82 then EOF         one U+FFFD required
+      G     two concurrent HTTP streams with independently split characters must not share bytes/state.
+      Latency probe: complete ASCII from a chunk must reach downstream before the next upstream chunk.
+  - id: candidate-patches
+    type: diff
+    label: proposed patches P1..P4
+    content: |
+      P1 — explicit per-chunk conversion:
+          for await (const chunk of upstream.body) {
+            downstream.write(Buffer.from(chunk).toString('utf8'));
+          }
+
+      P2 — request-local stateful decoder:
+          const decoder = new StringDecoder('utf8');
+          for await (const chunk of upstream.body) {
+            const text = decoder.write(Buffer.from(chunk));
+            if (text.length) downstream.write(text);
+          }
+          const tail = decoder.end();
+          if (tail.length) downstream.write(tail);
+          downstream.end();
+          # decoder is declared inside proxyDraft, once per request.
+
+      P3 — transport bytes as base64:
+          downstream.write(Buffer.from(chunk).toString('base64'));
+          # Keep Content-Type text/event-stream; browser code is unchanged.
+
+      P4 — carry at most one trailing byte manually:
+          let carry = Buffer.alloc(0);
+          for each chunk: decode concat(carry, chunk minus its final byte); carry=final byte;
+          at EOF: decode carry.
+      Compatibility: public response format and streaming latency cannot change.
+  - id: reviewer-notes
+    type: note
+    label: rejected workaround and non-causes
+    content: |
+      Buffering all upstream bytes and calling toString once reproduces valid characters, but delays the
+      first SSE token until response completion and can retain an unbounded response. Increasing upstream
+      chunk size only changes probability; TCP/TLS may split any sequence. Browser font fallback occurs
+      after it receives text and cannot reconstruct bytes already replaced by the server.
+tags: [debugging, fix-adequacy, utf8, streaming, sse]

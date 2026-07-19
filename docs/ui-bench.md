@@ -13,9 +13,9 @@ before this repository's `main` was rebuilt as a pure code-generation arena.
 `main` currently carries one restored task — the lava lamp
 (`s1-lava-lamp-redux`), UI Bench's signature task — as a working slice of
 that engine, kept deliberately separate from the arena's category/task
-system (`src/contracts/categories.ts`, `src/tasks.ts`). The other nine tasks
-and the live-model runner (`bridgebench ui run`) remain on
-`season-engine-alpha` and haven't been ported yet.
+system (`src/contracts/categories.ts`, `src/tasks.ts`). The live-model
+runner (`bridgebench ui run`) is ported and runs against OpenRouter; the
+other nine tasks remain on `season-engine-alpha`.
 
 ## Qualification vs. probes
 
@@ -51,12 +51,30 @@ negative fixtures for the disqualification and static-validation paths.
 `npm test` runs all three through the full pipeline in
 `test/ui-evaluator.integration.test.ts`, real Chromium included.
 
-`bridgebench ui run` (generate an artifact from a live model and evaluate
-it) is not implemented on `main` yet — the season branch's runner was built
-against a multi-provider abstraction that no longer exists here (`main`
-calls models exclusively through OpenRouter; see
-[`src/openrouter.ts`](../src/openrouter.ts)). Porting it means adapting that
-runner to `main`'s provider, not just copying the file.
+## Run live models
+
+`bridgebench ui run` generates an artifact from each requested model
+(any OpenRouter slug — `OPENROUTER_API_KEY` required), evaluates it in
+headless Chromium, and journals the outcome with real token/cost/latency
+numbers:
+
+```bash
+npm run ui -- run -m anthropic/claude-opus-4.8,openai/gpt-5.6-sol \
+  -t s1-lava-lamp-redux                                # journal only
+npm run ui -- run -m acme/new-model --publish \
+  --run-key ui-s1-20260715                             # stream results live
+npm run ui -- run -m reference --mock                  # golden-fixture pipeline test
+```
+
+`--publish` streams each result to the API as it completes (one POST per
+result under a run key chosen at start; failures are re-swept idempotently
+at run end). `--mock` feeds `fixtures/golden-correct.html` through the full
+extract → validate → evaluate pipeline — real Chromium, zero spend — and
+never publishes; mock journals live under `results/ui-mock/`. `--resume`
+skips (model, task) pairs already successful in the journal, `--dry` skips
+the browser, and `--max-tokens` / `--temperature` override the UI request
+policy (32k tokens, temperature 0.7, reasoning excluded). SIGINT stops
+gracefully after the in-flight task and exits 130.
 
 ## Publish results to the API
 

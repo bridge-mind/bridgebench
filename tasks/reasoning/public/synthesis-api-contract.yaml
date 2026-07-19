@@ -1,9 +1,9 @@
 id: synthesis-api-contract
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: multi-artifact-synthesis
 difficulty: expert
-title: Legacy API Clients Lose Exactly Their Renamed Fields After a Uniform Projection Allowlist
+title: Legacy v4 Profile Clients Failing on Missing Required Fields While v5 Stays Healthy
 summary: A shared profile handler serves both a frozen v4 contract and a current v5 contract through a per-route gateway pipeline. After a security ticket added a response-field allowlist to every route, v4 clients silently lose three fields while keeping two, all with HTTP 200. Reconcile the contracts, pipeline, handler, logs, and field observations to find the one misconfiguration, reject the decoys, and specify the minimal fix scoped to the affected route.
 prompt: |
   v4 clients (mobile and a partner batch job) started getting HTTP 200 profile responses that are
@@ -206,9 +206,5 @@ artifacts:
         v4 required fields:            5  (id, user_name, avatar_url, created, plan)
         v4 fields present in response: 2  (id, plan)
         v4 fields missing:            3  (user_name, avatar_url, created)
-        of the 3 missing, all 3 are the fields that require a name change from v5
-        of the 2 present, neither requires a name change from v5
-      # Fingerprint: every field that needs a NAME change is absent; the two fields whose name is
-      # unchanged across versions (id, plan) are present. v5 clients receive the full v5 shape.
       # (All rows describe /api/v4/profile responses observed during the incident.)
 tags: [api, compatibility, versioning, gateway, multi-artifact-synthesis]

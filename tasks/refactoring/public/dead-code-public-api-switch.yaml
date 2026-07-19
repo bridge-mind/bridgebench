@@ -1,10 +1,10 @@
 id: dead-code-public-api-switch
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: dead-code-elimination
 difficulty: expert
 title: Auditing a dead-code cleanup PR for the Aurora ledger-reducer
-summary: A cleanup PR deletes six items from a reducer module, each claimed to be dead. Reachability runs through a switch over a self-declared-complete set of dispatched action types, a public export surface consumed by another package, and transitive helpers. One action case is never dispatched, one helper is shared by live cases, and one export has no internal caller but is public. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
+summary: A cleanup PR deletes six items from a reducer module, each claimed to be dead. Reachability runs through a switch over a self-declared-complete set of dispatched action types, a public export surface consumed by another package, and transitive helpers. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
 prompt: |
   A cleanup PR (removal-pr) deletes six items from the Aurora `ledger-reducer` module, each labelled
   "dead code." Reachability is fully determined by three self-declared-complete artifacts: the
@@ -105,36 +105,36 @@ artifacts:
           case 'credit':   return applyCredit(state, action.amount);
           case 'debit':    return applyDebit(state, action.amount);
           case 'transfer': return applyTransfer(state, action);
-          case 'reverse':  return applyReverse(state, action); // 'reverse' is never dispatched
-          default:         return state;                       // never reached: type is pre-validated
+          case 'reverse':  return applyReverse(state, action);
+          default:         return state;
         }
       }
 
       function applyCredit(s: State, amt: number): State {
-        return { ...s, balance: s.balance + amt, fee: computeFee(amt) };  // 'credit' is dispatched
+        return { ...s, balance: s.balance + amt, fee: computeFee(amt) };
       }
       function applyDebit(s: State, amt: number): State {
-        return { ...s, balance: s.balance - amt, fee: computeFee(amt) };  // 'debit' is dispatched
+        return { ...s, balance: s.balance - amt, fee: computeFee(amt) };
       }
       function applyTransfer(s: State, a: Action): State {
-        return applyDebit(applyCredit(s, a.amount), a.amount);            // 'transfer' is dispatched
+        return applyDebit(applyCredit(s, a.amount), a.amount);
       }
-      function applyReverse(s: State, a: Action): State {                 // only caller: case 'reverse'
+      function applyReverse(s: State, a: Action): State {
         return { ...s, balance: s.balance + a.amount, note: formatEntry(a) };
       }
 
-      function computeFee(amt: number): number { return Math.round(amt * 0.01); } // used by credit+debit
-      function formatEntry(a: Action): string { return `${a.type}:${a.amount}`; } // only caller: applyReverse
+      function computeFee(amt: number): number { return Math.round(amt * 0.01); }
+      function formatEntry(a: Action): string { return `${a.type}:${a.amount}`; }
 
-      export function applyInterest(s: State, rate: number): State {              // public export (billing)
+      export function applyInterest(s: State, rate: number): State {
         return { ...s, balance: s.balance + Math.round(s.balance * rate) };
       }
 
-      function migrateV1(old: OldState): State {                                  // no caller; not exported
+      function migrateV1(old: OldState): State {
         return { balance: old.bal, fee: 0 };
       }
 
-      function legacyChecksum(s: State): string {                                 // no caller; not exported
+      function legacyChecksum(s: State): string {
         return `${s.balance}:${s.fee}`;
       }
   - id: removal-pr

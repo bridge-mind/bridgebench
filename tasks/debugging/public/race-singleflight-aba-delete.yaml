@@ -1,0 +1,118 @@
+id: race-singleflight-aba-delete
+version: 1.0.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Older Single-Flight Completion Deletes a Newer Refresh Promise
+summary: >-
+  A cache coalescer normally shares one loader promise per key, but a forced refresh replaces the map
+  entry while the old load is still running. The old promise then unconditionally deletes the key,
+  allowing a third loader to overlap the replacement. Reconstruct the ABA-like interleaving and select
+  the identity-checked cleanup that preserves coalescing.
+prompt: |
+  Debug the fictional SignalShelf coalescer using ONLY the supplied artifacts. Cite artifact ids for
+  every conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State the single concurrency defect and the per-key invariant it violates.
+  2. Reconstruct schedule S step by step, naming the value held by inflight['K'] after every operation
+     and the exact moment two loaders become concurrent.
+  3. Explain why JavaScript's single event loop, Promise.finally, and Map atomicity do not prevent the bug.
+  4. Rule out cache TTL, loader rejection, cross-process duplication, and the caller timeout as root causes.
+  5. Classify P1 through P4 and choose the adequate fix. Explain why unconditional deletion in P2 still
+     has the same ownership problem even though its timing changes.
+  6. Give a deterministic deferred-Promise test proving that completion of P-old cannot remove P-new,
+     and that caller C joins P-new rather than starting L-third.
+
+  The process topology, entry points, and synchronization are exhaustive.
+artifacts:
+  - id: coalescer-code
+    type: code
+    label: cache/singleflight.ts — complete implementation
+    content: |
+      const inflight = new Map<string, Promise<Value>>();
+
+      export function getOrLoad(key: string, loader: () => Promise<Value>) {
+        const existing = inflight.get(key);
+        if (existing) return existing;
+
+        const current = loader();
+        inflight.set(key, current);
+        current.finally(() => inflight.delete(key));
+        return current;
+      }
+
+      export function forceRefresh(key: string, loader: () => Promise<Value>) {
+        const replacement = loader();
+        inflight.set(key, replacement); // intentionally supersedes any old load for this key
+        replacement.finally(() => inflight.delete(key));
+        return replacement;
+      }
+      // These are the only reads/writes of `inflight`. Both functions run in one Node.js process.
+      // loader invocations perform asynchronous network I/O and may resolve in any order.
+  - id: invariant-spec
+    type: spec
+    label: coalescing contract and forced-refresh semantics
+    content: |
+      I1: At most one CURRENT loader per key may be discoverable by getOrLoad.
+      I2: forceRefresh deliberately replaces the current loader. After replacement, completion of any
+      older superseded loader must not mutate or remove the replacement's map entry.
+      I3: callers arriving while the replacement is pending must receive that exact replacement promise.
+      I4: after the current promise settles, its own map entry must be removed so later calls can reload.
+      A forced refresh is rare but supported; removing it is not an acceptable fix.
+  - id: failing-schedule
+    type: log
+    label: deterministic schedule S with deferred loaders
+    content: |
+      S0 inflight={}.
+      S1 caller A getOrLoad(K): starts L-old -> P-old; set K=P-old.
+      S2 admin B forceRefresh(K): starts L-new -> P-new; overwrite K=P-new.
+      S3 P-old resolves first. Its finally callback runs: inflight.delete(K) returns true.
+         Map is now {}, although P-new is still pending.
+      S4 caller C getOrLoad(K): no existing entry; starts L-third -> P-third; set K=P-third.
+      S5 P-new and P-third overlap for 84ms and issue duplicate origin mutations for K.
+      S6 P-new resolves; its finally deletes K=P-third. A later caller can start a fourth loader.
+      Promise identities: P-old !== P-new !== P-third. No loader rejects in this schedule.
+  - id: topology-and-telemetry
+    type: note
+    label: exhaustive runtime facts and observed impact
+    content: |
+      The incident occurs within one process and one `inflight` Map; the service has one replica in the
+      reproducer. Origin traces show L-new and L-third overlap and both increment a remote generation.
+      Cache TTL is checked only before getOrLoad and does not touch `inflight`. Caller timeouts cancel
+      only their await, not a shared loader. There is no worker thread, Redis lock, rejection, or process
+      restart in schedule S. Duplicate generations are the observed impact; no data loss is claimed.
+  - id: language-semantics
+    type: spec
+    label: relevant JavaScript scheduling semantics
+    content: |
+      Map.get/set/delete calls are individually synchronous. Promise settlement schedules finally handlers
+      as microtasks. A callback registered on P-old still runs after P-new replaces the map entry. Map.delete
+      removes by key only; it does not compare the current value with the promise whose callback is running.
+      No simultaneous CPU execution is required: the harmful order S2 -> S3 -> S4 is a legal serialized
+      event-loop order around asynchronous completions.
+  - id: candidate-patches
+    type: diff
+    label: proposed fixes P1..P4
+    content: |
+      P1 — identity-owned cleanup in both functions:
+        current.finally(() => { if (inflight.get(key) === current) inflight.delete(key); });
+        replacement.finally(() => { if (inflight.get(key) === replacement) inflight.delete(key); });
+
+      P2 — delete before overwrite in forceRefresh:
+        inflight.delete(key);
+        const replacement = loader(); inflight.set(key, replacement);
+        replacement.finally(() => inflight.delete(key));
+        # getOrLoad's P-old finally remains unconditional.
+
+      P3 — change Map to WeakMap while retaining the same key-only cleanup logic.
+
+      P4 — have forceRefresh return the existing promise and never start a replacement.
+      Compatibility: P1-I4 and supported forced replacement must all remain true.
+  - id: passing-control
+    type: log
+    label: ordinary no-refresh control
+    content: |
+      A getOrLoad(K) sets K=P1. B and C arrive before P1 settles and both receive strict-equal P1.
+      P1 settles, its finally deletes K, and a later D starts P2. This control passes at HEAD because no
+      newer owner replaces K before P1 cleanup; it does not exercise invariant I2.
+tags: [debugging, concurrency-defect, promises, singleflight, aba]

@@ -1,0 +1,164 @@
+id: stateful-token-bucket-refill
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Lazy Token-Bucket Trace Across a Mid-Window Plan Upgrade
+summary: >-
+  Replay two independently keyed API token buckets through lazy refills, rejected requests, and a
+  mid-window quota-plan update. Derive every outcome, retry delay, final state, the exact upgrade
+  semantics, and the first behavioral divergence from a tempting timestamp-reset alternative.
+prompt: |
+  ThrottleDock enforces one lazy token bucket for each API key. Replay [operation-log] in its listed
+  order using the complete rules in [bucket-spec], the initial states in [initial-buckets], request
+  costs in [request-costs], and the real upgrade in [profile-update]. Requests at the same timestamp
+  are still ordered by sequence number. [triage-note] contains unverified incident claims; do not
+  treat any claim as a rule.
+
+  Times are elapsed seconds after 10:00:00. There are no operations other than the ones shown, so
+  lazy refill occurs only immediately before an operation. All token quantities are integers.
+
+  1. Request trace. For every request operation (all rows except the profile update), state ALLOW or
+     REJECT and give the bucket's token count immediately after that operation. A rejected request
+     still retains any refill that was applied before it.
+  2. Retry delays. For each rejected request, give its exact Retry-After value in seconds and show
+     the refill instant(s) that make the request affordable. Do not charge tokens for rejected
+     requests.
+  3. Upgrade semantics. At sequence 6, state the precise `birch` state immediately before and
+     immediately after the profile update, including tokens, `lastRefillAt`, capacity, refill amount,
+     and interval. Identify the first later `birch` request that is allowed because of the new plan.
+  4. Final state. Give the final complete state for both `atlas` and `birch` (tokens,
+     `lastRefillAt`, capacity, refill amount, and interval). Confirm why no unlisted passive refill
+     should be added after sequence 15.
+  5. Claim review. Classify each numbered claim in [triage-note] as correct or incorrect and give the
+     rule and trace fact that decides it.
+  6. Timestamp-reset counterfactual. Under [proposed-alternative], identify the FIRST request whose
+     outcome differs from the shipped behavior, give both outcomes and token states, and explain why
+     this alternative cannot affect any `atlas` operation.
+artifacts:
+  - id: bucket-spec
+    type: spec
+    label: ThrottleDock token-bucket semantics
+    content: |
+      A bucket state is (tokens, capacity, refillAmount, refillIntervalSeconds, lastRefillAt).
+      Buckets are keyed solely by API key; `atlas` and `birch` never share tokens or refill clocks.
+
+      BEFORE EVERY OPERATION on bucket B (a request or a profile update), lazily apply B's CURRENT
+      profile:
+        elapsed = now - lastRefillAt
+        intervals = floor(elapsed / refillIntervalSeconds)
+        tokens = min(capacity, tokens + intervals * refillAmount)
+        lastRefillAt = lastRefillAt + intervals * refillIntervalSeconds
+      If intervals is zero, neither tokens nor lastRefillAt changes. The leftover portion of an
+      interval is preserved because lastRefillAt advances by whole intervals, not to `now`.
+
+      REQUEST:
+        - Look up its cost in [request-costs] after the lazy refill above.
+        - If tokens >= cost, ALLOW and subtract cost.
+        - Otherwise REJECT. A rejection changes no tokens after the lazy refill, consumes no tokens,
+          and does not reset lastRefillAt.
+        - Retry-After is the smallest non-negative whole number of seconds after `now` at which
+          repeated future refills under the then-current profile make tokens >= cost. It is measured
+          from the request timestamp, not from lastRefillAt.
+
+      PROFILE UPDATE:
+        - First lazy-refill using the OLD profile at the update timestamp.
+        - Then replace capacity, refillAmount, and refillIntervalSeconds with the values in the update.
+        - Clamp tokens only if above the new capacity: tokens = min(tokens, newCapacity).
+        - Carry the resulting lastRefillAt forward unchanged. An update grants no tokens by itself and
+          does not reset the refill clock.
+
+      There is no background timer. A bucket accrues only when a listed operation triggers the lazy
+      calculation. After the final listed operation, report its stored state exactly as it is.
+  - id: initial-buckets
+    type: config
+    label: Bucket states at 10:00:00
+    content: |
+      apiKey  | tokens | capacity | refillAmount | refillIntervalSeconds | lastRefillAt
+      atlas   | 8      | 10       | 2            | 5                     | 0
+      birch   | 1      | 6        | 1            | 3                     | 0
+
+      `lastRefillAt` is measured in elapsed seconds after 10:00:00. Both rows are complete; there
+      are no hidden buckets, burst credits, or account-level quota pools.
+  - id: request-costs
+    type: table
+    label: Cost of each request class
+    content: |
+      request class | token cost
+      GET           | 1
+      WRITE         | 3
+      BATCH         | 6
+
+      Every request in [operation-log] is exactly one of these classes. Costs never vary by API key,
+      payload size, endpoint, success, or retry history.
+  - id: operation-log
+    type: log
+    label: Ordered raw operations
+    content: |
+      # Apply top-to-bottom. "now" is seconds after 10:00:00.
+      seq | now | apiKey | operation
+      1   | 1   | atlas  | GET
+      2   | 4   | birch  | WRITE
+      3   | 5   | atlas  | BATCH
+      4   | 6   | birch  | GET
+      5   | 9   | birch  | WRITE
+      6   | 10  | birch  | apply profile update U1
+      7   | 11  | birch  | WRITE
+      8   | 13  | atlas  | WRITE
+      9   | 13  | birch  | GET
+      10  | 17  | birch  | WRITE
+      11  | 20  | atlas  | BATCH
+      12  | 21  | atlas  | GET
+      13  | 24  | birch  | BATCH
+      14  | 25  | atlas  | GET
+      15  | 29  | birch  | BATCH
+
+      Rows 8 and 9 share a timestamp, but row 8 is applied first. The log is exhaustive: a bucket is
+      never touched between these rows and no request is silently retried.
+  - id: profile-update
+    type: diff
+    label: Real plan upgrade U1 for birch
+    content: |
+      U1 is applied only at sequence 6 (now=10) to the `birch` bucket.
+
+      --- birch profile before U1
+      +++ birch profile after U1
+      - capacity: 6
+      - refillAmount: 1
+      - refillIntervalSeconds: 3
+      + capacity: 8
+      + refillAmount: 2
+      + refillIntervalSeconds: 4
+
+      The update uses the PROFILE UPDATE rule in [bucket-spec]: old-profile refill first, then replace
+      parameters, clamp if necessary, and preserve lastRefillAt. `atlas` receives no update.
+  - id: triage-note
+    type: note
+    label: Unverified incident notes
+    content: |
+      These statements were copied from a chat room; each is a claim to verify, not a source of rules.
+
+      1. "The rejected birch WRITE at now=4 spends its two available tokens, so birch is empty."
+      2. "U1 immediately credits birch with two tokens at now=10 because the new plan refills by two."
+      3. "The atlas BATCH at now=20 must reject: only one five-second refill elapsed after now=13."
+      4. "Birch's BATCH at now=24 will become affordable at now=25, after one more two-token refill."
+      5. "Resetting birch's refill timestamp during U1 would also change atlas because both keys use
+          the same gateway clock."
+  - id: proposed-alternative
+    type: diff
+    label: Rejected timestamp-reset implementation
+    content: |
+      This is NOT the shipped U1 behavior. Evaluate it only for deliverable 6, starting from the same
+      initial states and replaying the same ordered log.
+
+      --- profile update implementation (shipped)
+      +++ proposed alternative
+           applyOldProfileRefill(bucket, now);
+           replaceProfile(bucket, update);
+           bucket.tokens = Math.min(bucket.tokens, update.capacity);
+      -    // lastRefillAt is preserved
+      +    bucket.lastRefillAt = now;
+
+      The proposed alternative changes only `birch` at U1. It does not change request costs, capacity,
+      refill amount, interval, request ordering, or any `atlas` state.
+tags: [token-bucket, lazy-refill, rate-limiting, stateful-execution, quota-upgrade]

@@ -1,0 +1,101 @@
+id: algorithmic-correctness-weighted-intervals
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: Select the Canonical Maximum-Reward Schedule Across Ties and Touching Intervals
+summary: >-
+  Four implementations of weighted interval scheduling agree on ordinary examples but differ on
+  half-open boundaries, negative rewards, predecessor search, and the canonical tie-break. The
+  complete contract and adversarial vectors make exactly one implementation correct.
+prompt: |
+  Use only schedule-contract, algorithm-model, adversarial-vectors, candidates, and manifest.
+  Reason by inspection and cite artifact ids. Verdicts are correct / incorrect.
+
+  1. Classify candidate-a through candidate-d against S1..S8.
+  2. For each incorrect candidate, give the first W1..W7 witness and its exact returned id list.
+  3. Identify the unique correct candidate and trace its DP states for W5.
+  4. State the predecessor index used for interval d in W2 and explain the half-open boundary.
+  5. Explain why maximizing reward and then minimizing interval count is not the declared tie-break.
+  6. Evaluate reviewer Ada's claim that negative-reward intervals should initialize DP to negative
+     infinity so every input chooses at least one interval.
+artifacts:
+  - id: schedule-contract
+    type: spec
+    label: Complete function and canonical-result contract
+    content: |
+      Input is an array of records {id:string,start:number,end:number,reward:number}. All fields are
+      finite integers; ids are unique; 0 <= start < end; reward may be negative, zero, or positive.
+
+      S1 selected intervals must not overlap. Intervals are half-open [start,end), so end===start is
+         compatible.
+      S2 maximize the sum of rewards. The empty schedule is allowed and has reward 0.
+      S3 among equal maximum rewards, choose the lexicographically smallest sequence of ids after
+         selected intervals are ordered by (end,start,id). Standard string code-unit ordering applies.
+      S4 return exactly that ordered id sequence in a fresh array; never mutate input or records.
+      S5 time must be O(n log n + T), where T is the total number of ids compared while resolving
+         exact DP ties; O(n^2) interval-pair scans are forbidden.
+      S6 predecessor p(i) is the greatest j<i with sorted[j].end <= sorted[i].start, or -1.
+      S7 all arithmetic is exact for the declared safe-integer inputs.
+      S8 duplicate end times and zero/negative rewards receive no special-case preference beyond S2/S3.
+  - id: algorithm-model
+    type: note
+    label: Frozen sorting, search, and DP model
+    content: |
+      Candidates first stable-sort copies of records by (end,start,id). lowerBoundEnd(x) returns the
+      first index whose end is >= x; upperBoundEnd(x) returns the first whose end is > x. Thus the
+      required predecessor is upperBoundEnd(start)-1, restricted to the prefix before i.
+
+      DP state i represents the canonical result using sorted positions 0..i. Excluding i uses
+      state i-1. Including i adds reward[i] and appends id[i] to state p(i). compare(a,b) chooses
+      greater reward, then lexicographically smaller complete id sequence. Persistent back-pointers
+      make construction non-mutating; compare may walk ids, and that work is counted in T.
+  - id: adversarial-vectors
+    type: table
+    label: Authoritative weighted-schedule witnesses
+    content: |
+      W1 [] -> []
+      W2 [{a,0,2,4},{b,2,4,5},{c,1,3,20},{d,4,6,1}] -> [c,d], reward 21.
+         In sorted order a,c,b,d, predecessor of d is b at index 2; c remains chosen through DP.
+      W3 [{a,0,1,-2},{b,1,2,0}] -> [] (reward tie 0: [] is lexicographically before [b]).
+      W4 [{z,0,2,5},{a,0,2,5}] -> [a].
+      W5 [{a,0,2,5},{b,2,4,5},{c,0,1,5},{d,1,4,5}] -> [a,b], not [c,d].
+         Both reward 10; ordered id sequences compare a before c.
+      W6 [{b,0,1,2},{a,1,2,0},{c,1,2,0}] -> [b], because [b] is a prefix of both tied extensions.
+      W7 [{a,0,5,8},{b,0,2,5},{c,2,5,4}] -> [b,c], reward 9.
+  - id: candidates
+    type: code
+    label: Four complete algorithm submissions in pseudocode
+    content: |
+      candidate-a:
+        copy and sort by (end,start,id)
+        compute each p with upperBoundEnd(start)-1 on the preceding prefix
+        DP from left to right; compare include/exclude by reward then full id-sequence lexicographic
+        return a fresh materialized sequence from the winning persistent back-pointer
+
+      candidate-b:
+        same as a, except p uses lowerBoundEnd(start)-1
+
+      candidate-c:
+        same sorting and predecessor search as a
+        compare states by greater reward, then fewer selected intervals, then id-sequence
+        lexicographic only if reward and count tie
+
+      candidate-d:
+        copy and sort by descending reward, then ascending end
+        scan once, accepting an interval when it is compatible with every already accepted interval
+        finally sort accepted intervals by (end,start,id) and return their ids
+
+      All binary searches are O(log n). Candidate d's compatibility index is an interval tree, so
+      its runtime is O(n log n); runtime alone does not establish correctness.
+  - id: manifest
+    type: note
+    label: Completeness and reviewer claim
+    content: |
+      candidate-a through candidate-d are the only submissions. Their sequence comparators use
+      ordinary lexicographic ordering where a proper prefix sorts first. No candidate overflows,
+      mutates input, or has behavior beyond candidates.
+
+      Ada proposes requiring a nonempty schedule and initializing the base state to negative
+      infinity. S2 explicitly permits empty, including for all-negative and zero-reward inputs.
+tags: [generation, algorithmic-correctness, dynamic-programming, intervals, tie-breaking]

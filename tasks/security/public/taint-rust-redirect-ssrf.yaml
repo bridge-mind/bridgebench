@@ -1,0 +1,105 @@
+id: taint-rust-redirect-ssrf
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Rust Image Proxy Validates the First URL but Follows Redirects into a Private Service
+summary: >-
+  An Axum image proxy parses an untrusted URL, pins HTTPS, resolves and rejects private addresses, then
+  hands the request to a reqwest client with automatic redirects. Trace taint across redirect targets and
+  DNS answers, distinguish the protected direct path from the reachable metadata sink, and specify
+  validation that applies to every network hop.
+prompt: |
+  Trace the fictional PixelQuay service using ONLY the supplied artifacts. Cite artifact ids for each
+  claim. Use vulnerable, mitigated, and false-positive. Do not provide payloads or exploitation steps.
+
+  1. Enumerate all untrusted sources, transformations, trust decisions, and outbound or response sinks for
+     `/proxy` and `/avatar/:id`.
+  2. Trace cases A through F in request-matrix hop by hop, including URL parse, hostname allowlist, DNS
+     answer, redirect policy, connected address, body limit, and returned bytes.
+  3. Identify every reachable source-to-sink vulnerability and the exact missing revalidation edge.
+     Separate direct private-IP rejection from redirect and DNS-rebinding behavior.
+  4. Classify scanner findings S1 through S5. Explain why URL encoding, Rust memory safety, HTTPS on the
+     first hop, and a response-size cap do or do not break the relevant taint chain.
+  5. State a safe redirect/DNS/connect invariant that validates each hop and binds the approved address to
+     the socket connection. Address IPv4, IPv6, userinfo, ports, redirect count, and mixed DNS answers.
+  6. Give deterministic tests for direct private targets, public-to-private redirect, DNS rebinding,
+     allowed CDN redirect, IPv4-mapped IPv6, oversized body, and the trusted avatar route.
+
+  Network-policy and client-config are exhaustive; the fictional hosts in request-matrix have fixed behavior.
+artifacts:
+  - id: handler-code
+    type: code
+    label: Rust Axum handlers and validator
+    content: |
+      async fn proxy(Query(q): Query<ProxyQuery>) -> Result<Response> {
+          let url = Url::parse(&q.url)?;
+          validate_initial(&url).await?;
+          let bytes = HTTP.get(url).send().await?.bytes_with_limit(2 * MIB).await?;
+          Ok(image_response(bytes))
+      }
+
+      async fn validate_initial(url: &Url) -> Result<()> {
+          ensure!(url.scheme() == "https");
+          ensure!(url.username().is_empty() && url.password().is_none());
+          ensure!(url.port_or_known_default() == Some(443));
+          ensure!(url.host_str().is_some_and(|h| h == "images.example" || h.ends_with(".img-cdn.example")));
+          let addrs = dns::lookup_host(url.host_str().unwrap()).await?;
+          ensure!(addrs.all(is_global_unicast));
+          Ok(())
+      }
+
+      async fn avatar(Path(id): Path<Uuid>) -> Result<Response> {
+          let key = db.avatar_key_for_current_user(id).await?;
+          Ok(image_response(object_store.get_by_key(key).await?))
+      }
+  - id: client-config
+    type: config
+    label: reqwest and resolver behavior
+    content: |
+      HTTP is a process-wide reqwest Client with Policy::limited(5). For every 301/302/303/307/308 it
+      resolves the Location URL itself and connects normally. validate_initial is not called by the
+      redirect callback. reqwest may resolve a hostname again at connect time; validate_initial does not
+      pin its checked addresses. The platform resolver accepts A and AAAA records.
+  - id: network-policy
+    type: config
+    label: pod egress and reachable services
+    content: |
+      PixelQuay may egress TCP/443 to all destinations. 169.254.169.254:443 serves fictional workload
+      identity documents. fd00::25:443 serves an internal render-admin API. Public internet HTTPS works.
+      The service account may read image objects only; an acquired workload identity can also read the
+      private render queue. No egress proxy revalidates destinations.
+  - id: request-matrix
+    type: table
+    label: deterministic DNS, redirect, and response fixtures
+    content: |
+      A https://images.example/cat -> DNS 203.0.113.8; 200 image bytes
+      B https://169.254.169.254/identity -> rejected: hostname not allowed
+      C https://images.example/to-id -> first DNS 203.0.113.8; 302 Location
+        https://169.254.169.254/identity; client follows; 200 identity JSON under 2 MiB
+      D https://a.img-cdn.example/render -> validation DNS 203.0.113.9; connect-time DNS fd00::25;
+        client connects to fd00::25; 200 admin status bytes
+      E https://a.img-cdn.example/large -> 200 3 MiB body; bytes_with_limit aborts after 2 MiB
+      F GET /avatar/A-7 by its owner -> DB returns opaque object key; object-store bytes returned; no URL
+        from the request reaches a network client
+  - id: scanner-findings
+    type: note
+    label: candidate findings
+    content: |
+      S1 q.url reaches HTTP.get after initial validation.
+      S2 url encoding should sanitize SSRF. URL percent-encoding changes representation, not destination.
+      S3 automatic redirects bypass the first-hop host/address validation.
+      S4 bytes_with_limit prevents all SSRF because responses are bounded. It limits size after connection.
+      S5 avatar id is an SSRF source. The route performs an owner-scoped DB lookup and opaque object-store
+          key access; it does not construct or fetch a URL.
+  - id: fix-contract
+    type: spec
+    label: required egress-validation behavior
+    content: |
+      Disable automatic redirects or implement a redirect callback that parses and revalidates every hop.
+      Permit only exact approved hosts/suffix labels, HTTPS, port 443, no userinfo, and at most five hops.
+      Resolve all A/AAAA addresses, reject the hop if any is non-global (including IPv4-mapped IPv6), and
+      connect through an API that pins one address from the validated set while preserving TLS SNI/hostname
+      verification. Do not perform an unchecked second DNS resolution. Apply the body cap and content-type
+      check after connection; return generic errors without response-body reflection.
+tags: [security, taint-flow, rust, ssrf, redirects]

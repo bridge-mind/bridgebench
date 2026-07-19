@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { ArenaRunner } from '../src/arena.js';
+import { MockOpenRouterGateway } from '../src/mock-gateway.js';
 import { makeTask, withTempStore } from './helpers.js';
 import type {
   ChatRequest,
@@ -19,6 +20,7 @@ class MockGateway implements OpenRouterGateway {
     let content: string;
     if (request.model.role === 'judge') {
       const payload = JSON.parse(request.user) as {
+        task: { artifacts: Array<{ id: string }> };
         modelA: { response: string };
         modelB: { response: string };
       };
@@ -35,6 +37,14 @@ class MockGateway implements OpenRouterGateway {
           completeness: 'Compared.',
         },
         violations: [],
+        decisiveDifference: {
+          deliverableId: 'd1',
+          winnerClaim: 'Reported the higher mocked quality signal.',
+          loserError: 'Reported the lower mocked quality signal.',
+          artifactIds: [payload.task.artifacts[0]!.id],
+          rubricCriterion: 'correctness',
+        },
+        abstainReason: null,
       });
     } else {
       const quality = [...request.model.id].reduce((sum, char) => sum + char.charCodeAt(0), 0);
@@ -87,6 +97,83 @@ describe('arena MVP', () => {
       expect(events.filter((event) => event.type === 'judge.completed')).toHaveLength(6);
       expect(events.filter((event) => event.type === 'match.completed')).toHaveLength(2);
       expect(events.at(-1)?.type).toBe('run.completed');
+      // judging.started announces each match's SEATED trio (never the whole
+      // pool), and the panel's votes come from exactly those judges.
+      for (const match of journal) {
+        const started = events.find(
+          (event) =>
+            event.type === 'judging.started' &&
+            (event.data as { matchId: string }).matchId === match.matchId,
+        );
+        expect(started).toBeDefined();
+        const seated = (started!.data as { judges: string[] }).judges;
+        expect(seated).toHaveLength(3);
+        expect(match.panel?.votes.map((vote) => vote.judgeModelId).sort()).toEqual(
+          [...seated].sort(),
+        );
+        const competitorVendors = new Set(
+          [match.competitors.modelA, match.competitors.modelB].map((id) => id.split('/')[0]),
+        );
+        for (const judgeId of seated) {
+          expect(competitorVendors.has(judgeId.split('/')[0]!)).toBe(false);
+        }
+      }
+    });
+  });
+
+  it('escalates a split mock panel to best-of-5 through the real mock gateway', async () => {
+    // The shipped mock gateway in splitPanel mode varies verdicts per judge,
+    // so a 2-1 primary split escalates through the adjudication path exactly
+    // as a paid run would — this is the pre-flight demo for arena-v0.5.0.
+    await withTempStore(async (store) => {
+      const events: ArenaEvent[] = [];
+      const result = await new ArenaRunner(
+        new MockOpenRouterGateway({ splitPanel: true, chunkDelayMs: 1 }),
+        store,
+        (event) => events.push(event),
+      ).run(
+        {
+          category: 'reasoning',
+          seed: 'escalation-demo-seed',
+          matches: 4,
+          maxCostUsd: 5,
+          resume: false,
+        },
+        [makeTask()],
+      );
+      expect(result.completed).toBe(4);
+      const journal = store.readAll();
+      const escalations = events.filter((event) => event.type === 'judging.escalated');
+      const escalated = journal.filter((match) => match.panel && match.panel.votes.length > 3);
+      expect(escalated.length).toBeGreaterThan(0);
+      expect(escalations.length).toBe(escalated.length);
+      for (const match of escalated) {
+        const panel = match.panel!;
+        expect(panel.adjudicated).toBe(true);
+        expect(panel.votes.length).toBeGreaterThanOrEqual(4);
+        expect(panel.votes.length).toBeLessThanOrEqual(5);
+        // A strict majority of the expanded panel (or no winner at all).
+        if (panel.winnerModelId) {
+          const majority = Math.floor(panel.votes.length / 2) + 1;
+          expect(panel.votesByModel[panel.winnerModelId]).toBeGreaterThanOrEqual(majority);
+          expect(match.outcome).toBe('judged');
+        } else {
+          expect(match.outcome).toBe('no-contest');
+        }
+        const escalation = escalations.find(
+          (event) => (event.data as { matchId: string }).matchId === match.matchId,
+        );
+        expect(escalation).toBeDefined();
+        // Every reserve announced in the event actually voted.
+        const voters = new Set(panel.votes.map((vote) => vote.judgeModelId));
+        for (const reserve of (escalation!.data as { reserves: string[] }).reserves) {
+          expect(voters.has(reserve)).toBe(true);
+        }
+      }
+      // Non-escalated matches keep the classic trio.
+      for (const match of journal.filter((entry) => entry.panel?.votes.length === 3)) {
+        expect(match.panel!.adjudicated).toBe(false);
+      }
     });
   });
 
@@ -100,9 +187,7 @@ describe('arena MVP', () => {
     }
     await withTempStore(async (store) => {
       const events: string[] = [];
-      const runner = new ArenaRunner(new DeadGateway(), store, (event) =>
-        events.push(event.type),
-      );
+      const runner = new ArenaRunner(new DeadGateway(), store, (event) => events.push(event.type));
       const result = await runner.run(
         {
           category: 'reasoning',

@@ -1,0 +1,191 @@
+id: algorithmic-correctness-lru-evict
+version: 1.1.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: LRUCache — Which Implementation Evicts the Correct Key After Every Access Pattern
+summary: A fixed LRU cache specification defines recency updates on get and put, eviction policy when full, missing-key return values, and a capacity-1 edge case. Five implementations are under review. Classify all five against the contract and cite the operation trace step that exposes any violation.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (lru-spec, operation-trace, candidates-a,
+  candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every claim. Do not
+  invent behavior rules and do not ignore one that is stated. The verdict vocabulary is exactly:
+  conforms / violates.
+
+  lru-spec defines rules A1..A5 and is complete. submission-manifest declares candidate-1..candidate-5
+  the complete set.
+
+  1. Classify each of candidate-1..candidate-5 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single rule (A1..A5) it breaks and cite one
+     operation-trace step where its output/state diverges from spec-correct behavior.
+
+  3. Identify which candidates, if any, `conform`, and state the expected outputs for steps O5, O8,
+     O9, and O10 in operation-trace.
+
+  4. In reviewer-thread, @ria says candidate-3 is fine because "updating value is enough; recency on
+     updates does not matter." State candidate-3's verdict and the trace step that refutes this.
+
+  5. Using the capacity-1 mini-trace P1..P4, state the correct outputs for P3 and P4, and name one
+     candidate whose behavior contradicts them.
+artifacts:
+  - id: lru-spec
+    type: spec
+    label: LRU cache contract (complete)
+    content: |
+      Class: LRUCache(capacity: integer >= 1)
+      Methods:
+        - get(key): returns value or -1
+        - put(key, value): inserts/updates value
+
+      Rules (COMPLETE):
+
+      A1  GET REFRESHES RECENCY. If key exists, get(key) returns value and marks that key as
+          most-recently-used (MRU).
+
+      A2  UPDATE REFRESHES RECENCY. put(key, value) on an existing key updates value AND marks key MRU.
+          Size does not change.
+
+      A3  EVICT LEAST RECENTLY USED. When inserting a new key into a full cache, evict exactly the
+          least-recently-used key.
+
+      A4  CAPACITY-1 EDGE. Capacity 1 must behave consistently with A1..A3 (one retained key only).
+
+      A5  MISSING KEY SENTINEL. get(missingKey) returns -1 (not null/undefined/false).
+
+      This is the complete contract.
+  - id: operation-trace
+    type: table
+    label: authoritative traces and expected outputs
+    content: |
+      Trace T (capacity = 2):
+        O1 put(1, "A")
+        O2 put(2, "B")
+        O3 get(1)        -> "A"      # now recency: [2 least, 1 most]
+        O4 put(3, "C")               # evict 2
+        O5 get(2)        -> -1
+        O6 put(1, "A2")              # update existing key 1, refresh recency
+        O7 put(4, "D")               # evict 3
+        O8 get(3)        -> -1
+        O9 get(1)        -> "A2"
+        O10 get(4)       -> "D"
+
+      Trace P (capacity = 1):
+        P1 put(9, "X")
+        P2 put(8, "Y")               # evict 9
+        P3 get(9)        -> -1
+        P4 get(8)        -> "Y"
+  - id: candidates-a
+    type: code
+    label: candidate-1, candidate-2, candidate-3
+    content: |
+      // Map iteration order represents LRU -> MRU.
+
+      // ---- candidate-1 ----
+      class Candidate1 {
+        constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+        get(key) {
+          if (!this.map.has(key)) return -1;
+          const val = this.map.get(key);
+          this.map.delete(key); this.map.set(key, val);
+          return val;
+        }
+        put(key, value) {
+          if (this.map.has(key)) this.map.delete(key);
+          this.map.set(key, value);
+          if (this.map.size > this.capacity) {
+            const lruKey = this.map.keys().next().value;
+            this.map.delete(lruKey);
+          }
+        }
+      }
+
+      // ---- candidate-2 ----
+      class Candidate2 {
+        constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+        get(key) {
+          if (!this.map.has(key)) return -1;
+          return this.map.get(key);
+        }
+        put(key, value) {
+          if (this.map.has(key)) this.map.delete(key);
+          this.map.set(key, value);
+          if (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
+        }
+      }
+
+      // ---- candidate-3 ----
+      class Candidate3 {
+        constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+        get(key) {
+          if (!this.map.has(key)) return -1;
+          const v = this.map.get(key);
+          this.map.delete(key); this.map.set(key, v);
+          return v;
+        }
+        put(key, value) {
+          if (this.map.has(key)) { this.map.set(key, value); return; }
+          this.map.set(key, value);
+          if (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
+        }
+      }
+  - id: candidates-b
+    type: code
+    label: candidate-4 and candidate-5
+    content: |
+      // ---- candidate-4 ----
+      class Candidate4 {
+        constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+        get(key) {
+          if (!this.map.has(key)) return -1;
+          const v = this.map.get(key);
+          this.map.delete(key); this.map.set(key, v);
+          return v;
+        }
+        put(key, value) {
+          if (this.map.has(key)) this.map.delete(key);
+          this.map.set(key, value);
+          if (this.map.size > this.capacity) {
+            const keys = Array.from(this.map.keys());
+            this.map.delete(keys[keys.length - 1]);
+          }
+        }
+      }
+
+      // ---- candidate-5 ----
+      class Candidate5 {
+        constructor(capacity) { this.capacity = capacity; this.map = new Map(); }
+        get(key) {
+          if (!this.map.has(key)) return null;
+          const v = this.map.get(key);
+          this.map.delete(key); this.map.set(key, v);
+          return v;
+        }
+        put(key, value) {
+          if (this.map.has(key)) this.map.delete(key);
+          this.map.set(key, value);
+          if (this.map.size > this.capacity) this.map.delete(this.map.keys().next().value);
+        }
+      }
+  - id: reviewer-thread
+    type: note
+    label: review discussion for LRU candidates
+    content: |
+      Review thread for LRUCache (PR #8340).
+
+      @ria: "candidate-3 should still be correct. On put(existingKey), only the value changes, so
+      eviction order should stay the same."
+
+      @tom: "For LRU semantics, touching a key via update is still access. If recency isn't refreshed,
+      the wrong key is evicted after subsequent inserts."
+
+      @maya: "One candidate returns null for missing keys; this API contract requires a numeric -1."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5.
+      This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against rules A1..A5 across both traces;
+      submissions that satisfy every rule are accepted.
+tags: [generation, algorithmic-correctness, lru, cache, eviction]

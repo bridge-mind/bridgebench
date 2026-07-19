@@ -34,6 +34,9 @@ export interface UiArtifactRecord {
   outputTokens: number;
   costUsd: number;
   validation: UiArtifactValidationResult;
+  /** Provider audit trail (live runs only) — never journaled or published. */
+  generationId?: string;
+  finishReason?: string;
 }
 
 export class UiArtifactStore {
@@ -51,6 +54,8 @@ export class UiArtifactStore {
     outputTokens: number;
     costUsd: number;
     validation: UiArtifactValidationResult;
+    generationId?: string;
+    finishReason?: string;
   }): Promise<UiArtifactRecord> {
     const runId = new Date().toISOString().replace(/[:.]/g, '-');
     const runDir = path.join(this.rootDir, input.task.id, artifactSlug(input.modelId), runId);
@@ -80,6 +85,8 @@ export class UiArtifactStore {
       outputTokens: input.outputTokens,
       costUsd: input.costUsd,
       validation: input.validation,
+      ...(input.generationId === undefined ? {} : { generationId: input.generationId }),
+      ...(input.finishReason === undefined ? {} : { finishReason: input.finishReason }),
     };
 
     await Promise.all([

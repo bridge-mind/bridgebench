@@ -1,0 +1,153 @@
+id: dead-code-env-branch-reachability
+version: 1.1.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Removing Environment Branches Against an Exhaustive Deployment Matrix
+summary: >-
+  A transport selector branches on environment and preview values validated at startup and
+  constrained by an exhaustive deployment matrix. Four cleanup rewrites are proposed; classify
+  each on behavior and on the goal of removing all and only unreachable code.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (entry-manifest, deployment-matrix,
+  transport-source, rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim.
+  Use the verdict vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The elimination goal is to remove all and only truly unreachable transport code. Judge behavior
+  over every invocation admitted by entry-manifest, not only the most common production deployment.
+
+  1. Classify rewrite-a on behavior and goal. Account for every accepted env/preview pair.
+  2. Classify rewrite-b. Give the exact deployment and input pair that witnesses any difference,
+     plus the original and rewritten selected transport.
+  3. Classify rewrite-c. Trace the CI entry point and state which observable delivery log changes.
+  4. Classify rewrite-d on behavior and goal. Name every dead branch/function it leaves behind.
+  5. State which rewrites, if any, remove all and only dead code. List the complete live and dead
+     reachability sets from transport-source.
+artifacts:
+  - id: entry-manifest
+    type: spec
+    label: complete runtime entry and configuration-validation surface
+    content: |
+      This manifest is exhaustive. transportFor(config) is called only after loadRuntimeConfig has
+      returned successfully, from exactly these entry points:
+        - worker-main: long-running deployed worker
+        - integration-main: CI integration runner
+
+      loadRuntimeConfig accepts env exactly in {"production", "staging", "test"} and preview exactly
+      in {"0", "1"}. Any omitted or other value aborts startup before transportFor is called.
+      No caller constructs RuntimeConfig directly. There is no reflection, eval, dynamic
+      import, string-to-function lookup, or exported access to the private send functions.
+
+      Therefore branches for env="development" or any unknown env cannot execute. A branch for an
+      accepted pair is live if that pair appears in deployment-matrix now or is marked operator-
+      selectable there. Function reachability follows only calls from transportFor.
+  - id: deployment-matrix
+    type: config
+    label: complete active and selectable runtime matrix
+    content: |
+      # Complete inventory. There are no other deployments or test runners.
+      runtimes:
+        - name: prod-workers
+          entry: worker-main
+          env: production
+          preview: "0"
+          status: active
+        - name: staging-blue
+          entry: worker-main
+          env: staging
+          preview: "0"
+          status: active
+        - name: staging-canary
+          entry: worker-main
+          env: staging
+          preview: "1"
+          status: active
+        - name: integration-ci
+          entry: integration-main
+          env: test
+          preview: "0"
+          status: active
+
+      Operators may toggle either staging deployment between preview "0" and "1" without a code
+      change. No deployment may change env outside its listed value. The matrix and this toggle rule
+      are exhaustive.
+  - id: transport-source
+    type: code
+    label: courier/transport.ts — original selector and all private functions
+    content: |
+      type RuntimeConfig = { env: string; preview: '0' | '1' };
+      type Transport = (message: Message) => void;
+
+      export function transportFor(config: RuntimeConfig): Transport {
+        if (config.env === 'production') return sendQueue;
+        if (config.env === 'staging' && config.preview === '1') return sendPreview;
+        if (config.env === 'staging') return sendQueue;
+        if (config.env === 'test') return sendMemory;
+        if (config.env === 'development') return sendConsole;
+        return sendFallback;
+      }
+
+      function sendQueue(message: Message): void { deliveries.push(`queue:${message.id}`); }
+      function sendPreview(message: Message): void { deliveries.push(`preview:${message.id}`); }
+      function sendMemory(message: Message): void { deliveries.push(`memory:${message.id}`); }
+      function sendConsole(message: Message): void { deliveries.push(`console:${message.id}`); }
+      function sendFallback(message: Message): void { deliveries.push(`fallback:${message.id}`); }
+
+      function sendLegacy(message: Message): void { deliveries.push(`legacy:${message.id}`); }
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — retain accepted cases, collapse the validated test remainder
+    content: |
+      export function transportFor(config: RuntimeConfig): Transport {
+        if (config.env === 'production') return sendQueue;
+        if (config.env === 'staging' && config.preview === '1') return sendPreview;
+        if (config.env === 'staging') return sendQueue;
+        return sendMemory; // validated remainder is env="test"
+      }
+
+      function sendQueue(message: Message): void { deliveries.push(`queue:${message.id}`); }
+      function sendPreview(message: Message): void { deliveries.push(`preview:${message.id}`); }
+      function sendMemory(message: Message): void { deliveries.push(`memory:${message.id}`); }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — remove preview along with impossible branches
+    content: |
+      export function transportFor(config: RuntimeConfig): Transport {
+        if (config.env === 'production') return sendQueue;
+        if (config.env === 'staging') return sendQueue;
+        return sendMemory;
+      }
+
+      function sendQueue(message: Message): void { deliveries.push(`queue:${message.id}`); }
+      function sendMemory(message: Message): void { deliveries.push(`memory:${message.id}`); }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — treat every non-staging remainder as queue traffic
+    content: |
+      export function transportFor(config: RuntimeConfig): Transport {
+        if (config.env === 'staging' && config.preview === '1') return sendPreview;
+        return sendQueue;
+      }
+
+      function sendQueue(message: Message): void { deliveries.push(`queue:${message.id}`); }
+      function sendPreview(message: Message): void { deliveries.push(`preview:${message.id}`); }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — delete only the obviously uncalled legacy function
+    content: |
+      export function transportFor(config: RuntimeConfig): Transport {
+        if (config.env === 'production') return sendQueue;
+        if (config.env === 'staging' && config.preview === '1') return sendPreview;
+        if (config.env === 'staging') return sendQueue;
+        if (config.env === 'test') return sendMemory;
+        if (config.env === 'development') return sendConsole;
+        return sendFallback;
+      }
+
+      function sendQueue(message: Message): void { deliveries.push(`queue:${message.id}`); }
+      function sendPreview(message: Message): void { deliveries.push(`preview:${message.id}`); }
+      function sendMemory(message: Message): void { deliveries.push(`memory:${message.id}`); }
+      function sendConsole(message: Message): void { deliveries.push(`console:${message.id}`); }
+      function sendFallback(message: Message): void { deliveries.push(`fallback:${message.id}`); }
+      // sendLegacy was removed.
+tags: [refactoring, dead-code-elimination, environment-branches, reachability, deployment]

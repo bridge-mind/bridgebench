@@ -1,0 +1,166 @@
+id: extract-and-inline-import-control
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Extract an Import Loop Without Losing Return, Evaluation, or Finally Semantics
+summary: >-
+  A batch importer parses each line once, skips null parses, stops on the first rejected row, writes
+  accepted rows, and always closes its session after constructing the result. Four helper
+  extractions mishandle control flow or evaluation subtly; exactly one is equivalent.
+prompt: |
+  Use only original-importer, semantics, traces, proposals, and manifest. Cite artifacts. For every
+  proposal report behavior-preserving / changes-behavior and meets-goal / fails-goal.
+
+  1. Classify proposal-a through proposal-d.
+  2. For each behavior change, cite X1..X7 and the first trace T1..T5 that exposes it, including the
+     exact call/audit order and returned result.
+  3. Identify the unique proposal that preserves behavior and completes the extraction.
+  4. Trace T3 through the accepted helper, explaining how its stop sentinel crosses function scope.
+  5. State when session.count is read relative to close(session).
+  6. Evaluate the review claim that return inside a helper is equivalent to return inside the
+     original loop's function.
+artifacts:
+  - id: original-importer
+    type: code
+    label: Existing importBatch implementation
+    content: |
+      export function importBatch(lines, sink) {
+        const session = openSession();
+        try {
+          for (const line of lines) {
+            const row = parseLine(line);
+            if (row === null) continue;
+            if (!sink.accept(row)) {
+              return { status: 'stopped', imported: session.count };
+            }
+            writeRow(session, row);
+          }
+          return { status: 'done', imported: session.count };
+        } finally {
+          closeSession(session);
+        }
+      }
+  - id: semantics
+    type: spec
+    label: Complete observables and extraction goal
+    content: |
+      X1 lines is a one-shot iterable consumed left-to-right.
+      X2 parseLine is called exactly once per consumed line. It records parse:LINE and may return
+         null; successive calls can return different object identities.
+      X3 sink.accept is called exactly once for each non-null row, in parse order. It records
+         accept:ROW and may mutate sink.
+      X4 On false accept, no write occurs for that row, no later line is consumed, and result is
+         stopped with the count before that row.
+      X5 writeRow increments session.count, records write:ROW, and may retain the exact row identity.
+      X6 closeSession records close:COUNT and sets session.count=-1. The result object's imported
+         value is evaluated before finally calls close; close runs exactly once on return or throw.
+      X7 If parseLine, accept, or write throws, the same error propagates after closeSession.
+
+      Goal: extract per-line parse/accept/write decisions into one named helper outside importBatch,
+      leaving importBatch responsible for iteration, early batch return, result construction, and
+      the existing try/finally. The helper may return a sentinel.
+  - id: traces
+    type: table
+    label: Authoritative observable traces
+    content: |
+      T1 lines [blank], parse blank->null:
+         parse:blank, close:0; result {done,0}.
+      T2 lines [a], parse->A, accept A true:
+         parse:a, accept:A, write:A, close:1; result {done,1}; sink retained A.
+      T3 lines [a,b,c], parse->A/B/C, accept A true, B false:
+         parse:a,accept:A,write:A,parse:b,accept:B,close:1; result {stopped,1}.
+         c is never requested from the iterable.
+      T4 lines [x], parse called first time -> X1, second time would -> X2, accept true:
+         required parse:x,accept:X1,write:X1,close:1 and retained identity X1.
+      T5 lines [boom], parse throws E after recording parse:boom:
+         parse:boom,close:0 then E propagates.
+  - id: proposals
+    type: code
+    label: Four extraction proposals
+    content: |
+      // proposal-a
+      const STOP = Symbol('stop');
+      function consumeLine(session, sink, line) {
+        const row = parseLine(line);
+        if (row === null) return;
+        if (!sink.accept(row)) return STOP;
+        writeRow(session, row);
+      }
+      function importBatch(lines, sink) {
+        const session = openSession();
+        try {
+          for (const line of lines) {
+            if (consumeLine(session, sink, line) === STOP)
+              return { status: 'stopped', imported: session.count };
+          }
+          return { status: 'done', imported: session.count };
+        } finally { closeSession(session); }
+      }
+
+      // proposal-b: helper return is not propagated.
+      function consumeLine(session, sink, line) {
+        const row = parseLine(line);
+        if (row === null) return;
+        if (!sink.accept(row)) return { status: 'stopped', imported: session.count };
+        writeRow(session, row);
+      }
+      function importBatch(lines, sink) {
+        const session = openSession();
+        try {
+          for (const line of lines) consumeLine(session, sink, line);
+          return { status: 'done', imported: session.count };
+        } finally { closeSession(session); }
+      }
+
+      // proposal-c: parse is repeated for the accepted path.
+      const STOP = Symbol('stop');
+      function consumeLine(session, sink, line) {
+        const inspected = parseLine(line);
+        if (inspected === null) return;
+        if (!sink.accept(inspected)) return STOP;
+        writeRow(session, parseLine(line));
+      }
+      function importBatch(lines, sink) {
+        const session = openSession();
+        try {
+          for (const line of lines)
+            if (consumeLine(session, sink, line) === STOP)
+              return { status: 'stopped', imported: session.count };
+          return { status: 'done', imported: session.count };
+        } finally { closeSession(session); }
+      }
+
+      // proposal-d: close moves before result construction.
+      const STOP = Symbol('stop');
+      function consumeLine(session, sink, line) {
+        const row = parseLine(line);
+        if (row === null) return;
+        if (!sink.accept(row)) return STOP;
+        writeRow(session, row);
+      }
+      function importBatch(lines, sink) {
+        const session = openSession();
+        for (const line of lines) {
+          if (consumeLine(session, sink, line) === STOP) {
+            closeSession(session);
+            return { status: 'stopped', imported: session.count };
+          }
+        }
+        closeSession(session);
+        return { status: 'done', imported: session.count };
+      }
+  - id: manifest
+    type: note
+    label: Exhaustive proposal inventory and exception declaration
+    content: |
+      proposal-a through proposal-d are complete. The Symbol declarations are module-private and
+      collision-free. Functions not shown are unchanged and have semantics X1..X7.
+
+      Reviewer Mae says proposal-b's return exits the work for that line, which should be equivalent
+      to the original return. Function return scope is observable because importBatch must stop
+      requesting later lines and return status stopped.
+
+      proposal-d also fails the goal because it removes the try/finally rather than retaining the
+      declared exception cleanup path.
+tags: [refactoring, extract-and-inline, control-flow, finally, side-effects]

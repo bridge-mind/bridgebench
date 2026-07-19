@@ -1,0 +1,81 @@
+id: conflict-oidc-claims
+version: 1.0.0
+category: hallucination
+cluster: conflicting-sources
+difficulty: expert
+title: OIDC Claim Contract Across Discovery, Gateway Code, Token Samples, and Stale Runbooks
+summary: Reconcile issuer, audience, subject, groups, and token lifetime using source-specific authority while retaining unresolved staging conflicts.
+prompt: |
+  Produce the current authentication claim contract for `builder-console`. Use [authority] within its
+  scopes only; do not treat one token sample as a universal configuration source.
+
+  1. Give the production issuer and JWKS URI, resolving discovery versus runbook values.
+  2. State the accepted production audience set and whether token p17 passes it.
+  3. Which claim supplies application identity and which supplies authorization groups in deployed
+     production code?
+  4. What lifetime was token p17 minted with, and does that establish the configured lifetime for all
+     production tokens?
+  5. Determine the staging issuer. If unresolvable, enumerate conflicting values and classify it.
+  6. Audit claims A-F in [migration-draft] with SUPPORTED, CONTRADICTED, CONFLICTING, or NOT
+     DETERMINABLE and exact citations.
+artifacts:
+  - id: authority
+    type: spec
+    label: Scoped authority rules
+    content: |
+      Live OIDC discovery governs current issuer/JWKS metadata for its named environment. Deployed
+      gateway code governs accepted claims/audiences. A verified token sample proves only its own
+      claims and timestamps. Identity-provider admin config would govern general minting policy, but
+      none is included. For staging, no live discovery is retained; disagreements remain CONFLICTING.
+      Runbooks and migration drafts are non-authoritative.
+  - id: production-discovery
+    type: config
+    label: Live production discovery at capture time
+    content: |
+      issuer: https://id.example.test/prod/v2
+      jwks_uri: https://id.example.test/prod/v2/keys
+      id_token_signing_alg_values_supported: [EdDSA]
+  - id: gateway-code
+    type: code
+    label: Deployed verifier commit 4bc0
+    content: |
+      verify(token, {
+        issuer: "https://id.example.test/prod/v2",
+        audience: ["builder-console", "builder-cli"],
+        algorithms: ["EdDSA"]
+      });
+      identity = claims.sub;
+      groups = Array.isArray(claims.roles) ? claims.roles : [];
+  - id: token-sample
+    type: table
+    label: Verified production token p17
+    content: |
+      iss=https://id.example.test/prod/v2
+      aud=[builder-console]
+      sub=acct-71
+      preferred_username=river
+      roles=[builder,reviewer]
+      groups=[legacy-admin]
+      iat=1784462400
+      exp=1784464200
+
+      Signature and timestamps were valid at capture. This is the only token sample.
+  - id: staging-conflict
+    type: note
+    label: Retained staging sources
+    content: |
+      Helm desired value: issuer=https://id.example.test/stage/v2
+      Staging runbook: issuer=https://login.example.test/staging
+      CI smoke-test fixture: iss=https://id.example.test/stage/v2
+      No Helm apply record, deployed gateway config, live discovery, or staging token is retained.
+  - id: migration-draft
+    type: note
+    label: Proposed documentation assertions
+    content: |
+      A. Production issuer is /prod/v1 and keys are under /prod/keys.
+      B. Only builder-console is accepted as audience.
+      C. preferred_username is the immutable application identity.
+      D. groups controls authorization.
+      E. Every production token lasts exactly 30 minutes.
+      F. Staging definitely uses https://id.example.test/stage/v2.
+tags: [oidc, jwt, claims, conflicting-sources, authentication]

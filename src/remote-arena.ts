@@ -63,7 +63,7 @@ const ExecutionPackSchema = z.object({
   methodologyVersion: z.string(),
   competitors: z.array(z.unknown()),
   judges: z.array(z.unknown()),
-  // Pack size follows TASKS_PER_CATEGORY (18 = 6 clusters × 3).
+  // Pack size follows TASKS_PER_CATEGORY (48 = 6 clusters × 8).
   tasks: z.array(ExecutionPackTaskSchema).length(TASKS_PER_CATEGORY),
 });
 
@@ -190,8 +190,10 @@ export async function runRemoteArena(
       requestCancellation();
     },
   );
+  // splitPanel makes mock verdicts vary per judge, so mock runs regularly
+  // exercise the 2-1 → best-of-5 adjudication path before any paid run.
   const gateway: OpenRouterGateway = mock
-    ? new MockOpenRouterGateway({ judgeWinner: 'MODEL_A' })
+    ? new MockOpenRouterGateway({ splitPanel: true })
     : new OpenRouterClient(process.env.OPENROUTER_API_KEY ?? '', logger);
 
   const runner = new ArenaRunner(gateway, store, eventSink.sink, logger);

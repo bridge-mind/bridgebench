@@ -13,7 +13,6 @@ import * as path from 'node:path';
 import { z } from 'zod';
 
 import {
-  chunk,
   delay,
   postJson,
   resolveApiConfig,
@@ -33,9 +32,29 @@ import {
   type UiQualification,
 } from './types.js';
 
-export const UI_JOURNAL_PATH = path.join(RESULTS_DIR, 'ui', 'journal.jsonl');
-export const UI_SNAPSHOT_PATH = path.join(RESULTS_DIR, 'ui', 'snapshot.json');
-const UI_ARTIFACTS_DIR = path.join(RESULTS_DIR, 'ui', 'artifacts');
+/**
+ * Results roots resolve at call time (not import time) so the API-spawned
+ * runner's BRIDGEBENCH_RESULTS_DIR — set after module load by the parent
+ * process env — is honored, and so mock runs journal into their own subtree
+ * (a shared journal would let a later live `ui publish` sweep fixture
+ * results into the real run).
+ */
+export function uiResultsRoot(mock = false): string {
+  const base = process.env.BRIDGEBENCH_RESULTS_DIR?.trim() || RESULTS_DIR;
+  return path.join(base, mock ? 'ui-mock' : 'ui');
+}
+
+export function uiJournalPath(root: string = uiResultsRoot()): string {
+  return path.join(root, 'journal.jsonl');
+}
+
+export function uiSnapshotPath(root: string = uiResultsRoot()): string {
+  return path.join(root, 'snapshot.json');
+}
+
+export function uiArtifactsDir(root: string = uiResultsRoot()): string {
+  return path.join(root, 'artifacts');
+}
 
 function sha256Hex(content: string | Buffer): string {
   return createHash('sha256').update(content).digest('hex');
@@ -52,68 +71,100 @@ function omitHeavyEvaluationFields(
   return copy as UiBenchTaskResult['evaluation'];
 }
 
+export interface UiResultMetrics {
+  providerResponseMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+const ZERO_METRICS: UiResultMetrics = {
+  providerResponseMs: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  costUsd: 0,
+};
+
 export interface JournalUiEvaluationInput {
   task: UiBenchFullTask;
   modelId: string;
-  /** The normalized HTML that was actually evaluated. */
-  html: string;
+  /** Shown on leaderboards; defaults to the model id (`ui evaluate` behavior). */
+  displayName?: string;
+  /**
+   * The normalized HTML that was actually evaluated, or null when the
+   * provider call failed and there is no artifact to persist.
+   */
+  html: string | null;
   validation: UiArtifactValidationResult;
   evaluation: UiArtifactEvaluationResult | null;
   qualification: UiQualification;
+  /** Real provider metrics from the live runner; `ui evaluate` journals zeros. */
+  metrics?: UiResultMetrics;
+  /** Defaults to true — the historical `ui evaluate --journal` semantics. */
+  success?: boolean;
+  errorType?: string;
+  /** Overrides the default results root (live runs, mock runs, tests). */
+  resultsRoot?: string;
 }
 
 /**
- * Persist one local evaluation as a journal line, copying the artifact and
- * its gallery screenshots to stable paths so a later `ui publish` can inline
+ * Persist one evaluation as a journal line, copying the artifact and its
+ * gallery screenshots to stable paths so a later `ui publish` can inline
  * their bytes.
  */
 export async function journalUiEvaluation(
   input: JournalUiEvaluationInput,
-): Promise<{ journalPath: string; artifactDir: string }> {
+): Promise<{ journalPath: string; artifactDir: string; line: UiBenchTaskResult }> {
+  const root = input.resultsRoot ?? uiResultsRoot();
   const slug = artifactSlug(input.modelId);
-  const artifactDir = path.join(UI_ARTIFACTS_DIR, input.task.id, slug);
-  mkdirSync(artifactDir, { recursive: true });
+  const artifactDir = path.join(uiArtifactsDir(root), input.task.id, slug);
 
-  const htmlPath = path.join(artifactDir, 'artifact.html');
-  writeFileSync(htmlPath, input.html);
-
+  let htmlPath = '';
   const screenshotPaths: Record<string, string> = {};
-  for (const [name, source] of Object.entries(input.evaluation?.screenshots ?? {})) {
-    const target = path.join(artifactDir, `${name}.png`);
-    copyFileSync(source, target);
-    screenshotPaths[name] = target;
+  if (input.html !== null) {
+    mkdirSync(artifactDir, { recursive: true });
+    htmlPath = path.join(artifactDir, 'artifact.html');
+    writeFileSync(htmlPath, input.html);
+    for (const [name, source] of Object.entries(input.evaluation?.screenshots ?? {})) {
+      const target = path.join(artifactDir, `${name}.png`);
+      copyFileSync(source, target);
+      screenshotPaths[name] = target;
+    }
   }
 
   const evaluation = input.evaluation ? omitHeavyEvaluationFields(input.evaluation) : null;
+  const metrics = input.metrics ?? ZERO_METRICS;
 
   const line: UiBenchTaskResult = {
     modelId: input.modelId,
-    displayName: input.modelId,
+    displayName: input.displayName ?? input.modelId,
     taskId: input.task.id,
     season: input.task.season,
     category: input.task.category,
     qualification: input.qualification,
     validation: input.validation,
     evaluation,
-    providerResponseMs: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
-    success: true,
+    providerResponseMs: metrics.providerResponseMs,
+    inputTokens: metrics.inputTokens,
+    outputTokens: metrics.outputTokens,
+    costUsd: metrics.costUsd,
+    success: input.success ?? true,
+    ...(input.errorType === undefined ? {} : { errorType: input.errorType }),
     timestamp: new Date().toISOString(),
-    artifactSha256: sha256Hex(input.html),
+    artifactSha256: input.html === null ? null : sha256Hex(input.html),
     artifactPaths: { html: htmlPath, screenshots: screenshotPaths },
   };
 
+  const journalPath = uiJournalPath(root);
   const store = new UiBenchResultStore({
-    journalPath: UI_JOURNAL_PATH,
-    snapshotPath: UI_SNAPSHOT_PATH,
+    journalPath,
+    snapshotPath: uiSnapshotPath(root),
   });
   store.open();
   store.append(line);
   await store.close();
 
-  return { journalPath: UI_JOURNAL_PATH, artifactDir };
+  return { journalPath, artifactDir, line };
 }
 
 const ImportResponseSchema = z.object({
@@ -190,6 +241,40 @@ export interface PublishUiResultsOutcome {
   results: number;
 }
 
+export interface UiRunDescriptor {
+  runKey: string;
+  season: number;
+  engineVersion: string;
+  threeVersion: string;
+}
+
+/** Stamps the engine's own provenance — the API rejects drift per run key. */
+export function buildUiRunDescriptor(runKey: string, season: number): UiRunDescriptor {
+  return { runKey, season, engineVersion: ENGINE_VERSION, threeVersion: THREE_VERSION };
+}
+
+/**
+ * Push a single journal line to the API under an already-chosen run identity.
+ * The line is the retry payload source: re-posting the same line re-reads the
+ * same on-disk bytes, so the request is byte-identical and the server's
+ * content-hash idempotency turns retries into skips instead of 409 conflicts.
+ */
+export async function publishSingleUiResult(
+  line: UiBenchTaskResult,
+  run: UiRunDescriptor,
+  config: ApiConfig,
+  taskSpecs?: Map<string, Record<string, unknown>>,
+): Promise<PublishUiResultsOutcome> {
+  let spec = taskSpecs?.get(line.taskId);
+  if (!spec) {
+    spec = taskSpecPayload(await new UiTaskLoader().loadById(line.taskId));
+    taskSpecs?.set(line.taskId, spec);
+  }
+  const body = { run, tasks: [spec], results: [resultPayload(line)] };
+  const response = await postJson(config, '/ui-bench/results/import', body, ImportResponseSchema);
+  return { ...response, results: 1 };
+}
+
 /**
  * Push every journal line to the API, one result per request (artifact bytes
  * ride along inline). Idempotent server-side: re-publishing an unchanged
@@ -200,8 +285,8 @@ export async function publishUiResults(
   config: ApiConfig = resolveApiConfig(),
 ): Promise<PublishUiResultsOutcome> {
   const store = new UiBenchResultStore({
-    journalPath: options.journalPath ?? UI_JOURNAL_PATH,
-    snapshotPath: UI_SNAPSHOT_PATH,
+    journalPath: options.journalPath ?? uiJournalPath(),
+    snapshotPath: uiSnapshotPath(),
   });
   const appendOnly = await store.readJournal();
   // The journal is append-only; a re-evaluated (task, model) pair supersedes
@@ -221,12 +306,7 @@ export async function publishUiResults(
   }
 
   const runKey = options.runKey ?? defaultUiRunKey(journal);
-  const run = {
-    runKey,
-    season: journal[journal.length - 1]!.season,
-    engineVersion: ENGINE_VERSION,
-    threeVersion: THREE_VERSION,
-  };
+  const run = buildUiRunDescriptor(runKey, journal[journal.length - 1]!.season);
 
   const loader = new UiTaskLoader();
   const specsByTask = new Map<string, Record<string, unknown>>();
@@ -240,15 +320,10 @@ export async function publishUiResults(
   let skippedResults = 0;
   let importedArtifacts = 0;
   let first = true;
-  for (const batch of chunk(journal, 1)) {
+  for (const line of journal) {
     if (!first) await delay(REQUEST_SPACING_MS);
     first = false;
-    const body = {
-      run,
-      tasks: batch.map((line) => specsByTask.get(line.taskId)!),
-      results: batch.map(resultPayload),
-    };
-    const response = await postJson(config, '/ui-bench/results/import', body, ImportResponseSchema);
+    const response = await publishSingleUiResult(line, run, config, specsByTask);
     importedResults += response.importedResults;
     skippedResults += response.skippedResults;
     importedArtifacts += response.importedArtifacts;

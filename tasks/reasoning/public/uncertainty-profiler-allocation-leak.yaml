@@ -1,0 +1,86 @@
+id: uncertainty-profiler-allocation-leak
+version: 1.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Memory-Growth Triage Under Biased Allocation Sampling and Conflicting Heap Signals
+summary: Decide what a sampling profiler can and cannot establish about a suspected leak when allocation rate, retained heap, GC behavior, and an instrumentation exclusion disagree.
+prompt: |
+  Triage worker memory growth without inventing unsampled evidence. Apply [decision-policy] literally
+  and preserve uncertainty where its required evidence is absent.
+
+  1. Calculate RSS, live-JS-heap, external-memory, and native-allocator growth rates over the observed
+     interval. All four series are post-GC measurements as stated in [memory-series].
+  2. For hypotheses H1-H4, classify each as supported, contradicted, or not determined, citing all
+     relevant evidence and known blind spots.
+  3. Decide whether the leak gate may declare `decodedImageCache` the root cause and why allocation
+     sample share is not retained-byte attribution.
+  4. Reconcile the heap-dump delta with profiler totals and identify exactly which byte category is
+     unobserved by each tool.
+  5. Select the next two experiments from A-E in order, stating the result that would confirm or reject
+     each leading hypothesis.
+  6. Draft a bounded mitigation that is safe under uncertainty and three acceptance metrics; do not
+     claim a root cause the gate does not establish.
+artifacts:
+  - id: decision-policy
+    type: spec
+    label: Incident evidence policy
+    content: |
+      A root-cause declaration requires a monotonic retained-byte path attributable to the component
+      across at least two forced-GC snapshots, plus removal or bounding of that component stopping the
+      growth. Allocation samples show where sampled allocations originate, not which remain live.
+      Contradictory measurements must be explained, not averaged. Missing instrumentation yields NOT
+      DETERMINED, never zero.
+  - id: memory-series
+    type: table
+    label: Metrics after equal traffic and forced GC
+    content: |
+      time | RSS MiB | live JS heap MiB | external MiB | native allocator MiB
+      10:00| 420     | 180              | 90           | 110
+      10:10| 560     | 184              | 154          | 182
+      10:20| 704     | 181              | 221          | 270
+
+      Each row is 10 seconds after a successful full GC. Request rate and payload mix vary <1%.
+  - id: allocation-profile
+    type: log
+    label: Sampled allocation profiler
+    content: |
+      sampling interval: 512 KiB; JS heap allocations only; native addons and ArrayBuffer backing
+      stores excluded
+      decodedImageCache: 61% sampled allocated bytes
+      requestParser: 22%
+      metricsLabels: 11%
+      other: 6%
+      profiler estimated total allocations: 7.8 GiB over 20m
+  - id: heap-dumps
+    type: table
+    label: Forced-GC heap snapshot retained deltas
+    content: |
+      dominator                 | 10:00 retained | 10:20 retained | delta
+      decodedImageCache Map     | 72 MiB         | 73 MiB         | +1 MiB
+      request contexts          | 18 MiB         | 17 MiB         | -1 MiB
+      metrics label strings     | 11 MiB         | 12 MiB         | +1 MiB
+
+      Heap snapshots cover JS heap only. No growing JS dominator path is present.
+  - id: native-code
+    type: code
+    label: Decoder addon ownership path
+    content: |
+      // native binding returns an external Buffer; JS wrapper cache stores only a 64-byte handle.
+      const frame = nativeDecoder.decode(bytes);
+      decodedImageCache.set(key, new WeakRef(frame));
+      // native v4.2 release note: backing allocation is freed by finalizer on addon cleanup queue.
+      // Cleanup queue depth and finalizer latency are not instrumented in this build.
+  - id: hypotheses-and-experiments
+    type: note
+    label: Candidate hypotheses and experiments
+    content: |
+      H1 retained JS objects in decodedImageCache; H2 delayed native finalizers; H3 native allocator
+      fragmentation; H4 traffic growth.
+
+      A add native allocation/free counters and cleanup-queue depth
+      B cap decodedImageCache JS entries only
+      C run identical load with decoder v4.1 and compare post-GC RSS/external slopes
+      D raise V8 old-space limit
+      E disable forced GC while measuring allocations
+tags: [memory, profiling, uncertainty, native-addon, garbage-collection]

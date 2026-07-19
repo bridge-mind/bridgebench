@@ -1,15 +1,14 @@
 id: behavior-preservation-nullable-memoize
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: behavior-preservation
 difficulty: expert
 title: memoize() Rewrite Equivalence — Falsy Values, Compute Timing, and the Prototype-Key Trap
 summary: >-
-  Four candidate rewrites of a single-slot memoizer are proposed. Exactly one preserves observable
-  behavior (loadSetting invoked once per distinct key, correct value returned for every key including
-  falsy ones). The others recompute falsy-valued keys, call loadSetting on every invocation, or use a
-  plain-object cache whose inherited 'constructor' key short-circuits computation. Classify each
-  rewrite and name the observable difference.
+  Four candidate rewrites of a single-slot memoizer are proposed. Classify each as
+  behavior-preserving, behavior-changing, or goal-missing against the observable contract —
+  loadSetting invocation counts per distinct key and the value returned for every key — citing
+  concrete keys from the usage note as witnesses.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (memoize-original, load-note, rewrite-a,
   rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
@@ -34,7 +33,7 @@ prompt: |
   4. Classify rewrite-d. If it changes behavior, give the concrete key from load-note that triggers
      it, and state exactly what getSetting returns for that key and whether loadSetting is called.
 
-  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for memoize-original,
+  5. State which rewrites, if any, are behavior-preserving merges. Then, for memoize-original,
      state the ground truth for three sequential getSetting('auth') calls: how many times loadSetting
      is invoked (disk_reads delta) and what each call returns.
 artifacts:

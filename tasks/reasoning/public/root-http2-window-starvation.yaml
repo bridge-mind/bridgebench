@@ -1,0 +1,98 @@
+id: root-http2-window-starvation
+version: 1.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: One Abandoned gRPC Stream Exhausts the Connection Window and Stalls Unrelated RPCs
+summary: Reconcile frame traces, client cancellation code, flow-control accounting, and server health to identify a missing read-side cancellation cleanup rather than capacity or keepalive failure.
+prompt: |
+  A multiplexed gRPC connection stops making progress although the server remains healthy. The frame
+  trace and contracts are complete; bytes and windows are exact integers.
+
+  1. Identify the single code defect and the invariant it violates. Cite the deployed lines.
+  2. Calculate connection and per-stream receive windows after each DATA/WINDOW_UPDATE/cancel event.
+  3. Explain why stream 9 can receive only its first chunk and why opening a second TCP connection
+     appears to fix the symptom.
+  4. Separate trigger, root defect, and amplifier; rule out server thread starvation, max concurrent
+     streams, keepalive timeout, and packet loss using exact evidence.
+  5. Evaluate fixes A-D, selecting the fix that restores progress without unbounded buffering or
+     protocol violation.
+  6. Define a deterministic regression test with frame sequence, cancellation point, and window and
+     liveness assertions.
+artifacts:
+  - id: flow-contract
+    type: spec
+    label: Simplified HTTP/2 receive-flow contract
+    content: |
+      Initial receive windows: connection=100, each stream=80. Receiving N DATA bytes decrements both
+      windows by N. The peer may send only when both relevant windows are positive and may not exceed
+      either. Consuming N bytes must eventually emit WINDOW_UPDATE(N) for the stream and connection.
+      Canceling a stream discards unread buffered DATA; those discarded bytes count as consumed and
+      therefore must restore the connection window. RST_STREAM closes only the stream and does not by
+      itself restore connection credit.
+
+      Stream 9 carries one length-prefixed 30-byte gRPC message. The transport may fragment that
+      message into DATA frames, but this client releases receive credit only when the complete message
+      is delivered to the application. A partial message remains buffered and emits no WINDOW_UPDATE.
+  - id: client-code
+    type: code
+    label: Deployed client cancellation path
+    content: |
+      function onData(stream, chunk) {                    // L1
+        stream.buffer.push(chunk);                         // L2
+        connectionWindow -= chunk.length;                 // L3
+        stream.window -= chunk.length;                     // L4
+      }
+      function consume(stream, n) {                        // L6
+        stream.buffer.drop(n);                             // L7
+        sendWindowUpdate(stream.id, n);                    // L8
+        sendWindowUpdate(0, n);                            // L9
+      }
+      function cancel(stream) {                            // L11
+        sendRstStream(stream.id, "CANCEL");               // L12
+        streams.delete(stream.id);                         // L13
+        // buffered unread bytes are abandoned             // L14
+      }
+  - id: frame-trace
+    type: table
+    label: Ordered frames and application actions
+    content: |
+      seq | event
+      1   | stream 7 receives DATA 60
+      2   | application consumes 20 from stream 7; updates are transmitted immediately
+      3   | stream 7 receives DATA 60
+      4   | deadline cancels stream 7 before its remaining buffer is consumed
+      5   | stream 9 opens; server attempts one complete 30-byte message
+      6   | client consumes the message only if all 30 bytes arrive
+
+      Sender obeys the contract exactly. No frames are reordered or lost.
+  - id: transport-observation
+    type: log
+    label: Packet and server observations
+    content: |
+      12:00:01 stream=7 DATA=60
+      12:00:02 stream=7 WINDOW_UPDATE stream=20 connection=20
+      12:00:03 stream=7 DATA=40 END_OF_CAPTURED_SEND (requested chunk was 60; credit was 40)
+      12:00:04 stream=7 RST_STREAM CANCEL
+      12:00:05 stream=9 DATA=20 (requested chunk was 30; connection credit was 20)
+      12:00:06 stream=9 waiting for remaining 10 bytes; connection window=0; no WINDOW_UPDATE
+      12:00:10 stream=9 still blocked; partial message has not reached the application
+
+      Server runnable threads=14/16, active streams=1 of max 100, packet retransmits=0.
+  - id: connection-comparison
+    type: config
+    label: Connection behavior
+    content: |
+      Existing connection initialWindow=100, keepalive=30s, idleTimeout=300s
+      New connection at 12:01:00 initialWindow=100 and immediately transfers stream 11 at full chunks.
+      Neither connection closes during the observation window.
+  - id: fixes
+    type: diff
+    label: Candidate remediations
+    content: |
+      A. On cancel, measure unread buffered bytes, discard them, and send equal connection-level
+         WINDOW_UPDATE before deleting stream state; keep RST_STREAM.
+      B. Raise maxConcurrentStreams from 100 to 1000.
+      C. Emit WINDOW_UPDATE(2^31-1) on every cancel without measuring discarded bytes.
+      D. Disable deadlines so canceled streams remain buffered forever.
+tags: [grpc, http2, flow-control, cancellation, root-cause]

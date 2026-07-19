@@ -27,6 +27,7 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     role: 'competitor',
     enabled: true,
     request: competitorRequest,
+    judgeRequest,
   },
   'openai/gpt-5.6-terra': {
     id: 'openai/gpt-5.6-terra',
@@ -64,6 +65,87 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     enabled: true,
     request: competitorRequest,
   },
+  'anthropic/claude-opus-4.7': {
+    id: 'anthropic/claude-opus-4.7',
+    canonicalSlug: 'anthropic/claude-4.7-opus-20260416',
+    displayName: 'Claude Opus 4.7',
+    vendor: 'anthropic',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'anthropic/claude-opus-4.6': {
+    id: 'anthropic/claude-opus-4.6',
+    canonicalSlug: 'anthropic/claude-4.6-opus-20260205',
+    displayName: 'Claude Opus 4.6',
+    vendor: 'anthropic',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'openai/gpt-5.5': {
+    id: 'openai/gpt-5.5',
+    canonicalSlug: 'openai/gpt-5.5-20260423',
+    displayName: 'GPT-5.5',
+    vendor: 'openai',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'qwen/qwen3.7-max': {
+    id: 'qwen/qwen3.7-max',
+    canonicalSlug: 'qwen/qwen3.7-max-20260520',
+    displayName: 'Qwen 3.7 Max',
+    vendor: 'qwen',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'moonshotai/kimi-k2.6': {
+    id: 'moonshotai/kimi-k2.6',
+    canonicalSlug: 'moonshotai/kimi-k2.6-20260420',
+    displayName: 'Kimi K2.6',
+    vendor: 'moonshotai',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'moonshotai/kimi-k3': {
+    id: 'moonshotai/kimi-k3',
+    canonicalSlug: 'moonshotai/kimi-k3-20260715',
+    displayName: 'Kimi K3',
+    vendor: 'moonshotai',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'meta/muse-spark-1.1': {
+    id: 'meta/muse-spark-1.1',
+    canonicalSlug: 'meta/muse-spark-1.1-20260709',
+    displayName: 'Muse Spark 1.1',
+    vendor: 'meta',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'deepseek/deepseek-v4-pro': {
+    id: 'deepseek/deepseek-v4-pro',
+    canonicalSlug: 'deepseek/deepseek-v4-pro-20260423',
+    displayName: 'DeepSeek V4 Pro',
+    vendor: 'deepseek',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'deepseek/deepseek-v4-flash': {
+    id: 'deepseek/deepseek-v4-flash',
+    canonicalSlug: 'deepseek/deepseek-v4-flash-20260423',
+    displayName: 'DeepSeek V4 Flash',
+    vendor: 'deepseek',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
   'minimax/minimax-m3': {
     id: 'minimax/minimax-m3',
     canonicalSlug: 'minimax/minimax-m3-20260531',
@@ -90,19 +172,121 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     role: 'competitor',
     enabled: true,
     request: competitorRequest,
+    judgeRequest,
   },
+  // 2026-07-18 roster expansion: the Artificial Analysis Coding Index wave.
+  // Canonical slugs pin the OpenRouter `canonical_slug` at add time.
+  'anthropic/claude-sonnet-5': {
+    id: 'anthropic/claude-sonnet-5',
+    canonicalSlug: 'anthropic/claude-sonnet-5-20260630',
+    displayName: 'Claude Sonnet 5',
+    vendor: 'anthropic',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'anthropic/claude-haiku-4.5': {
+    id: 'anthropic/claude-haiku-4.5',
+    canonicalSlug: 'anthropic/claude-4.5-haiku-20251001',
+    displayName: 'Claude Haiku 4.5',
+    vendor: 'anthropic',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'google/gemini-3.5-flash': {
+    id: 'google/gemini-3.5-flash',
+    canonicalSlug: 'google/gemini-3.5-flash-20260519',
+    displayName: 'Gemini 3.5 Flash',
+    vendor: 'google',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'google/gemma-4-31b-it': {
+    id: 'google/gemma-4-31b-it',
+    canonicalSlug: 'google/gemma-4-31b-it-20260402',
+    displayName: 'Gemma 4 31B',
+    vendor: 'google',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'xiaomi/mimo-v2.5-pro': {
+    id: 'xiaomi/mimo-v2.5-pro',
+    canonicalSlug: 'xiaomi/mimo-v2.5-pro-20260422',
+    displayName: 'MiMo-V2.5-Pro',
+    vendor: 'xiaomi',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  'openai/gpt-oss-120b': {
+    id: 'openai/gpt-oss-120b',
+    // gpt-oss-120b has no dated canonical variant on OpenRouter.
+    canonicalSlug: 'openai/gpt-oss-120b',
+    displayName: 'gpt-oss-120b',
+    vendor: 'openai',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  // Added 2026-07-19: Thinking Machines' debut model.
+  'thinkingmachines/inkling': {
+    id: 'thinkingmachines/inkling',
+    canonicalSlug: 'thinkingmachines/inkling-20260715',
+    displayName: 'Inkling',
+    vendor: 'thinkingmachines',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
+  // Dual role since 2026-07-18: the three former judge-only entries now also
+  // compete (they chart on the coding index the roster mirrors). Their pool
+  // membership is unchanged — ARENA_JUDGE_POOL_IDS in the API still lists the
+  // same seven ids, so no methodology bump — but vendor conflict exclusion
+  // now removes them from any match where their vendor competes. Every match
+  // excludes at most two vendors, and the pool spans seven distinct vendors,
+  // so five eligible judges (3 primaries + 2 reserves) always remain.
   'google/gemini-3.1-pro-preview': {
     id: 'google/gemini-3.1-pro-preview',
     canonicalSlug: 'google/gemini-3.1-pro-preview-20260219',
     displayName: 'Gemini 3.1 Pro Preview',
     vendor: 'google',
-    role: 'judge',
+    role: 'competitor',
     enabled: true,
-    request: judgeRequest,
+    request: competitorRequest,
+    judgeRequest,
   },
-  // Dual role (Grok 4.5, GLM 5.2): they compete in the arena AND keep their
-  // seats on the judge panel. Judge-side calls use `judgeRequest`; their own
-  // matches are judged under the same blind protocol as every other match.
+  // Until Mistral/Nemotron earn a spot in CALIBRATED_JUDGE_IDS (seating.ts)
+  // via the gold calibration sets, seating still ranks them behind the
+  // calibrated five: they serve as adjudication reserves, not primary
+  // panelists.
+  'mistralai/mistral-medium-3-5': {
+    id: 'mistralai/mistral-medium-3-5',
+    canonicalSlug: 'mistralai/mistral-medium-3.5-20260430',
+    displayName: 'Mistral Medium 3.5',
+    vendor: 'mistralai',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+    judgeRequest,
+  },
+  'nvidia/nemotron-3-ultra-550b-a55b': {
+    id: 'nvidia/nemotron-3-ultra-550b-a55b',
+    canonicalSlug: 'nvidia/nemotron-3-ultra-550b-a55b-20260604',
+    displayName: 'Nemotron 3 Ultra',
+    vendor: 'nvidia',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+    judgeRequest,
+  },
+  // Dual role (Grok 4.5, GLM 5.2 — plus GPT-5.6 Sol and Kimi K2.7 Code
+  // above): carrying `judgeRequest` puts a competitor in the judge pool.
+  // Judge-side calls use `judgeRequest`. Since arena-v0.4.0 each match seats
+  // three judges from this pool (seating.ts): a model never judges a match
+  // where it — or any model from its vendor — competes.
   'x-ai/grok-4.5': {
     id: 'x-ai/grok-4.5',
     canonicalSlug: 'x-ai/grok-4.5-20260708',

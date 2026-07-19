@@ -1,0 +1,144 @@
+id: taint-git-option-injection
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Repository Preview Worker Passes a Validated Ref into Git as an Option
+summary: >-
+  A repository preview request crosses an API, queue, and isolated worker before reaching several
+  apparent sinks. Parameterized SQL, escaped HTML, and shell-free process execution look reassuring,
+  but one user-controlled ref remains dangerous because argument boundaries are not option boundaries.
+  Trace exactly one reachable unsafe flow and distinguish every sanitized or benign decoy.
+prompt: |
+  Analyze the fictional PatchPane preview service using ONLY the supplied artifacts. Cite artifact ids
+  for all conclusions. Use vulnerable, not-a-vulnerability, and unreachable as verdicts. Do not provide
+  a weaponized ref or exploitation commands; describe only the option class and security impact.
+
+  1. Identify the one reachable unsafe source-to-sink path. Trace the value across the HTTP schema,
+     queue message, worker, and process invocation, naming transformations and missing enforcement.
+  2. Explain why `execFile` with an argument array prevents shell metacharacter interpretation but does
+     not make this particular invocation safe. Cite the supplied Git CLI contract.
+  3. State the attacker's required permission and the maximum demonstrated impact inside the worker.
+     Do not claim host escape, secret theft, or command execution beyond what the artifacts support.
+  4. Classify SQL-A, HTML-B, ARCHIVE-C, and GIT-D from sink-inventory using the required verdicts.
+  5. Choose the minimal adequate Git invocation from candidate-fixes and explain why each other option
+     is shallow, behavior-breaking, or irrelevant.
+  6. Give one regression test that proves an option-shaped but syntactically accepted ref is treated as
+     data while an ordinary branch and a 40-hex commit continue to preview correctly.
+
+  The route and sink inventory are exhaustive. Exactly one user-controlled path is reachable and unsafe.
+artifacts:
+  - id: api-route
+    type: code
+    label: api/preview-route.ts — complete request boundary
+    content: |
+      const PreviewBody = z.object({
+        repositoryId: z.string().uuid(),
+        ref: z.string().min(1).max(120).regex(/^[A-Za-z0-9._=\/-]+$/),
+        file: z.string().min(1).max(240),
+      }).strict();
+
+      router.post('/v1/preview', requireSession, async (req, res) => {
+        const body = PreviewBody.parse(req.body);
+        const repo = await db.query(
+          'select id, checkout_path from repositories where id = $1 and owner_id = $2',
+          [body.repositoryId, req.user.id],
+        );
+        if (!repo) return res.sendStatus(404);
+        const job = { repoId: repo.id, checkoutPath: repo.checkout_path, ref: body.ref, file: body.file };
+        await previewQueue.send(JSON.stringify(job));
+        res.status(202).json({ queued: true });
+      });
+      // This is the only producer. Authentication and repository ownership are enforced here.
+      // The regex intentionally accepts branch names beginning with `-`; it validates characters,
+      // not Git's option grammar.
+  - id: queue-contract
+    type: spec
+    label: preview queue trust and serialization contract
+    content: |
+      previewQueue is authenticated between the API and worker. Consumers parse JSON with an exact
+      schema matching the producer. Queue outsiders cannot publish. Values inside a legitimate job are
+      still builder-controlled because `ref` and `file` originate in the authenticated request.
+      JSON serialization does not add shell quoting and does not change leading hyphens.
+  - id: worker-code
+    type: code
+    label: worker/render-preview.ts — complete consumer and sinks
+    content: |
+      const Job = z.object({
+        repoId: z.string().uuid(), checkoutPath: z.string(), ref: z.string(), file: z.string(),
+      }).strict();
+
+      export async function render(raw: string) {
+        const job = Job.parse(JSON.parse(raw));
+        const relative = normalizeRepoPath(job.file); // rejects absolute paths and any `..` segment
+
+        const { stdout } = await execFileAsync(
+          '/usr/bin/git',
+          ['show', job.ref + ':' + relative],
+          { cwd: job.checkoutPath, shell: false, timeout: 5000, maxBuffer: 1_000_000 },
+        );
+        await db.query('insert into previews(repo_id, ref, body) values ($1,$2,$3)',
+          [job.repoId, job.ref, stdout]);
+        return `<pre>${escapeHtml(stdout)}</pre>`;
+      }
+
+      function normalizeRepoPath(input: string) {
+        if (path.isAbsolute(input) || input.split(/[\\/]/).includes('..')) throw new Error('bad path');
+        return input.replaceAll('\\', '/');
+      }
+      // render is the only queue consumer. No shell, eval, template engine, or archive extraction runs.
+  - id: git-cli-contract
+    type: spec
+    label: pinned /usr/bin/git show argument contract used by the worker
+    content: |
+      The worker image pins a Git build whose `git show` parser behaves as follows:
+      - Options are parsed after `show` until an explicit `--end-of-options` marker is encountered.
+      - A single argument that begins with `--output=` is treated as an output-file option even when the
+        same argument later contains `:<path>`; the parser consumes the option value before revision parsing.
+      - `--end-of-options` ends option parsing while preserving the following `<revision>:<path>` as an
+        object expression. The safe form is: `git show --end-of-options <revision>:<path>`.
+      - `shell:false` prevents shell expansion but does not alter Git's own option parsing.
+      - In this image, the output option can write only within the worker filesystem permissions.
+      This contract is exhaustive for the option behavior relevant to the supplied candidates.
+  - id: runtime-boundary
+    type: config
+    label: worker runtime and blast-radius facts
+    content: |
+      preview-worker:
+        uid: 10001
+        rootFilesystem: readOnly
+        writablePaths: [/work/previews]
+        networkEgress: none
+        repositoryMount: readOnly
+        credentialsMounted: false
+        seccomp: runtime-default
+      checkout_path is selected from the owner-scoped repository row, never from request text. A job can
+      write only where uid 10001 has permission; `/work/previews` is writable. Job failures return a generic
+      preview error. No host mount, cloud token, SSH key, or package-manager cache exists in this worker.
+  - id: sink-inventory
+    type: table
+    label: exhaustive scanner sink inventory and reachability notes
+    content: |
+      ID         reported flow                                      implementation fact
+      SQL-A      repositoryId -> SELECT                              $1/$2 parameters; owner_id is req.user.id
+      HTML-B     git blob stdout -> response HTML                    escapeHtml encodes &, <, >, ", and '
+      ARCHIVE-C  file -> archive extractor                           no extractor exists or is called
+      GIT-D      ref -> execFile('/usr/bin/git', ['show', ref:file]) ref may begin with `-`; no `--` marker
+      These are all dangerous-sink reports for this route. escapeHtml is covered by conformance tests.
+  - id: candidate-fixes
+    type: diff
+    label: proposed worker fixes
+    content: |
+      P1: ['show', job.ref + ':' + relative]
+          -> ['show', '--end-of-options', job.ref + ':' + relative]
+
+      P2: keep the invocation; reject semicolons, pipes, dollar signs, and spaces in `ref`.
+
+      P3: ['show', job.ref + ':' + relative]
+          -> ['show', shellEscape(job.ref + ':' + relative)]  with shell:false
+
+      P4: keep the Git invocation; HTML-escape `job.ref` before concatenating `':' + relative`.
+
+      Compatibility requirement: refs allowed by the API include ordinary branch names, slash-separated
+      names, tags, and 40-hex commits. The fix must preserve all of them as revision data.
+tags: [security, taint-flow, option-injection, git, worker]

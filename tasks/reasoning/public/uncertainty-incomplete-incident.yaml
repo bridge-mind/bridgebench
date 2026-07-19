@@ -1,5 +1,5 @@
 id: uncertainty-incomplete-incident
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: uncertainty-adversarial
 difficulty: expert
@@ -57,9 +57,7 @@ artifacts:
 
       One observation the on-call bridge kept returning to: the failures are not uniform. The same
       partner traffic succeeds against some receiver pods and fails against others at the same
-      instant, which does not match "our shared secret was compromised" (that would fail everywhere)
-      and does not match a payload-mangling proxy (that would also fail everywhere). Whatever the
-      cause, it is something that differs pod to pod.
+      instant.
   - id: rejection-metric
     type: table
     label: Receiver rejection counter (unsampled, receiver clock, NTP healthy)
@@ -190,10 +188,7 @@ artifacts:
       recv-7 | v1               | 150       | 0        | 150      | 100%
       recv-8 | v1,v2            | 147       | 147      | 0        | 0%
 
-      Exactly the 3 pods holding only v1 (recv-3, recv-5, recv-7) reject 100% of the v2-signed
-      traffic they receive; the 5 pods holding v2 accept 100%. Deliveries are load-balanced roughly
-      evenly, so ~3/8 of all deliveries land on a v1-only pod. (recv-7's local log undercounts due to
-      the 09:16 rotation, but this counter is authoritative.)
+      (recv-7's local log undercounts due to the 09:16 rotation, but this counter is authoritative.)
   - id: sender-egress
     type: note
     label: Partner sender egress and payload shape
@@ -202,9 +197,8 @@ artifacts:
       Every rejected delivery's X-Forwarded-For is within that range; no addresses outside the
       allowlist appear in the sampled log or in any per-pod counter. The rejected requests are
       well-formed webhooks: they carry an x-sig-key-id header of v2, an x-sig of the expected length,
-      and an x-sig-ts within the replay window. Critically, the identical requests that a v1-only pod
-      rejects are ACCEPTED when they happen to be routed to a pod that holds v2, so the bytes and the
-      signature are intact and valid under the v2 secret.
+      and an x-sig-ts within the replay window. The identical requests that a v1-only pod rejects
+      are ACCEPTED when they happen to be routed to a pod that holds v2.
   - id: proxy-note
     type: note
     label: Ingress proxy behavior
@@ -212,9 +206,7 @@ artifacts:
       The ingress proxy terminates TLS and opens a new connection to the receiver pods from its own
       address, 10.0.0.7. Every request therefore arrives at a pod with src=10.0.0.7 regardless of the
       true client; the real client address is preserved only in X-Forwarded-For. The receiver access
-      log's `src` column is thus always the proxy, so "all failures from 10.0.0.7" is an artifact of
-      reading `src` instead of `xff`. Blocking 10.0.0.7 would drop ALL inbound webhook traffic, not
-      an attacker.
+      log's `src` column is thus always the proxy.
 
       The proxy forwards the request body unchanged (byte-for-byte pass-through); it does not parse
       or re-serialize the payload. The receiver handler additionally reads rawBody (the exact

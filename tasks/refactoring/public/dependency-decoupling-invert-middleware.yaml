@@ -1,15 +1,14 @@
 id: dependency-decoupling-invert-middleware
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: dependency-decoupling
 difficulty: expert
 title: Inverting the Middleware Chain — Registration Order, a Shared Registry, and Import Cycles
 summary: >-
   A hard-coded middleware chain (auth, rateLimit, log) is to be inverted so each middleware
-  self-registers via an imported register(). Exactly one inversion preserves the execution order and
-  the single shared registry with no import cycle. The decoys import the middleware in the wrong
-  order, hand out a fresh registry per call, or make a middleware import app and close a cycle.
-  Classify each and name the observable difference on the final context.
+  self-registers via an imported register(). Four inversions are proposed; classify each against
+  the goal and the contract — canonical execution order, a single shared registry, and an acyclic
+  import graph — stating the observable final context.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (pipeline-original, registry-note,
   rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
@@ -32,7 +31,7 @@ prompt: |
   4. Classify rewrite-d. Name the exact import cycle (the edges) and state what happens at startup and
      why, per registry-note's load-order rule.
 
-  5. Exactly one inversion preserves order, keeps one shared registry, and stays acyclic. Name it.
+  5. State which inversions, if any, preserve order, keep one shared registry, and stay acyclic.
      Then, for pipeline-original, state the ground truth: the execution order and the final ctx.log and
      ctx.rateBucket after handle(ctx).
 artifacts:
@@ -137,7 +136,7 @@ artifacts:
         register(fn: Middleware): void { this.fns.push(fn); }
         run(ctx: Context): void { for (const fn of this.fns) fn(ctx); }
       }
-      export function getRegistry(): Registry { return new Registry(); } // new instance each call
+      export function getRegistry(): Registry { return new Registry(); }
 
       // app/auth.ts
       import { getRegistry } from './registry';
@@ -163,7 +162,7 @@ artifacts:
 
       // app/auth.ts — reads a constant from app at import.
       import { register } from './registry';
-      import { DEFAULT_USER } from './app';        // NEW edge: auth.ts -> app.ts
+      import { DEFAULT_USER } from './app';
       const u = DEFAULT_USER;                       // read at import (top-level)
       register((ctx) => { ctx.user = u; });
 

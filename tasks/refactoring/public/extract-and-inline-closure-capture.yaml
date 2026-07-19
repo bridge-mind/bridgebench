@@ -1,15 +1,14 @@
 id: extract-and-inline-closure-capture
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: extract-and-inline
 difficulty: expert
 title: Extracting makeHandler From a Loop — Per-Iteration Capture, Shared var, and Eager Render
 summary: >-
   A loop that registers deferred event handlers is to be refactored by extracting the handler-building
-  logic into a makeHandler helper. Exactly one extraction preserves, for every registered handler,
-  which widget object render runs on, the index it receives, and that render runs only on emit. The
-  decoys share a var across iterations, capture only the index wrong, or call render eagerly at
-  registration. Classify each and name the observable difference.
+  logic into a makeHandler helper. Four extractions are proposed; classify each against the goal and
+  the observable contract — which widget object render runs on, the index it receives, and that
+  render runs only on emit.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (register-original, bus-note, rewrite-a,
   rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
@@ -33,7 +32,7 @@ prompt: |
   4. Classify rewrite-d. If it changes behavior, state what render receives (widget object and index)
      when 'refresh:' + widgets[0].id is emitted, and how this differs from rewrite-b.
 
-  5. Exactly one extraction is the only behavior-preserving refactor. Name it. Then, for
+  5. State which extractions, if any, are behavior-preserving refactors. Then, for
      register-original, state the ground truth: when 'refresh:' + widgets[0].id is emitted, which
      widget object render is called on, with what index, and at what time.
 artifacts:
@@ -98,7 +97,7 @@ artifacts:
       // rewrite-b — "hoist the temporaries out of the loop body."
       export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
         for (var i = 0; i < widgets.length; i++) {
-          var widget = widgets[i];                   // var: one shared binding for the whole loop
+          var widget = widgets[i];
           bus.on(`refresh:${widget.id}`, () => widget.render(i));
         }
       }
@@ -108,7 +107,7 @@ artifacts:
     content: |
       // rewrite-c — "precompute the render inside the helper."
       function makeHandler(widget: Widget, i: number): () => void {
-        const result = widget.render(i);             // render invoked here, during registration
+        const result = widget.render(i);
         return () => result;
       }
 
@@ -124,8 +123,8 @@ artifacts:
     content: |
       // rewrite-d — "keep widget local, hoist just the counter."
       export function registerWidgets(bus: EventBus, widgets: Widget[]): void {
-        for (var i = 0; i < widgets.length; i++) {   // var i: shared counter
-          const widget = widgets[i];                 // const: per-iteration binding
+        for (var i = 0; i < widgets.length; i++) {
+          const widget = widgets[i];
           bus.on(`refresh:${widget.id}`, () => widget.render(i));
         }
       }

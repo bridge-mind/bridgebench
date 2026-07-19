@@ -1,0 +1,77 @@
+id: constraint-migration-downtime-plan
+version: 1.0.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Six-Step Online Schema Migration Under Lock, Compatibility, and Rollback Constraints
+summary: Find the unique valid ordering of schema, backfill, dual-write, validation, cutover, and cleanup steps while honoring lock budgets, mixed-version compatibility, and rollback gates.
+prompt: |
+  Plan the `accounts.display_name` migration using every rule and the complete action catalog. Each
+  action occurs exactly once unless a deliverable explicitly asks about omission.
+
+  1. Give the unique valid action order A-F and show which constraint fixes each adjacency or phase.
+  2. For every boundary between actions, state which app versions may safely run and whether rollback
+     to v1 remains possible.
+  3. Compute total blocking-lock time inside the maintenance budget for the valid plan.
+  4. Prove why each candidate order P1-P4 is invalid by naming its first violated hard constraint.
+  5. State the earliest point `old_name` may be dropped and the exact evidence required at that point.
+  6. Provide a migration-state checklist and two failure-injection tests: one during backfill and one
+     immediately after read cutover.
+artifacts:
+  - id: actions
+    type: table
+    label: Complete action catalog
+    content: |
+      A add nullable display_name (blocking lock 2s)
+      B deploy v2 dual-write old_name + display_name, read old_name
+      C resumable backfill display_name from old_name (no blocking lock)
+      D validate zero nulls and add NOT NULL using prevalidated constraint (blocking lock 3s)
+      E deploy v3 dual-write both, read display_name with old_name fallback
+      F after rollback window, deploy v4 display_name-only and drop old_name (blocking lock 4s)
+  - id: hard-constraints
+    type: spec
+    label: Exhaustive migration rules
+    content: |
+      A precedes any binary that writes display_name. B precedes C so concurrent writes are captured.
+      C completes and validation reports zero nulls before D. D precedes any version treating
+      display_name as required. E must run for a full 24-hour rollback window before F. During that
+      window both columns are written and v2 rollback must remain safe. F is irreversible and must be
+      last. Maintenance blocking-lock budget is 10 seconds total. Backfill retries are idempotent.
+  - id: compatibility-matrix
+    type: table
+    label: Binary requirements
+    content: |
+      version | writes                  | reads                               | schema requirement
+      v1      | old_name                | old_name                            | old_name exists
+      v2      | old_name,display_name   | old_name                            | display_name nullable exists
+      v3      | old_name,display_name   | display_name fallback old_name      | display_name NOT NULL
+      v4      | display_name            | display_name                        | old_name optional
+  - id: candidate-orders
+    type: config
+    label: Proposed plans
+    content: |
+      P1: A,B,C,D,E,F
+      P2: A,C,B,D,E,F
+      P3: A,B,C,E,D,F
+      P4: A,B,C,D,F,E
+
+      For P1, assume the required 24-hour observation occurs between E and F. Other plans receive no
+      implied waiting or reordered substeps.
+  - id: validation-record
+    type: log
+    label: Evidence produced by the valid run
+    content: |
+      backfill checkpoint chunks=800/800 failures_retried=3
+      SELECT count(*) WHERE display_name IS NULL -> 0
+      dual_write_mismatch_rate over 24h -> 0
+      rollback drill v3->v2 before cleanup -> PASS
+      lock durations observed A=2.0s D=3.0s F=4.0s
+  - id: tempting-shortcut
+    type: diff
+    label: Rejected shortcut
+    content: |
+      - deploy v2 dual-write before backfill
+      + backfill first, then deploy dual-write to reduce deploy count
+
+      Writes continue at 100/s during every action; no global write freeze is allowed.
+tags: [database, migration, expand-contract, constraints, rollback]

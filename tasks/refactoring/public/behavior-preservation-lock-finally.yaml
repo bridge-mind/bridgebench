@@ -1,15 +1,14 @@
 id: behavior-preservation-lock-finally
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: behavior-preservation
 difficulty: expert
 title: withLock Rewrite Equivalence — Release-on-Throw, finally-return Override, and Double Release
 summary: >-
-  Four candidate rewrites of a withLock resource wrapper are proposed. Exactly one preserves observable
-  behavior (lock.release called exactly once on both the success and the error path, the lock not held
-  after settle, and task's value/error propagated unchanged). The others skip release when task throws,
-  add a return inside finally that swallows the error and overrides the value, or release twice on
-  success. Classify each rewrite and name the observable difference.
+  Four candidate rewrites of a withLock resource wrapper are proposed. Classify each rewrite against
+  the observable contract — how many times lock.release runs on the success and error paths, whether
+  the lock is still held after settle, and the value or error the caller observes — tracing both the
+  success and rejection scenarios.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (lock-original, lock-note, rewrite-a,
   rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
@@ -35,7 +34,7 @@ prompt: |
   4. Classify rewrite-d. Under S_ok, state how many times lock.release() runs and the released_total
      delta compared to lock-original, and name the observable difference.
 
-  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for lock-original, state
+  5. State which rewrites, if any, are behavior-preserving merges. Then, for lock-original, state
      the ground truth: under S_ok and under S_err, how many times lock.release() runs on each path,
      whether the lock is held after settle, and what value/error the caller observes.
 artifacts:
@@ -121,7 +120,7 @@ artifacts:
           return await task();
         } finally {
           lock.release();
-          return undefined as unknown as T; // added a return inside finally
+          return undefined as unknown as T;
         }
       }
   - id: rewrite-d

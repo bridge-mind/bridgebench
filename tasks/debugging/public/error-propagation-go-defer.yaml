@@ -1,0 +1,103 @@
+id: error-propagation-go-defer
+version: 1.0.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: Deferred Close Overwrites the Error That Explains a Corrupt Object
+summary: >-
+  A Go restore function uses a named return and unconditionally assigns a deferred Close result to it.
+  Depending on stream integrity, a parse failure becomes success, a successful parse becomes checksum
+  failure, or one of two failures loses its provenance. Reconcile named-return semantics, deferred
+  execution, transaction rollback, and caller retry policy to preserve the primary and cleanup errors.
+prompt: |
+  Diagnose the fictional ColdHarbor restore path using ONLY the supplied artifacts. Cite artifact ids for
+  every claim. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. Reconstruct the error layers from object open, decoder, database transaction, verifying Close, restore,
+     HTTP mapping, and retry worker. State when each error can be created.
+  2. Trace cases A through F in outcome-matrix using Go named-return and defer rules. Give the exact returned
+     error identity, commit/rollback result, HTTP code, and retry decision.
+  3. Identify the root cause and separate it from decoder validation, object checksum verification, and
+     the retry classifier. Explain why all three appear inconsistent in telemetry.
+  4. Define error-provenance invariants: primary operation errors remain discoverable, Close always runs,
+     cleanup-only failure is returned, dual failure retains both identities for errors.Is, and the database
+     commits only when decode and checksum verification both succeed.
+  5. Classify patches P1 through P4. Select the adequate fix and trace it through cases C, D, and E.
+  6. Give table-driven tests for every matrix case plus panic-safe close execution, errors.Is classification,
+     sanitized HTTP responses, and retry exhaustion.
+
+  Go-semantics is authoritative. All errors in the matrix are stable sentinel-wrapped values.
+artifacts:
+  - id: restore-code
+    type: code
+    label: Go restore and deferred verifier close
+    content: |
+      func Restore(ctx context.Context, key string) (err error) {
+          raw, err := store.Open(ctx, key)
+          if err != nil { return fmt.Errorf("open: %w", err) }
+          stream := NewVerifyingReader(raw)
+          defer func() { err = stream.Close() }()
+
+          err = db.WithTransaction(ctx, func(tx Tx) error {
+              return DecodeFrames(stream, func(frame Frame) error { return tx.Insert(frame) })
+          })
+          if err != nil { return fmt.Errorf("restore: %w", err) }
+          return nil
+      }
+      VerifyingReader.Close drains the trailer, compares SHA-256, closes raw exactly once, and returns a
+      checksum or raw-close error. WithTransaction rolls back when its callback returns non-nil.
+  - id: go-semantics
+    type: spec
+    label: authoritative named return and defer behavior
+    content: |
+      Return expressions assign named result variables before deferred functions execute. A deferred closure
+      may read and replace named `err`; its final value is returned. `errors.Join(a,b)` retains both non-nil
+      error identities for errors.Is and returns nil only if both are nil. Wrapping with `%w` retains identity.
+      A defer runs during ordinary return and panic stack unwinding.
+  - id: callers
+    type: code
+    label: complete HTTP and retry classification
+    content: |
+      HTTP: ErrMalformed -> 422 CORRUPT_ARCHIVE; ErrChecksum -> 422 INTEGRITY_ERROR;
+            ErrStoreTimeout -> 503 RETRYABLE; nil -> 204; all other errors -> 500.
+      Worker retries only errors.Is(err, ErrStoreTimeout), up to three attempts. It never parses error text.
+      HTTP error bodies contain only the symbolic code, not err.Error().
+  - id: outcome-matrix
+    type: table
+    label: deterministic operation and Close results
+    content: |
+      case  Open             transaction callback             stream.Close
+      A     ErrStoreTimeout  not entered                      not created/no defer
+      B     nil              nil; commit                      nil
+      C     nil              ErrMalformed; rollback           nil
+      D     nil              nil; commit                      ErrChecksum
+      E     nil              ErrMalformed; rollback           ErrChecksum
+      F     nil              wraps ErrStoreTimeout; rollback  nil
+
+      At HEAD observations: A returns wrapped ErrStoreTimeout; B nil; C nil; D ErrChecksum;
+      E ErrChecksum only; F nil. These follow final deferred assignment, not logging order.
+  - id: incident-telemetry
+    type: log
+    label: observed symptoms
+    content: |
+      object O-7 decoder="invalid frame" tx=ROLLBACK restore_result=nil HTTP=204
+      object O-8 decoder=ok tx=COMMIT close="checksum mismatch" HTTP=422 INTEGRITY_ERROR
+      object O-9 decoder="invalid frame" tx=ROLLBACK close="checksum mismatch" HTTP=422 INTEGRITY_ERROR
+      object O-10 db="store timeout" tx=ROLLBACK close=nil restore_result=nil retry=false
+      Object bytes and checksums reproduce deterministically; no logger modifies returned errors.
+  - id: patch-candidates
+    type: diff
+    label: proposed deferred-error fixes
+    content: |
+      P1: `defer stream.Close()` and ignore its result. Primary errors survive, but checksum-only case D is
+          silently accepted after its transaction committed.
+      P2: `defer func(){ if closeErr := stream.Close(); err == nil { err = closeErr } }()`. This preserves a
+          lone primary or close error but discards close provenance when both fail, contrary to contract.
+      P3: Move the verifying Close into the database callback after DecodeFrames and return
+          `errors.Join(decodeErr, closeErr)` from that callback, so either failure rolls back. Track a `closed`
+          flag and retain a defer that closes exactly once on panic/early return, joining that cleanup error
+          with named `err`. Preserve `%w` wrappers. A lone error retains errors.Is identity; dual failures
+          retain both; nil+nil stays nil, and checksum failure cannot commit decoded rows.
+      P4: Call Close before DecodeFrames so checksum is known first, then parse the already drained stream.
+          The decoder receives EOF and valid archives restore zero frames.
+tags: [debugging, error-propagation, go, defer, error-provenance]

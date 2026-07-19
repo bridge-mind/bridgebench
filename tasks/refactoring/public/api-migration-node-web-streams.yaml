@@ -1,0 +1,100 @@
+id: api-migration-node-web-streams
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrate a Node Readable Consumer to Web Streams Without Losing Backpressure or Cancellation
+summary: >-
+  A download pipeline moves from a Node Readable API to a WHATWG ReadableStream response. Four
+  adapters differ on lock release, abort propagation, chunk ownership, backpressure, and error
+  identity; one preserves the old call contract and meets the new-client migration goal.
+prompt: |
+  Use only old-contract, new-api, schedules, adapters, and manifest. Cite artifact ids. Give
+  behavior-preserving / changes-behavior and meets-goal / fails-goal for every adapter.
+
+  1. Classify adapter-a through adapter-d on both axes.
+  2. For every change, give the first N1..N6 schedule and exact chunks/write/cancel/error difference.
+  3. Identify the unique compatible migration and trace N4.
+  4. State when reader.read may be called relative to sink.write resolution.
+  5. Explain why Buffer.from(view.buffer) may expose bytes outside the Uint8Array view.
+  6. Evaluate reviewer Jo's claim that releasing the reader lock is equivalent to canceling the body.
+artifacts:
+  - id: old-contract
+    type: spec
+    label: Existing downloadInto observable contract
+    content: |
+      downloadInto(key,sink,signal)->Promise<number> currently consumes a Node Readable and:
+      O1 passes exact opaque key and signal to client.
+      O2 writes each byte chunk in order; awaits sink.write before requesting/accepting the next chunk.
+      O3 chunks passed to sink are fresh Buffer copies of exactly the chunk view bytes.
+      O4 on normal EOF, awaits sink.end(), returns total byte count, and destroys no successful stream.
+      O5 on signal abort, destroys/cancels source with the exact signal.reason, does not end sink, and
+         rejects with that exact reason after cancellation completes.
+      O6 on source read or sink write failure, cancels source with the exact error, does not end sink,
+         and rejects exact error after cancellation completes.
+      O7 cleanup occurs once; no unhandled read/cancel promise; no reads after failure.
+
+      Goal G: use client.fetchObject returning the new Web API directly; no Node stream conversion.
+  - id: new-api
+    type: spec
+    label: Frozen WHATWG client and reader semantics
+    content: |
+      fetchObject({key,signal})->Promise<{body:ReadableStream<Uint8Array>}>. body.getReader() locks it.
+      reader.read()->{done,value}; value may be a subarray with nonzero byteOffset and a larger
+      underlying ArrayBuffer. reader.cancel(reason) returns a Promise completing source cleanup.
+      reader.releaseLock() merely releases ownership and does not cancel. After done, releaseLock is
+      required; calling releaseLock while read is pending throws TypeError. Abort does not automatically
+      cancel a reader already acquired; adapter owns it.
+      Buffer.from(value) copies exactly view bytes. Buffer.from(value.buffer) spans the whole buffer.
+  - id: schedules
+    type: table
+    label: Authoritative stream witnesses
+    content: |
+      N1 chunks [ab],[c] -> writes Buffer ab then c, each next read after prior write; end; return 3.
+      N2 value is Uint8Array(buffer=[X,a,b,Y],offset=1,length=2) -> sink sees only ab.
+      N3 empty stream -> no writes; await end; return 0; lock released.
+      N4 sink first write pending -> second reader.read not called until write resolves.
+      N5 abort reason R while read pending -> await cancel(R), release lock, reject exact R; no end.
+      N6 source read rejects E -> await cancel(E), release lock, reject exact E; no end.
+  - id: adapters
+    type: code
+    label: Four complete Web Stream migrations
+    content: |
+      adapter-a:
+        fetch exact key/signal; acquire one reader
+        race each pending read/write with signal abort and attach a rejection consumer to the losing
+        operation; loop await read; on value await
+        sink.write(Buffer.from(value)); count
+        on done await sink.end; release lock; return count
+        abort/read/write catch chooses exact triggering error, await cancel(error), release lock, and
+        rethrows the trigger even if cleanup reports a secondary failure
+
+      adapter-b:
+        same loop but call sink.write without await and collect promises; continue reading
+        await Promise.all(writes) before sink.end; cleanup otherwise matches a
+
+      adapter-c:
+        same awaited loop as a but copy with Buffer.from(value.buffer)
+
+      adapter-d:
+        same awaited loop; on abort/error call reader.releaseLock() and reject immediately
+        never calls/awaits reader.cancel
+  - id: lifecycle-table
+    type: table
+    label: Frozen candidate distinctions
+    content: |
+      adapter-a has one pending read or write, never both writes concurrently, exact view copies.
+      adapter-b can read and retain unbounded chunks while sink is slow.
+      adapter-c leaks prefix/suffix bytes on N2.
+      adapter-d leaves the source active and cleanup incomplete on N5/N6.
+      All candidates use the new client, so goal alone does not establish compatibility.
+  - id: manifest
+    type: note
+    label: Complete runtime and review claim
+    content: |
+      adapter-a through adapter-d are complete. sink.write/end promises are the only sink backpressure
+      signals. reader.cancel is idempotent in supplied runs, but adapters still call it at most once.
+
+      Jo's claim contradicts new-api: releasing a lock transfers access; cancellation signals that no
+      consumer will continue and awaits underlying cleanup.
+tags: [refactoring, api-migration, nodejs, web-streams, backpressure]

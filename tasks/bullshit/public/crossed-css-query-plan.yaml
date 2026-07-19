@@ -1,0 +1,56 @@
+id: crossed-css-query-plan
+version: 1.0.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Query Plan of a CSS Selector
+summary: A performance checklist assigns database planner properties to CSS selectors while mixing in legitimate browser and SQL calculations.
+prompt: |
+  Check each request against the exhaustive object-property domains. For a category error,
+  name the conflated object types, cite the contract, redirect to the nearest legitimate
+  question, and answer it. Compute supported quantities exactly.
+
+  1. Compute the CSS specificity of `.panel[data-state="open"] > button.primary:hover`.
+  2. Report the PostgreSQL estimated row count for that selector.
+  3. Identify the SQL access method and actual row count for the shown query.
+  4. Report the browser style-recalculation cost in milliseconds and its share of the
+     12 ms render budget.
+  5. State the B-tree fillfactor inherited by the `:hover` pseudo-class.
+  6. Determine which supplied change reduces repeated selector matching without altering SQL.
+artifacts:
+  - id: domain-contract
+    type: spec
+    label: Complete browser and database property domains
+    content: |
+      CSS selector properties: selector text, specificity, matched DOM nodes, and browser
+      match/recalculation timing. Specificity is (IDs, classes/attributes/pseudo-classes,
+      elements/pseudo-elements). Selectors have no estimated rows, query plan, index, or
+      fillfactor. SQL plans have estimated/actual rows, costs, and access methods. B-tree
+      indexes may have fillfactor. SQL objects have no CSS specificity or pseudo-classes.
+  - id: frontend-profile
+    type: table
+    label: Browser selector profile
+    content: |
+      selector: .panel[data-state="open"] > button.primary:hover
+      matched nodes: 12
+      style recalculation: 3.0 ms
+      render budget: 12.0 ms
+      profile note: toggling the parent state repeats the selector match 40 times/frame
+  - id: database-plan
+    type: log
+    label: EXPLAIN ANALYZE output
+    content: |
+      Index Scan using panels_state_idx on panels
+        Index Cond: (state = 'open')
+        estimated rows=18 actual rows=12
+      panels_state_idx: btree(state), fillfactor=90
+  - id: candidate-diff
+    type: diff
+    label: Frontend-only candidate change
+    content: |
+      - .panel[data-state="open"] > button.primary:hover { color: blue; }
+      + .panel-open-primary:hover { color: blue; }
+
+      Component code now computes `panel-open-primary` once when state changes. Browser
+      profile after change: 8 selector matches/frame. Database code and schema unchanged.
+tags: [crossed-domains, css, browser-performance, postgresql, query-plans]

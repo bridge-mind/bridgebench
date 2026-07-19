@@ -1,10 +1,10 @@
 id: algorithmic-correctness-column-name
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: algorithmic-correctness
 difficulty: expert
 title: toColumnName — Which Candidates Map Every Column Number to Its Bijective Base-26 Name
-summary: A spec defines toColumnName(n) as bijective base-26 spreadsheet column naming — 1 is A, 26 is Z, 27 is AA, 703 is AAA — with a complete acceptance vector of exact expected strings. Five candidates are submitted; one carries an off-by-one that surfaces only at multiples of 26, one shifts the whole alphabet, one reverses multi-letter names, and two are correct. Classify each conforms/violates and name the input that disproves each violator.
+summary: A spec defines toColumnName(n) as bijective base-26 spreadsheet column naming — 1 is A, 26 is Z, 27 is AA, 703 is AAA — with a complete acceptance vector of exact expected strings. Five candidates are submitted. Classify each as conforms or violates and name the acceptance-vector input that disproves each violator.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector, candidate-a,
   candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite the artifact id(s) for
@@ -100,7 +100,7 @@ artifacts:
         let s = '';
         while (n > 0) {
           s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
-          n = Math.floor(n / 26);          // divides n, not (n - 1)
+          n = Math.floor(n / 26);
         }
         return s;
       }
@@ -113,7 +113,7 @@ artifacts:
         let s = '';
         while (n > 0) {
           n -= 1;
-          s = String.fromCharCode(64 + (n % 26)) + s;   // base 64 instead of 65
+          s = String.fromCharCode(64 + (n % 26)) + s;
           n = Math.floor(n / 26);
         }
         return s;
@@ -127,7 +127,7 @@ artifacts:
         let s = '';
         while (n > 0) {
           n -= 1;
-          s = s + String.fromCharCode(65 + (n % 26));   // appends instead of prepending
+          s = s + String.fromCharCode(65 + (n % 26));
           n = Math.floor(n / 26);
         }
         return s;

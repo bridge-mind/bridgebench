@@ -1,10 +1,10 @@
 id: edge-case-coverage-ledger-tally
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: edge-case-coverage
 difficulty: expert
 title: tally — Which Submission Handles Every Required Edge Case
-summary: A ledger-tally spec enumerates six mandatory edge cases (empty input, duplicate-id last-wins, Unicode NFC grouping, integer overflow, blank-account skipping, zero-amount boundary). Six submissions are under review; exactly one handles all six while each of five decoys misses exactly one. Classify all six and pin the failing edge for each near-miss.
+summary: A ledger-tally spec enumerates six mandatory edge cases (empty input, duplicate-id last-wins, Unicode NFC grouping, integer overflow, blank-account skipping, zero-amount boundary). Six submissions are under review. Classify all six against the required edge set and pin the failing edge for any non-conformer.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (tally-spec, edge-vectors,
   candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
@@ -12,9 +12,9 @@ prompt: |
   vocabulary is exactly: conforms / violates. A submission `conforms` only if it handles EVERY
   required edge case E1..E6 in tally-spec.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
-  handles all six edges. Each candidate accumulates per-account totals and returns them as a plain
-  object mapping account -> decimal-string total.
+  submission-manifest declares candidate-1..candidate-6 the complete set. Each candidate
+  accumulates per-account totals and returns them as a plain object mapping account ->
+  decimal-string total.
 
   1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
 
@@ -22,7 +22,7 @@ prompt: |
      fails and cite the edge-vectors input on which its output differs from the expected output.
      State both the expected output and the candidate's output.
 
-  3. Exactly one candidate `conforms` (handles all six edges). Identify it.
+  3. Identify which candidates, if any, `conform` (handle all six edges).
 
   4. Which candidate(s), if any, drop an account whose only entry has amount "0" — i.e. FAIL E6
      (zero-amount boundary)? If none do, say so explicitly and explain why.
@@ -114,21 +114,21 @@ artifacts:
       // ---- candidate-1 ----
       function candidate1(entries: Entry[]): Record<string, string> {
         const dedup = new Map<string, Entry>();
-        for (const e of entries) dedup.set(e.entryId, e);        // last occurrence wins
+        for (const e of entries) dedup.set(e.entryId, e);
         const totals = new Map<string, bigint>();
         for (const e of dedup.values()) {
-          if (e.account.trim() === '') continue;                 // skip blank accounts
-          const name = e.account.normalize('NFC');               // NFC grouping
+          if (e.account.trim() === '') continue;
+          const name = e.account.normalize('NFC');
           totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
         }
         const out: Record<string, string> = {};
         for (const [name, sum] of totals) out[name] = sum.toString();
-        return out;                                              // [] -> {}
+        return out;
       }
 
       // ---- candidate-2 ----
       function candidate2(entries: Entry[]): Record<string, string> {
-        if (entries.length === 0) throw new Error('tally: no entries');   // throws on empty input
+        if (entries.length === 0) throw new Error('tally: no entries');
         const dedup = new Map<string, Entry>();
         for (const e of entries) dedup.set(e.entryId, e);
         const totals = new Map<string, bigint>();
@@ -145,7 +145,7 @@ artifacts:
       // ---- candidate-3 ----
       function candidate3(entries: Entry[]): Record<string, string> {
         const totals = new Map<string, bigint>();
-        for (const e of entries) {                               // no dedup by entryId
+        for (const e of entries) {
           if (e.account.trim() === '') continue;
           const name = e.account.normalize('NFC');
           totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
@@ -165,7 +165,7 @@ artifacts:
         const totals = new Map<string, bigint>();
         for (const e of dedup.values()) {
           if (e.account.trim() === '') continue;
-          const name = e.account;                                // no NFC normalization
+          const name = e.account;
           totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
         }
         const out: Record<string, string> = {};
@@ -177,7 +177,7 @@ artifacts:
       function candidate5(entries: Entry[]): Record<string, string> {
         const dedup = new Map<string, Entry>();
         for (const e of entries) dedup.set(e.entryId, e);
-        const totals = new Map<string, number>();                // Number, not BigInt
+        const totals = new Map<string, number>();
         for (const e of dedup.values()) {
           if (e.account.trim() === '') continue;
           const name = e.account.normalize('NFC');
@@ -194,7 +194,7 @@ artifacts:
         for (const e of entries) dedup.set(e.entryId, e);
         const totals = new Map<string, bigint>();
         for (const e of dedup.values()) {
-          const name = e.account.normalize('NFC');               // no blank-account skip
+          const name = e.account.normalize('NFC');
           totals.set(name, (totals.get(name) ?? 0n) + BigInt(e.amount));
         }
         const out: Record<string, string> = {};
@@ -225,7 +225,6 @@ artifacts:
       candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being
       considered.
 
-      Acceptance rule: exactly one submission handles ALL six required edge cases (E1..E6) and is to
-      be accepted. Each of the other five mishandles exactly one required edge. The process assumes
-      precisely one such all-edges-correct submission exists in this set.
+      Acceptance rule: submissions are evaluated against all six required edge cases (E1..E6);
+      submissions that handle every required edge are accepted.
 tags: [generation, edge-case-coverage, unicode, bigint, code-review]

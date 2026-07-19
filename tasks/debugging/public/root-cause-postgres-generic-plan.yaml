@@ -1,0 +1,110 @@
+id: root-cause-postgres-generic-plan
+version: 1.0.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Prepared Statement Switches to a Generic Plan That Scans the Whale Tenant
+summary: >-
+  A PostgreSQL endpoint is fast for the first five executions on each pooled connection, then small-tenant
+  requests jump from milliseconds to seconds. A driver upgrade enables named prepared statements, allowing
+  PostgreSQL to select a generic plan whose skew-blind estimate chooses a broad index scan. Correlate
+  per-session execution counts, EXPLAIN plans, tenant distribution, and controls to isolate plan selection
+  rather than locks, cache, network, or missing indexes.
+prompt: |
+  Diagnose the fictional LedgerScope query using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State query correctness, tenant isolation, ordering, latency, and plan-selection invariants.
+  2. Trace connection C7 executions 1 through 8, including parameter tenant, custom/generic decision, chosen
+     index, rows visited, rows returned, and latency.
+  3. Identify the root cause and exact introducing configuration. Explain why the sixth-execution threshold
+     is per prepared statement per backend, not a global warm-cache event.
+  4. Rule out missing index, lock waits, network, buffer-cache coldness, row-level security, and connection
+     pool exhaustion using the artifacts.
+  5. Classify fixes F1 through F4 and choose the adequate immediate repair. State the longer-term statistics
+     or schema design that could safely restore preparation after measurement.
+  6. Give regression tests across fresh/reused connections, alternating whale/small tenants, forced custom
+     and forced generic plans, result ordering, RLS, deploy rollback, and p99 budgets.
+
+  PostgreSQL-plan-semantics and explain-matrix are authoritative for this fictional dataset.
+artifacts:
+  - id: query-and-indexes
+    type: code
+    label: endpoint query and database indexes
+    content: |
+      PREPARE recent_entries(uuid, timestamptz) AS
+        SELECT id, created_at, amount_cents
+        FROM ledger_entries
+        WHERE tenant_id=$1 AND created_at >= $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT 100;
+
+      Indexes:
+        ledger_entries_pkey(id)
+        idx_ledger_tenant_created(tenant_id, created_at DESC, id DESC) INCLUDE(amount_cents)
+        idx_ledger_created(created_at DESC, id DESC)
+      RLS policy: tenant_id = current_setting('app.tenant_id')::uuid. The transaction sets app.tenant_id
+      from verified server context before executing the prepared query.
+  - id: data-distribution
+    type: table
+    label: exhaustive distribution relevant to planner estimates
+    content: |
+      total rows=240,000,000; last-30-days rows=60,000,000; tenants=20,001
+      tenant WHALE last-30-days rows=55,000,000
+      each of 20,000 small tenants last-30-days rows=250
+      Statistics know global created_at distribution but default per-column stats underrepresent correlation
+      between tenant_id and created_at. No extended statistics or tenant partitions exist.
+  - id: postgres-plan-semantics
+    type: spec
+    label: prepared-plan behavior in this deployment
+    content: |
+      With plan_cache_mode=auto, PostgreSQL uses custom plans for the first five executions of this named
+      prepared statement, then compares average custom cost with a parameter-independent generic plan. For
+      this dataset it selects the generic plan from execution six onward on that backend. Unnamed statements
+      are planned with current parameter values every execution. A generic plan is semantically correct and
+      RLS still applies; its cost/row estimate may be poor under skew.
+  - id: explain-matrix
+    type: table
+    label: authoritative EXPLAIN ANALYZE results
+    content: |
+      tenant   mode            plan/index                    rows visited  returned  latency
+      SMALL-7  force_custom    idx_ledger_tenant_created     100           100       3ms
+      WHALE    force_custom    idx_ledger_created + RLS      108           100       4ms
+      SMALL-7  force_generic   idx_ledger_created + filter   54,800,112    100       3.8s
+      WHALE    force_generic   idx_ledger_created + filter   108           100       4ms
+      All plans return identical ordered ids. idx_ledger_tenant_created is valid and used by small custom plans.
+  - id: session-trace
+    type: log
+    label: pooled backend C7 after driver upgrade
+    content: |
+      exec1 SMALL-1 custom tenant index 3ms
+      exec2 SMALL-2 custom tenant index 3ms
+      exec3 WHALE   custom created index 4ms
+      exec4 SMALL-3 custom tenant index 2ms
+      exec5 WHALE   custom created index 4ms
+      exec6 SMALL-7 generic created index 3821ms
+      exec7 WHALE   generic created index 4ms
+      exec8 SMALL-8 generic created index 3760ms
+      New backend C8 begins again with five fast custom executions. `pg_prepared_statements` shows
+      recent_entries generic_plans increasing after the fifth execution on each backend.
+  - id: deploy-and-controls
+    type: config
+    label: only relevant deploy change and system controls
+    content: |
+      Driver v5 upgrade changed prepareThreshold from 0 (unnamed execution) to 5 (named prepared statement).
+      SQL text, indexes, RLS policy, pool size, statement timeout, and data did not change. During slow queries:
+      lock wait=0ms, client network=1ms, pool wait p99=2ms, buffer cache hit=99.8%, CPU concentrated in the
+      scanning backend. Rolling back prepareThreshold=0 restores 3ms small-tenant latency immediately.
+  - id: candidate-fixes
+    type: note
+    label: proposed remediations
+    content: |
+      F1 Increase pool size. Each reused backend eventually chooses the same generic plan and extra scanning
+          raises database load.
+      F2 Drop RLS so the generic scan can return the first 100 rows. This breaks tenant isolation and results.
+      F3 Disable named preparation for this skew-sensitive statement (or force custom plan locally), retaining
+          parameters, RLS, indexes, ordering, and timeout. Monitor planning CPU and p99. Longer term evaluate
+          extended dependency statistics/partitioning and only re-enable generic planning if explain-matrix
+          proves bounded work for whale and small tenants.
+      F4 Raise statement timeout from 1s to 10s. It lets the broad scan finish but preserves pathological work.
+tags: [debugging, root-cause-isolation, postgres, query-plan, prepared-statement]

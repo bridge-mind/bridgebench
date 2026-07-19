@@ -1,5 +1,5 @@
 id: impossible-latency-allocation
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: impossible-quantities
 difficulty: expert
@@ -55,9 +55,8 @@ artifacts:
           statistics computed over the SAME sample of span durations. By definition of an
           order statistic, p50 <= p95 <= p99 in every valid report. The metrics pipeline
           enforces this on write: a report violating the ordering is rejected as corrupt and
-          never enters the canonical store. A figure showing a p50 above a p99 therefore
-          cannot be a measurement; it can only be a rendering or transcription defect.
-          stage-latency-table is the canonical 7-day record for this review.
+          never enters the canonical store. stage-latency-table is the canonical 7-day
+          record for this review.
 
       S3. End-to-end budget. The end-to-end p99 latency budget for /v1/checkout/confirm is
           900 ms, fixed for the quarter.
@@ -70,23 +69,17 @@ artifacts:
           if every stage budget is >= 0 ms AND reserve(A) >= 0. The allocation of record must
           be fully allocated (reserve = 0). During a review, a proposed allocation may carry a
           positive reserve, and distributing that reserve across stages is defined ONLY when
-          reserve >= 0. A negative reserve means the proposal overspends the end-to-end
-          budget: the proposal is INVALID, no reserve exists to distribute, and the only
-          defined follow-up quantity is the overspend |reserve|, which the proposal must shed
-          to become valid.
+          reserve >= 0.
 
       S5. Headroom and overrun. headroom(stage) = stage budget - measured p99 over the
           canonical window. Headroom is a signed ms quantity: it may be negative, in which
-          case the stage is in OVERRUN and the overrun magnitude is |headroom|. Contrast with
-          S4: a signed headroom is well-defined; a distribution of a negative reserve is not
-          defined at all.
+          case the stage is in OVERRUN and the overrun magnitude is |headroom|.
 
       S6. Resource classes. Latency (ms), memory (MiB), and request throughput (RPS) are
           three disjoint resource classes. No conversion between classes is defined anywhere
-          in this spec or in service-topology; expressing a quantity of one class in another
-          class's unit is a category error. A stage has a latency budget in ms, a memory
+          in this spec or in service-topology. A stage has a latency budget in ms, a memory
           footprint in MiB, and a throughput in RPS, and those are three different facts
-          about the stage, not one fact in three units.
+          about the stage.
 
       Allocation of record for this quarter (sum = 900 ms, reserve = 0, valid):
         edge-gateway        60 ms
@@ -117,12 +110,6 @@ artifacts:
         cart-pricing        12         768                 220
         payment-authorize   16         512                 220
         order-persist        6         640                 220
-
-      Resource classes (restating slo-spec S6): the ms budgets in slo-spec, the MiB column
-      above, and the RPS column above live in three disjoint classes. This table defines NO
-      conversion between them - there is no ms-per-MiB, MiB-per-RPS, or RPS-per-MiB factor
-      anywhere in this topology, and none can be derived from it. Comparing a MiB figure to
-      an RPS figure is comparing quantities of different dimensions.
   - id: stage-latency-table
     type: table
     label: Canonical 7-day latency percentiles per stage (ms)
@@ -138,10 +125,8 @@ artifacts:
         order-persist       71   118   142
 
       All five rows are computed over the same 54,431,800-request sample (every confirm
-      request traverses every stage exactly once). Every row satisfies p50 <= p95 <= p99, as
-      required for admission to the canonical store; a submission violating that ordering is
-      rejected as corrupt and never appears here. This table reports latency percentiles in
-      ms only - it contains no memory figures, no throughput figures, and no budget figures.
+      request traverses every stage exactly once). This table reports latency percentiles in
+      ms only.
   - id: slow-trace
     type: log
     label: Distributed trace trc-9f41c2 for the escalated slow checkout

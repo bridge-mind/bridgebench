@@ -1,0 +1,117 @@
+id: supply-python-build-backend-drift
+version: 1.0.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: Reproducible Python Runtime Lock Omits the Build Backend That Executes in CI
+summary: >-
+  A Python service hashes every runtime wheel yet builds its own package in an isolated PEP 517
+  environment from an open-ended backend requirement. Correlate pyproject metadata, resolver domains,
+  build logs, package provenance, and wheel contents to identify the one unpinned executable dependency
+  and separate it from benign editable-install and compiler noise.
+prompt: |
+  Investigate the fictional AmberPy build using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use compromised, benign, and policy-gap. Do not reproduce malicious package behavior or
+  provide publication instructions.
+
+  1. Reconstruct all code that executes from checkout through build isolation and runtime installation.
+     Distinguish requirements.lock coverage from PEP 517 build-system resolution.
+  2. Identify the first untrusted executable package and trace its name, version constraint, index choice,
+     wheel hash, hook invocation, and resulting application-wheel mutation.
+  3. Classify findings F1 through F6 in evidence-matrix as compromised, benign, or policy-gap. Explain why
+     a valid public-index TLS connection and wheel RECORD do not establish intended provenance.
+  4. Determine whether amber-utils, setuptools, compiler warnings, and the editable local install are part
+     of the compromise, citing negative evidence rather than assuming every install hook is malicious.
+  5. Select policy P1 through P4. State complete lock-domain, hash, index allowlist, build-isolation, and
+     artifact-verification invariants for a reproducible fix.
+  6. Give containment and regression steps: revoke/review credentials, rebuild from a trusted clean runner,
+     compare wheels, test offline resolution, and ensure an unexpected backend version fails closed.
+
+  package-index-record is authoritative and exhaustive for the named versions.
+artifacts:
+  - id: project-files
+    type: config
+    label: pyproject.toml and runtime lock excerpts
+    content: |
+      # pyproject.toml
+      [build-system]
+      requires = ["amber-backend>=2"]
+      build-backend = "amber_backend.build"
+      [project]
+      dependencies = ["amber-utils==4.2.0", "httpx==0.28.1"]
+
+      # requirements.lock, installed with --require-hashes --no-deps
+      amber-utils==4.2.0 --hash=sha256:UTILS420
+      httpx==0.28.1 --hash=sha256:HTTPX0281
+      # The lock generator records project dependencies but not [build-system].requires.
+  - id: ci-pipeline
+    type: code
+    label: complete package build and install steps
+    content: |
+      python -m venv .venv
+      .venv/bin/pip install --require-hashes --no-deps -r requirements.lock
+      .venv/bin/python -m build --wheel --outdir dist .
+      .venv/bin/pip install --no-deps dist/amber_service-1.7.0-py3-none-any.whl
+      .venv/bin/python -m pytest
+
+      `python -m build` uses PEP 517 isolation: it creates a temporary environment and independently
+      resolves pyproject [build-system].requires from configured indexes. CI has no offline wheelhouse.
+  - id: resolver-config
+    type: config
+    label: exhaustive package-index configuration
+    content: |
+      Runtime lock generation: index=https://packages.amber.internal/simple, public fallback disabled.
+      CI PEP 517 isolation: primary=https://pypi.org/simple; extra=https://packages.amber.internal/simple.
+      pip chooses the highest satisfying version across both locations. Dependency confusion protection
+      is not enabled. TLS and hostname verification succeed for both indexes.
+  - id: package-index-record
+    type: table
+    label: authoritative package ownership and hashes
+    content: |
+      package/version       location          hash         owner/status
+      amber-backend 2.4.1   internal          BACKEND241   release-team legitimate
+      amber-backend 99.0.0  public            BACKEND990   unrelated publisher, uploaded 06:12
+      amber-utils 4.2.0     internal          UTILS420     release-team legitimate
+      httpx 0.28.1          internal mirror   HTTPX0281     verified upstream mirror
+      setuptools 75.8.0     internal mirror   SETUP7580    verified upstream, not selected by pyproject
+      No internal amber-backend version above 2.4.1 exists; public 99.0.0 satisfies >=2.
+  - id: build-log
+    type: log
+    label: isolated build and artifact trace
+    content: |
+      Creating isolated environment...
+      Installing build dependencies: amber-backend>=2
+      Looking in indexes: pypi.org/simple, packages.amber.internal/simple
+      Downloaded amber_backend-99.0.0-py3-none-any.whl sha256=BACKEND990
+      Calling amber_backend.build.build_wheel
+      Built amber_service-1.7.0-py3-none-any.whl sha256=APPBAD
+      pytest: 214 passed
+      Compiler warning from optional C probe: compiler not found; pure Python fallback selected
+      There is no setuptools install or editable (`-e`) install in the command or detailed log.
+  - id: wheel-diff
+    type: diff
+    label: trusted reference wheel versus CI wheel
+    content: |
+      Trusted build with amber-backend==2.4.1 hash BACKEND241 -> app wheel sha256=APPGOOD
+      CI build with amber-backend==99.0.0 hash BACKEND990 -> app wheel sha256=APPBAD
+      APPBAD adds amber_service/sitecustomize.py, which reads process environment and posts selected
+      values when Python starts. APPGOOD contains no sitecustomize module. All runtime dependency files,
+      METADATA dependency declarations, and RECORD self-hashes otherwise match.
+  - id: evidence-matrix
+    type: note
+    label: findings and candidate policies
+    content: |
+      F1 runtime wheels lack hashes
+      F2 build-system backend is open-ended and outside requirements.lock
+      F3 public 99.0.0 build hook executes before tests
+      F4 amber-utils 4.2.0 is substituted
+      F5 setuptools postinstall mutates the wheel
+      F6 APPBAD RECORD proves the added file was intended by the project
+
+      P1 Keep >=2 but scan the final wheel for the string "sitecustomize".
+      P2 Pin/hash build and runtime requirements in separate complete lock domains, allow only the
+         internal index, prefetch into a reviewed wheelhouse, build with network disabled, and compare
+         output provenance/hash to the release manifest before install.
+      P3 Disable PEP 517 isolation so the backend resolves from whatever happens to be in the runner.
+      P4 Add public amber-backend 99.0.0 hash to requirements.lock.
+tags: [security, supply-chain, python, pep517, dependency-confusion]

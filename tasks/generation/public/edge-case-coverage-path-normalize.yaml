@@ -1,0 +1,182 @@
+id: edge-case-coverage-path-normalize
+version: 1.1.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: normalizePath — Which Candidate Covers Every Absolute-Path Edge Case
+summary: A path normalization spec defines edge handling for duplicate slashes, dot segments, parent traversal clamped at root, trailing slash canonicalization, and root/empty input. Six candidates are reviewed. Classify all candidates against the required edge set and identify the failing edge and input for each violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (path-spec, behavior-vectors, candidates-a,
+  candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every claim. Do not add
+  rules the spec omits and do not ignore one it states. The verdict vocabulary is exactly:
+  conforms / violates.
+
+  path-spec defines required edges E1..E5 and is the complete contract. submission-manifest declares
+  candidate-1..candidate-6 the complete set.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single required edge (E1..E5) it breaks and
+     give one concrete input from behavior-vectors where its output differs from the spec-correct
+     output. State both outputs.
+
+  3. Identify which candidates, if any, `conform`, and state the output a conforming
+     implementation returns for input "/a//./b/../c/".
+
+  4. In reviewer-thread, @jules claims candidate-4 is safe because "popping on .. is always correct."
+     State candidate-4's verdict and cite the edge and vector that refute this claim.
+
+  5. Name the candidate that preserves a trailing slash for non-root paths, and show its output for
+     input "/a/b/" versus the spec-correct output.
+artifacts:
+  - id: path-spec
+    type: spec
+    label: normalizePath specification (complete required edge set)
+    content: |
+      normalizePath(path: string): string
+
+      Input represents an absolute Unix-style path. The output is a canonical absolute path. The
+      required edges below are the COMPLETE contract.
+
+      E1  DUPLICATE SLASHES. Collapse repeated "/" into a single "/" separator between segments.
+
+      E2  CURRENT DIRECTORY ".". Remove "." segments entirely.
+
+      E3  PARENT ".." WITH ROOT CLAMP. ".." moves up one segment but MUST NOT move above root "/".
+          If traversal would go above root, clamp at root.
+
+      E4  TRAILING SLASH CANONICALIZATION. Remove trailing "/" for non-root outputs.
+          Root remains exactly "/".
+
+      E5  ROOT AND EMPTY INPUT. Input "/" and input "" both normalize to "/".
+
+      This is the complete contract.
+  - id: behavior-vectors
+    type: table
+    label: authoritative normalization vectors
+    content: |
+      A conforming implementation reproduces every row exactly.
+
+      #   input                 expected
+      --  --------------------  -------------
+      PV1 "/"                   "/"
+      PV2 ""                    "/"
+      PV3 "/a//b///c"           "/a/b/c"
+      PV4 "/a/./b/."            "/a/b"
+      PV5 "/a/b/../../c"        "/c"
+      PV6 "/../../x"            "/x"
+      PV7 "/a/b/"               "/a/b"
+      PV8 "/a//./b/../c/"       "/a/c"
+  - id: candidates-a
+    type: code
+    label: candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function candidate1(path) {
+        if (path === '' || path === '/') return '/';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') { if (stack.length > 0) stack.pop(); continue; }
+          stack.push(seg);
+        }
+        return stack.length === 0 ? '/' : '/' + stack.join('/');
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(path) {
+        if (path === '' || path === '/') return '/';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '.') continue;
+          if (seg === '..') { if (stack.length > 0) stack.pop(); continue; }
+          stack.push(seg);
+        }
+        return '/' + stack.join('/');
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(path) {
+        if (path === '' || path === '/') return '/';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '') continue;
+          if (seg === '..') { if (stack.length > 0) stack.pop(); continue; }
+          stack.push(seg);
+        }
+        return stack.length === 0 ? '/' : '/' + stack.join('/');
+      }
+  - id: candidates-b
+    type: code
+    label: candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(path) {
+        if (path === '' || path === '/') return '/';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') {
+            if (stack.length > 0) stack.pop();
+            else stack.push('..');
+            continue;
+          }
+          stack.push(seg);
+        }
+        return '/' + stack.join('/');
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(path) {
+        if (path === '' || path === '/') return '/';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') { if (stack.length > 0) stack.pop(); continue; }
+          stack.push(seg);
+        }
+        const core = stack.length === 0 ? '/' : '/' + stack.join('/');
+        if (path.endsWith('/') && core !== '/') return core + '/';
+        return core;
+      }
+
+      // ---- candidate-6 ----
+      function candidate6(path) {
+        if (path === '' || path === '/') return '';
+        const parts = path.split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') { if (stack.length > 0) stack.pop(); continue; }
+          stack.push(seg);
+        }
+        return stack.length === 0 ? '/' : '/' + stack.join('/');
+      }
+  - id: reviewer-thread
+    type: note
+    label: review discussion on path normalization candidates
+    content: |
+      Review thread for normalizePath (PR #8014).
+
+      @jules: "candidate-4 is fine. Seeing '..' should always pop, and if there's nothing to pop we can
+      keep '..' in the path so callers know traversal happened."
+
+      @omar: "The contract explicitly says traversal must clamp at root. Returning '/../x' leaks parent
+      traversal into output and violates canonical absolute format."
+
+      @ivy: "One candidate keeps '/a/b/' exactly as-is; spec says non-root trailing slash must be removed."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5,
+      candidate-6. This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against required edges E1..E5 and
+      behavior-vectors; submissions that satisfy every required edge are accepted.
+tags: [generation, edge-case-coverage, path, normalization, filesystem]

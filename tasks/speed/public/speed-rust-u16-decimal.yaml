@@ -1,0 +1,21 @@
+id: speed-rust-u16-decimal
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: expert
+title: Parse an ASCII u16 Without Allocation
+summary: Implement a compact Rust byte-slice parser with exact syntax and overflow errors and no string conversion.
+prompt: |
+  Implement [contract]. Output only the enum and function in Rust.
+artifacts:
+  - id: contract
+    type: spec
+    label: Exact parser contract
+    content: |
+      Define `#[derive(Debug, PartialEq, Eq)] enum ParseU16Error { Empty, InvalidDigit { index: usize }, Overflow }` and
+      `fn parse_u16_decimal(input: &[u8]) -> Result<u16, ParseU16Error>`.
+      Empty input => Empty. Accept only ASCII `0`..`9`; report the first invalid byte index.
+      Leading zeroes are valid. Reject signs and whitespace as InvalidDigit. Detect overflow
+      before arithmetic wraps; `65535` succeeds and `65536` is Overflow. One pass, O(1)
+      extra space, no allocation, UTF-8 conversion, parse helpers, unsafe, or panics.
+tags: [rust, parsing, overflow, no-allocation]

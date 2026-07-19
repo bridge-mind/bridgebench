@@ -1,0 +1,70 @@
+id: speed-migration-pr-synthesis
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: expert
+title: Synthesize a Zero-Downtime Migration Review
+summary: Review an application diff, schema migration, deployment plan, and query telemetry to identify compatibility and locking blockers.
+prompt: |
+  Review all artifacts and produce exactly:
+
+  1. A five-sentence technical summary that distinguishes expand, migrate, and contract phases.
+  2. A Markdown table with columns `Severity | Blocker | Evidence | Minimal repair`, one row
+     for each release-blocking issue and no informational rows.
+  3. A corrected seven-step deployment order using the supplied operations only.
+  4. Final line `VERDICT: request-changes` or `VERDICT: approve`.
+artifacts:
+  - id: application-diff
+    type: diff
+    label: Checkout application change
+    content: |
+      - SELECT id, total_cents FROM orders WHERE id = $1
+      + SELECT id, total_amount_cents FROM orders WHERE id = $1
+
+      - INSERT INTO orders(id, total_cents) VALUES ($1, $2)
+      + INSERT INTO orders(id, total_amount_cents) VALUES ($1, $2)
+
+      Deployment topology: 40 rolling pods; old and new versions overlap for at least
+      12 minutes. The old binary reads and writes only total_cents. The new binary reads
+      and writes only total_amount_cents.
+  - id: migration
+    type: code
+    label: Proposed SQL migration
+    content: |
+      BEGIN;
+      ALTER TABLE orders RENAME COLUMN total_cents TO total_amount_cents;
+      ALTER TABLE orders ALTER COLUMN total_amount_cents SET NOT NULL;
+      COMMIT;
+  - id: constraints
+    type: spec
+    label: Production migration constraints and available operations
+    content: |
+      Zero request failures and zero lost writes are allowed. Old and new pods overlap.
+      `orders` has 480 million rows and receives 9,000 writes/s. A table rewrite or
+      ACCESS EXCLUSIVE lock over 2 seconds is release-blocking. Available operations:
+      add nullable total_amount_cents; deploy dual-write/read-fallback code; backfill in
+      resumable id ranges; validate parity; add NOT VALID check for non-null; validate
+      constraint; switch reads to new column; remove old column in a later release.
+      Adding a nullable column without a volatile default is metadata-only on this version.
+  - id: telemetry
+    type: table
+    label: Production query and lock telemetry
+    content: |
+      metric                              | value
+      old-column reads                    | 31,000/s
+      old-column writes                   | 9,000/s
+      maximum allowed blocking            | 2 s
+      rehearsal rename lock wait          | 47 s
+      rehearsal SET NOT NULL table scan   | 38 min
+      null total_cents rows               | 0
+      replication lag during range backfill (10k rows) | 180 ms
+  - id: proposed-plan
+    type: note
+    label: Current deployment plan
+    content: |
+      1. Run the rename migration and SET NOT NULL.
+      2. Deploy new application pods gradually.
+      3. Backfill total_amount_cents from total_cents if any old rows are missing it.
+      4. Validate parity.
+      5. Remove total_cents.
+tags: [migration, postgresql, zero-downtime, code-review, synthesis]

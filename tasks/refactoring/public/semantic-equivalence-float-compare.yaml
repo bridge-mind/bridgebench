@@ -1,0 +1,97 @@
+id: semantic-equivalence-float-compare
+version: 1.1.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Collapsing an IEEE-754 Comparator Without Changing NaN or Infinity Semantics
+summary: >-
+  A floating-point comparator treats Object.is-identical values as equal, including NaN and signed
+  infinities, then applies an inclusive absolute tolerance only to finite pairs. Four one-expression
+  rewrites are proposed; classify each across NaN, infinity, signed-zero, and boundary inputs.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (compare-original, number-semantics,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to replace closeReading's branch body with one return expression while
+  preserving its boolean result for every JavaScript number pair.
+
+  1. Classify rewrite-a across finite values, NaN, infinities, and signed zero.
+  2. Classify rewrite-b. Give a concrete witness with both results and identify the equality rule.
+  3. Classify rewrite-c. Give a non-finite witness with both results and explain why guard ordering
+     matters.
+  4. Classify rewrite-d. Give the exact inclusive-boundary witness from number-semantics.
+  5. State which rewrites, if any, are behavior-preserving and meets-goal. Report compare-original's
+     result for every F1..F6 case.
+artifacts:
+  - id: compare-original
+    type: code
+    label: sensors/compare.ts — original comparator
+    content: |
+      const EPSILON = 0.25;
+
+      export function closeReading(a: number, b: number): boolean {
+        if (Object.is(a, b)) return true;
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+        return Math.abs(a - b) <= EPSILON;
+      }
+  - id: number-semantics
+    type: spec
+    label: authoritative JavaScript number semantics and witness matrix
+    content: |
+      Apply only these complete rules:
+        - Object.is(NaN, NaN) is true. NaN === NaN is false.
+        - Object.is(+0, -0) is false. +0 === -0 is true.
+        - Object.is(+Infinity, +Infinity) and Object.is(-Infinity, -Infinity) are true.
+        - Number.isFinite is false for NaN, +Infinity, and -Infinity; true for ordinary finite
+          numbers including +0 and -0.
+        - Math.abs(NaN) is NaN, and every ordered comparison involving NaN (including NaN <= x)
+          is false.
+        - 0, 0.25, 1, and 1.25 are represented exactly here. Math.abs(1 - 1.25) is exactly 0.25.
+        - `&&` and `||` evaluate left-to-right and short-circuit, but every operation shown is pure.
+          The return boolean is the only observable behavior.
+
+      Required witness matrix (compute each result from the rules above):
+        F1 closeReading(NaN, NaN)
+        F2 closeReading(+Infinity, +Infinity)
+        F3 closeReading(+Infinity, -Infinity)
+        F4 closeReading(+0, -0)
+        F5 closeReading(1, 1.25)
+        F6 closeReading(1, 1.5)
+
+      Parameters may be any JavaScript number. There are no coercions, getters, exceptions, or
+      narrower domain assumptions.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — preserve identity escape hatch and finite tolerance
+    content: |
+      export function closeReading(a: number, b: number): boolean {
+        return Object.is(a, b)
+          || (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= EPSILON);
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — use strict equality as the identity escape hatch
+    content: |
+      export function closeReading(a: number, b: number): boolean {
+        return a === b
+          || (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= EPSILON);
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — require finiteness before checking identity
+    content: |
+      export function closeReading(a: number, b: number): boolean {
+        return Number.isFinite(a)
+          && Number.isFinite(b)
+          && (Object.is(a, b) || Math.abs(a - b) <= EPSILON);
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — make the tolerance comparison strict
+    content: |
+      export function closeReading(a: number, b: number): boolean {
+        return Object.is(a, b)
+          || (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < EPSILON);
+      }
+tags: [refactoring, semantic-equivalence, javascript, floating-point, ieee-754]

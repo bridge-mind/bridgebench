@@ -1,0 +1,92 @@
+id: stateful-mvcc-write-skew
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: MVCC Snapshot Trace Through Write Skew, Savepoints, and a Serializable Retry
+summary: Execute a complete transaction schedule under snapshot isolation and SSI, tracking visible versions, savepoint rollback, predicate conflicts, commit outcomes, and final on-call coverage.
+prompt: |
+  Replay [schedule] in sequence order twice: first under SNAPSHOT, then under SERIALIZABLE using the
+  complete model below. Transaction-local statements occur exactly where listed.
+
+  1. Under SNAPSHOT, report every SELECT result, local write set after each statement, both commit
+     outcomes, and the final committed rows.
+  2. Identify the exact invariant violation under SNAPSHOT and the two read/write dependency edges
+     that form it.
+  3. Under SERIALIZABLE, report every original-attempt result and which transaction aborts under the
+     stated deterministic victim rule.
+  4. Replay the aborted transaction's retry, including its new snapshot, branch decision, write set,
+     commit result, and final rows.
+  5. Explain the effect of T2's savepoint rollback in both executions and why it does not erase its
+     prior predicate read.
+  6. Evaluate fixes A-D and give one database-level regression test with barrier positions and exact
+     allowed outcomes.
+artifacts:
+  - id: mvcc-model
+    type: spec
+    label: Complete transaction model
+    content: |
+      Each transaction's snapshot is committed state at BEGIN plus its own writes. SNAPSHOT detects
+      only concurrent writes to the same row; otherwise commits both. SERIALIZABLE adds predicate
+      read/write dependencies. If two concurrent transactions each read the predicate
+      `on_call=true` and each changes a different matching row to false, their dependency cycle makes
+      one abort. Deterministic victim: higher transaction ID aborts. A savepoint rollback removes
+      writes after the savepoint but not reads or predicate dependencies. A retry gets a fresh ID and
+      snapshot and executes its application branch again.
+  - id: invariant-and-code
+    type: code
+    label: On-call update transaction
+    content: |
+      // invariant: at least one doctor in ward W must have on_call=true
+      async function leaveCallWithObservedCount(tx, doctor, observedCount) {
+        if (observedCount >= 2) await tx.update(doctor, { on_call: false });
+      }
+      async function leaveCall(tx, doctor) {
+        const count = await tx.count("doctors", { ward: "W", on_call: true });
+        await leaveCallWithObservedCount(tx, doctor, count);
+      }
+
+      `leaveCallWithObservedCount` performs no read. It is used only where [schedule] explicitly
+      separates the read from the later branch; `leaveCall` performs exactly one fresh read.
+  - id: initial-state
+    type: table
+    label: Committed state before either BEGIN
+    content: |
+      doctor | ward | on_call | version
+      Ada    | W    | true    | v10
+      Bo     | W    | true    | v11
+      Cy     | X    | true    | v12
+  - id: schedule
+    type: log
+    label: Exhaustive ordered schedule
+    content: |
+      1. T1 BEGIN
+      2. T2 BEGIN
+      3. T1 SELECT count ward=W,on_call=true as c1; run leaveCallWithObservedCount(Ada,c1)
+      4. T2 SELECT count ward=W,on_call=true as c2
+      5. T2 SAVEPOINT s
+      6. T2 UPDATE Cy on_call=false
+      7. T2 ROLLBACK TO s
+      8. T2 run leaveCallWithObservedCount(Bo,c2)
+      9. T1 COMMIT
+      10. T2 COMMIT
+      11. If T2 aborts, retry as T3 by running leaveCall(Bo) once (including its one fresh SELECT)
+          and COMMIT
+
+      No other transactions or reads occur.
+  - id: dependency-rules
+    type: note
+    label: Edge notation and retry clarification
+    content: |
+      Write an edge `Ta -rw-> Tb` when Ta read a predicate result that Tb's committed write makes
+      stale. T1's update of Ada makes T2's count stale; T2's update of Bo makes T1's count stale.
+      The rolled-back Cy write never becomes a committed write and creates no write conflict.
+  - id: candidate-fixes
+    type: diff
+    label: Proposed invariant protections
+    content: |
+      A. Use SERIALIZABLE and retry serialization failures by rerunning the whole transaction.
+      B. Keep SNAPSHOT and retry only network errors.
+      C. Read count outside the transaction, then update inside it.
+      D. Keep SNAPSHOT but add an index on (ward,on_call).
+tags: [mvcc, snapshot-isolation, serializable, write-skew, state-machine]

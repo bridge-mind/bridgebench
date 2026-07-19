@@ -9,6 +9,7 @@
  */
 export * from './contracts/index.js';
 export * from './arena.js';
+export * from './calibration.js';
 export * from './cancellation.js';
 export * from './elo.js';
 export * from './judges.js';
@@ -20,6 +21,7 @@ export * from './openrouter-transport.js';
 export * from './report.js';
 export * from './run-manifest.js';
 export * from './scheduler.js';
+export * from './seating.js';
 export * from './store.js';
 export * from './tasks.js';
 export * from './triage.js';

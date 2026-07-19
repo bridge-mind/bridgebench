@@ -1,0 +1,158 @@
+id: dead-code-ab-test-variants
+version: 1.1.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Auditing an A/B Variant Cleanup for the Quill Checkout Experiments
+summary: >-
+  A cleanup PR deletes seven experiment variant handlers claimed to be dead. Reachability runs through
+  two live entry points and an experiment registry where some tests are still splitting traffic, some
+  are concluded with a frozen winner, and one key is permanently removed. Classify each removal and
+  judge whether the PR meets the elimination goal.
+prompt: |
+  A cleanup PR (removal-pr) deletes seven items from the Quill `checkout` experiment module, each
+  labelled "dead variant." Reachability is fully determined by three self-declared-complete artifacts:
+  the entry-manifest (the only entry points and the no-reflection guarantee), the experiment-registry
+  (every experiment key, status, traffic, and frozen winner), and the module-source.
+
+  Answer each deliverable using ONLY the supplied artifacts (entry-manifest, experiment-registry,
+  module-source, removal-pr). Cite the artifact id(s) for every claim.
+
+  For removals R1..R7, classify each as exactly one of:
+    - behavior-preserving  (the item is truly unreachable; deleting it changes nothing observable)
+    - changes-behavior     (the item is reachable for some entry / experiment assignment; deleting it
+                            removes live behavior)
+
+  Rules from the registry (authoritative):
+    - An ACTIVE experiment still assigns traffic to every listed variant — all those handlers are live.
+    - A CONCLUDED experiment permanently serves ONLY its frozen winner; non-winner variants are dead.
+    - A REMOVED experiment key is permanently false / unassigned; every variant under it is dead.
+    - Shared helpers are live if ANY live variant (or entry point) still calls them.
+
+  1. Classify R1 (remove renderBtnB).
+  2. Classify R2 (remove renderBtnA).
+  3. Classify R3 (remove renderHeroChallenger).
+  4. Classify R4 (remove renderHeroControl).
+  5. Classify R5 (remove renderPricingA).
+  6. Classify R6 (remove renderLegacyBanner).
+  7. Classify R7 (remove formatMoney).
+  8. GOAL. Taking the elimination goal as "remove all and only truly-dead code," does this PR
+     meet-goal or fails-goal? If fails-goal, name every reachable item it wrongly removes AND any
+     truly-dead item it leaves behind.
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the artifacts.
+  For every changes-behavior verdict, name the reachability path (entry point + experiment key +
+  variant) that keeps the item alive.
+artifacts:
+  - id: entry-manifest
+    type: spec
+    label: checkout experiments — reachability manifest (complete)
+    content: |
+      Quill `checkout` experiment module — reachability surface. This manifest is COMPLETE.
+
+      Entry points (the ONLY ways execution enters this module):
+        - renderCheckout(user) — exported; called by the storefront on every checkout paint.
+        - renderUpsell(user)   — exported; called by the post-purchase page.
+      There are NO other exported functions and no other callers of this module.
+
+      Dynamic behavior: variant selection goes ONLY through experiments.assign(key, user), which
+      returns a variant id from experiment-registry (or the frozen winner for CONCLUDED keys). The
+      module uses NO reflection, NO eval, NO dynamic import, and NO string-to-function maps beyond the
+      explicit switch/if chains in module-source.
+
+      Therefore: a function is truly dead if no static call chain from renderCheckout or renderUpsell
+      can reach it under any assign() result still possible per experiment-registry.
+  - id: experiment-registry
+    type: config
+    label: experiment registry (complete and authoritative)
+    content: |
+      # experiments.registry.yaml — the COMPLETE set of experiment keys.
+      # Any key not listed here does not exist; assign(missingKey) returns null forever.
+
+      experiments:
+        - key: checkout_btn
+          status: ACTIVE
+          variants: [A, B]
+          traffic: { A: 50, B: 50 }
+          # Both variants still receive traffic. Operators may rebalance but cannot remove a listed
+          # variant without a registry change (not in this PR).
+
+        - key: homepage_hero
+          status: CONCLUDED
+          winner: control
+          variants: [control, challenger]
+          # Permanently serves ONLY `control`. assign() always returns 'control'.
+          # `challenger` can never be assigned again.
+
+        - key: pricing_table
+          status: CONCLUDED
+          winner: B
+          variants: [A, B]
+          # Permanently serves ONLY `B`. variant A is unreachable.
+
+        - key: legacy_banner
+          status: REMOVED
+          # Key deleted from the registry service on 2026-02-01.
+          # assign('legacy_banner') is permanently null; no variant under it can run.
+
+      # No other experiments exist.
+  - id: module-source
+    type: code
+    label: checkout/experiments.ts — current module source (complete)
+    content: |
+      import { experiments } from './registry';
+      import type { User } from './user';
+
+      export function formatMoney(cents: number): string {
+        return `$${(cents / 100).toFixed(2)}`;
+      }
+
+      export function renderBtnA(): string { return 'Buy now'; }
+      export function renderBtnB(): string { return 'Checkout'; }
+
+      export function renderHeroControl(): string { return 'Welcome back'; }
+      export function renderHeroChallenger(): string { return 'New hero'; }
+
+      export function renderPricingA(): string { return formatMoney(999); }
+      export function renderPricingB(): string { return formatMoney(799); }
+
+      export function renderLegacyBanner(): string { return 'Legacy sale'; }
+
+      export function renderCheckout(user: User): string {
+        const btn = experiments.assign('checkout_btn', user);
+        const btnHtml = btn === 'B' ? renderBtnB() : renderBtnA();
+
+        const hero = experiments.assign('homepage_hero', user);
+        const heroHtml = hero === 'challenger' ? renderHeroChallenger() : renderHeroControl();
+
+        const price = experiments.assign('pricing_table', user);
+        const priceHtml = price === 'A' ? renderPricingA() : renderPricingB();
+
+        return btnHtml + heroHtml + priceHtml;
+      }
+
+      export function renderUpsell(user: User): string {
+        const banner = experiments.assign('legacy_banner', user);
+        if (banner != null) {
+          return renderLegacyBanner();
+        }
+        return renderPricingB();
+      }
+  - id: removal-pr
+    type: diff
+    label: proposed cleanup PR — removals R1..R7
+    content: |
+      R1: delete function renderBtnB and the `btn === 'B' ? renderBtnB() : ...` branch;
+          hard-code renderBtnA() only.
+      R2: delete function renderBtnA (leave renderBtnB and the B branch intact).
+      R3: delete function renderHeroChallenger and the `hero === 'challenger'` branch;
+          hard-code renderHeroControl() only.
+      R4: delete function renderHeroControl (leave the challenger branch intact).
+      R5: delete function renderPricingA and the `price === 'A'` branch;
+          hard-code renderPricingB() only.
+      R6: delete function renderLegacyBanner and the dead `if (banner != null)` block in renderUpsell.
+      R7: delete function formatMoney (inline '$7.99' into renderPricingB only; remove the
+          formatMoney call from the already-deleted renderPricingA path as part of R5).
+
+      # Note from author: "CONCLUDED winners stay; losers go; REMOVED keys go; ACTIVE keeps both."
+tags: [refactoring, dead-code-elimination, ab-test, experiments, reachability]

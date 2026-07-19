@@ -1,15 +1,14 @@
 id: taint-export-template-render
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: taint-flow
 difficulty: expert
 title: Ledgerline HTML Export Template Taint Flow
 summary: >-
   Trace five account-profile fields through the Ledgerline HTML exporter and
-  classify each source-to-sink path. Auto-escaped slots, an allowlist-sanitized
-  raw slot, a flag-gated raw slot, and a telemetry-only field surround one field
-  that reaches a raw template slot unescaped. Identify the single reachable,
-  unsafe path with evidence — reachability reasoning only, no payloads.
+  classify each source-to-sink path against the template's escaped and raw
+  slots. Determine which fields, if any, reach a dangerous sink unguarded —
+  reachability reasoning only, no payloads.
 prompt: |
   You are reviewing the "Ledgerline" account HTML exporter. It reads an account's
   profile record and renders it through a single Vellum template. Vellum escaping:

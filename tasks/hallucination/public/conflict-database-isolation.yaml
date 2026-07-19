@@ -1,0 +1,79 @@
+id: conflict-database-isolation
+version: 1.0.0
+category: hallucination
+cluster: conflicting-sources
+difficulty: expert
+title: Reconcile Transaction Isolation Across ORM Defaults, Runtime Sessions, Proxy Rules, and Docs
+summary: Apply scoped authority rules to contradictory isolation claims and distinguish configured defaults, effective transaction state, and an unverified failover environment.
+prompt: |
+  Document the effective isolation of `settlement-api`. Preserve conflicting claims whenever the
+  scoped authority rules cannot resolve them.
+
+  1. What isolation did transaction tx-771 actually use? Reconcile ORM, proxy, and database evidence.
+  2. What isolation would a new `settlement-api` transaction matching `settlement_rule` request through
+     pool `writer` under the captured runtime rules?
+  3. Does method `reconcileBatch` override isolation? Separate source intent from the recorded tx-771
+     execution.
+  4. What isolation is effective after failover to `writer-dr`? Return CONFLICTING or NOT DETERMINABLE
+     if required rather than selecting confident prose.
+  5. Did change ch-88 deploy, and what desired state would it have requested?
+  6. Produce a correction table for every assertion in [handbook-and-chat], with scoped governing
+     artifact and classification.
+artifacts:
+  - id: authority-rules
+    type: spec
+    label: Exhaustive source precedence by question
+    content: |
+      For a recorded transaction, `SHOW transaction_isolation` inside that transaction is
+      authoritative. For current proxy routing/defaults, the live proxy snapshot governs. ORM source
+      states requested behavior but proxy/database may override it. Checked-in config is desired state
+      only after successful apply. For DR runtime, only a live DR session query is authoritative; if
+      absent and retained DR sources disagree, classify CONFLICTING. Docs/chat never override runtime.
+  - id: orm-source
+    type: code
+    label: Settlement transaction wrapper at commit 77c1
+    content: |
+      const ds = new DataSource({ isolation: "READ COMMITTED" });
+      async function reconcileBatch() {
+        return ds.transaction(async tx => {
+          return tx.runBatch(); // no per-transaction override
+        });
+      }
+  - id: runtime-record
+    type: log
+    label: Captured production transaction
+    content: |
+      tx=tx-771 pool=writer proxyRoute=settlement_rule
+      requested startup option: default_transaction_isolation=read committed
+      proxy rewrite: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+      inside tx-771: SHOW transaction_isolation -> serializable
+      commit: serialization_failure; retry=1 success
+  - id: proxy-and-config
+    type: config
+    label: Live primary proxy and checked-in desired change
+    content: |
+      live proxy writer:
+        settlement_rule: force SERIALIZABLE
+        default: pass through
+
+      commit ch-88 desired:
+        settlement_rule: force REPEATABLE READ
+      apply log: ch-88 FAILED validation; resources_changed=0
+  - id: dr-sources
+    type: note
+    label: Conflicting disaster-recovery evidence
+    content: |
+      DR runbook revised 2026-07-18: writer-dr forces REPEATABLE READ for settlement_rule.
+      Proxy export captured 2026-07-17: writer-dr settlement_rule forces SERIALIZABLE.
+      No live DR session, DR proxy API snapshot, failover execution, or timestamp ordering rule is
+      retained. Both sources claim current state.
+  - id: handbook-and-chat
+    type: note
+    label: Claims to correct
+    content: |
+      A. "All transactions use the ORM default READ COMMITTED."
+      B. "reconcileBatch explicitly requests SERIALIZABLE in application code."
+      C. "ch-88 changed production to REPEATABLE READ."
+      D. "DR definitely uses the newer runbook's REPEATABLE READ."
+      E. "tx-771 was SERIALIZABLE."
+tags: [database, isolation, conflicting-sources, proxy, transactions]

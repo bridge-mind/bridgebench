@@ -1,10 +1,10 @@
 id: edge-case-coverage-csv-line-parser
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: edge-case-coverage
 difficulty: expert
 title: parseFields — Which Submission Handles Every Declared CSV Field Edge
-summary: A single-record CSV parser spec enumerates five mandatory edges (quoted fields with literal commas, the doubled-quote escape, trailing empty fields, no whitespace trimming, and the empty line producing one empty field). Six submissions are under review; exactly one satisfies all five while each of five decoys misses exactly one. Classify all six by reading the code against the behavior scenarios and pin the failing edge for each near-miss.
+summary: A single-record CSV parser spec enumerates five mandatory edges (quoted fields with literal commas, the doubled-quote escape, trailing empty fields, no whitespace trimming, and the empty line producing one empty field). Six submissions are under review. Classify all six by reading the code against the behavior scenarios and pin the failing edge for any non-conformer.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (parser-spec, behavior-vectors,
   candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
@@ -12,9 +12,8 @@ prompt: |
   vocabulary is exactly: conforms / violates. A submission `conforms` only if it satisfies EVERY
   required edge E1..E5 in parser-spec.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
-  satisfies all five edges. No code is executed; reason about behavior by reading each candidate
-  against the behavior-vectors scenarios.
+  submission-manifest declares candidate-1..candidate-6 the complete set. No code is executed;
+  reason about behavior by reading each candidate against the behavior-vectors scenarios.
 
   1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
 
@@ -22,7 +21,7 @@ prompt: |
      fails and cite the behavior-vectors scenario that exposes it. Give the conforming output and the
      candidate's output for that scenario.
 
-  3. Exactly one candidate `conforms` (satisfies all five edges). Identify it.
+  3. Identify which candidates, if any, `conform` (satisfy all five edges).
 
   4. In reviewer-thread, reviewer @lena says candidate-5 conforms because "trimming stray whitespace
      around fields is what callers always want." State candidate-5's verdict and cite the edge and
@@ -92,16 +91,16 @@ artifacts:
           const ch = line[i];
           if (inQ) {
             if (ch === '"') {
-              if (line[i + 1] === '"') { field += '"'; i++; continue; }  // E2: "" -> literal "
-              inQ = false; continue;                                      // E1: closing quote removed
+              if (line[i + 1] === '"') { field += '"'; i++; continue; }
+              inQ = false; continue;
             }
-            field += ch; continue;                                       // E1: literal, incl. commas
+            field += ch; continue;
           }
-          if (ch === '"') { inQ = true; continue; }                      // E1: opening quote removed
-          if (ch === ',') { out.push(field); field = ''; continue; }     // E3: separator
-          field += ch;                                                   // E4: literal, incl. spaces
+          if (ch === '"') { inQ = true; continue; }
+          if (ch === ',') { out.push(field); field = ''; continue; }
+          field += ch;
         }
-        out.push(field);                                                 // E3: final field
+        out.push(field);
         return out;
       }
 
@@ -112,7 +111,7 @@ artifacts:
         let inQ = false;
         for (let i = 0; i < line.length; i++) {
           const ch = line[i];
-          if (ch === ',') { out.push(field); field = ''; continue; }     // splits even inside quotes
+          if (ch === ',') { out.push(field); field = ''; continue; }
           if (inQ) {
             if (ch === '"') {
               if (line[i + 1] === '"') { field += '"'; i++; continue; }
@@ -135,7 +134,7 @@ artifacts:
         for (let i = 0; i < line.length; i++) {
           const ch = line[i];
           if (inQ) {
-            if (ch === '"') { inQ = false; continue; }                   // closes on ANY quote (no "")
+            if (ch === '"') { inQ = false; continue; }
             field += ch; continue;
           }
           if (ch === '"') { inQ = true; continue; }
@@ -151,7 +150,7 @@ artifacts:
     content: |
       // ---- candidate-4 ----
       function parseFields4(line) {
-        if (line.endsWith(',')) line = line.slice(0, -1);                // drops one trailing field
+        if (line.endsWith(',')) line = line.slice(0, -1);
         const out = [];
         let field = '';
         let inQ = false;
@@ -187,16 +186,16 @@ artifacts:
             field += ch; continue;
           }
           if (ch === '"') { inQ = true; continue; }
-          if (ch === ',') { out.push(field.trim()); field = ''; continue; }  // trims each field
+          if (ch === ',') { out.push(field.trim()); field = ''; continue; }
           field += ch;
         }
-        out.push(field.trim());                                              // trims the final field
+        out.push(field.trim());
         return out;
       }
 
       // ---- candidate-6 ----
       function parseFields6(line) {
-        if (line === '') return [];                                      // empty line -> no fields
+        if (line === '') return [];
         const out = [];
         let field = '';
         let inQ = false;
@@ -239,7 +238,6 @@ artifacts:
       Submissions under review for parseFields: candidate-1, candidate-2, candidate-3, candidate-4,
       candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being considered.
 
-      Acceptance rule: exactly one submission satisfies ALL five required edges (E1..E5) and is to be
-      accepted. Each of the other five mishandles exactly one required edge. The process assumes
-      precisely one such all-edges-correct submission exists in this set.
+      Acceptance rule: submissions are evaluated against all five required edges (E1..E5);
+      submissions that satisfy every required edge are accepted.
 tags: [generation, edge-case-coverage, csv, parsing, code-review]

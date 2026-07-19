@@ -1,0 +1,256 @@
+id: api-contract-adherence-bulk-partial
+version: 1.1.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: POST /v1/bulk/users — Which Handler Obeys Partial-Success Contract Exactly
+summary: A bulk-create API contract fixes transport status, per-item result ordering, duplicate-clientId behavior, duplicate-email handling, and no-short-circuit processing. Six handlers are under review. Classify all six against the contract terms and cite the scenario line that distinguishes each violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (api-contract, canonical-scenario,
+  handlers-a, handlers-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent contract terms and do not ignore one that is stated. The verdict vocabulary
+  is exactly: conforms / violates.
+
+  api-contract defines terms T1..T5 and is complete. submission-manifest declares candidate-1..candidate-6
+  the complete set.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single broken term (T1..T5) and cite one
+     canonical-scenario line where candidate behavior differs from contract-correct behavior. State
+     both responses.
+
+  3. Identify which candidates, if any, `conform`.
+
+  4. In reviewer-thread, @kai says candidate-2 is better because "HTTP 207 is the correct way to
+     represent mixed outcomes." State candidate-2's verdict and the contract term that refutes this.
+
+  5. Name the candidate that short-circuits after the first invalid item instead of producing a
+     complete per-item results array, and cite the scenario line that proves it.
+artifacts:
+  - id: api-contract
+    type: spec
+    label: bulk user-create contract (frozen, complete)
+    content: |
+      Endpoint:
+        POST /v1/bulk/users
+      Body:
+        { "items": [ { "clientId": string, "email": string, "name": string }, ... ] }
+
+      Response:
+        { "results": [ ... ] } where each result has
+          - clientId: string
+          - status: "created" | "invalid" | "conflict"
+          - userId: string (only when status = "created")
+          - errorCode: string (only when status != "created")
+
+      Terms (COMPLETE contract):
+
+      T1  TRANSPORT STATUS. Endpoint always responds HTTP 200 for syntactically valid bulk requests,
+          including partial-success and mixed outcomes. It never uses 207 for per-item outcomes.
+
+      T2  ORDER AND CARDINALITY. results length equals input items length, and result[i] corresponds
+          to items[i] (input order preserved).
+
+      T3  EMAIL CONFLICT RULE. If email is malformed -> status "invalid", errorCode "invalid_email".
+          Else if email already exists in store OR was created by an earlier item in the same request
+          -> status "conflict", errorCode "duplicate_email". Else create and return status "created".
+
+      T4  DUPLICATE clientId IN SAME REQUEST. If a clientId appears multiple times in one request,
+          only the first occurrence is eligible for normal processing. Each later occurrence must be
+          status "invalid", errorCode "duplicate_client_id", regardless of email.
+
+      T5  NO SHORT-CIRCUIT. All items are processed and all results are returned even after invalid
+          or conflict outcomes.
+
+      This is the complete contract.
+  - id: canonical-scenario
+    type: log
+    label: initial store, one canonical batch, and contract-correct response
+    content: |
+      Initial store:
+        users by email:
+          - taken@example.com -> u10
+        next generated id suffix starts at 11 (u11, u12, ...)
+
+      Request body items (in order):
+        I1 { clientId: "c1", email: "new1@example.com",  name: "N1" }
+        I2 { clientId: "c2", email: "bad-email",         name: "Bad" }
+        I3 { clientId: "c3", email: "taken@example.com", name: "DupExisting" }
+        I4 { clientId: "c1", email: "new2@example.com",  name: "DupClientId" }
+        I5 { clientId: "c5", email: "new3@example.com",  name: "N3" }
+
+      Contract-correct response:
+        HTTP 200
+        results:
+          R1 { clientId: "c1", status: "created", userId: "u11" }
+          R2 { clientId: "c2", status: "invalid", errorCode: "invalid_email" }
+          R3 { clientId: "c3", status: "conflict", errorCode: "duplicate_email" }
+          R4 { clientId: "c1", status: "invalid", errorCode: "duplicate_client_id" }
+          R5 { clientId: "c5", status: "created", userId: "u12" }
+
+      Notes:
+        - R5 proves processing continues after R2 and R3 (T5).
+        - R4 proves duplicate clientId has precedence for later duplicates (T4).
+  - id: handlers-a
+    type: code
+    label: candidate-1, candidate-2, candidate-3
+    content: |
+      // Helper assumptions:
+      // isEmail(s): returns true iff s has one "@" and at least one "." after it.
+      // createUser(item): stores user and returns generated userId.
+      // existingEmails is a mutable set tracking store emails.
+
+      // ---- candidate-1 ----
+      function candidate1(items, existingEmails) {
+        const seenClientIds = new Set();
+        const results = [];
+        for (const item of items) {
+          if (seenClientIds.has(item.clientId)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'duplicate_client_id' });
+            continue;
+          }
+          seenClientIds.add(item.clientId);
+          if (!isEmail(item.email)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'invalid_email' });
+            continue;
+          }
+          if (existingEmails.has(item.email)) {
+            results.push({ clientId: item.clientId, status: 'conflict', errorCode: 'duplicate_email' });
+            continue;
+          }
+          const id = createUser(item);
+          existingEmails.add(item.email);
+          results.push({ clientId: item.clientId, status: 'created', userId: id });
+        }
+        return { status: 200, body: { results } };
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(items, existingEmails) {
+        const res = candidate1(items, existingEmails);
+        const hasMixed = res.body.results.some(r => r.status !== 'created');
+        return { status: hasMixed ? 207 : 200, body: res.body };
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(items, existingEmails) {
+        const seenClientIds = new Set();
+        const results = [];
+        const sorted = items.slice().sort((a, b) => a.email.localeCompare(b.email));
+        for (const item of sorted) {
+          if (seenClientIds.has(item.clientId)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'duplicate_client_id' });
+            continue;
+          }
+          seenClientIds.add(item.clientId);
+          if (!isEmail(item.email)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'invalid_email' });
+            continue;
+          }
+          if (existingEmails.has(item.email)) {
+            results.push({ clientId: item.clientId, status: 'conflict', errorCode: 'duplicate_email' });
+            continue;
+          }
+          const id = createUser(item);
+          existingEmails.add(item.email);
+          results.push({ clientId: item.clientId, status: 'created', userId: id });
+        }
+        return { status: 200, body: { results } };
+      }
+  - id: handlers-b
+    type: code
+    label: candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(items, existingEmails) {
+        const seenClientIds = new Set();
+        const results = [];
+        for (const item of items) {
+          if (seenClientIds.has(item.clientId)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'duplicate_client_id' });
+            continue;
+          }
+          seenClientIds.add(item.clientId);
+          if (!isEmail(item.email)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'invalid_email' });
+            continue;
+          }
+          if (existingEmails.has(item.email)) {
+            results.push({ clientId: item.clientId, status: 'created', userId: 'existing' });
+            continue;
+          }
+          const id = createUser(item);
+          existingEmails.add(item.email);
+          results.push({ clientId: item.clientId, status: 'created', userId: id });
+        }
+        return { status: 200, body: { results } };
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(items, existingEmails) {
+        const seenClientIds = new Set();
+        const results = [];
+        for (const item of items) {
+          if (seenClientIds.has(item.clientId)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'duplicate_client_id' });
+            break;
+          }
+          seenClientIds.add(item.clientId);
+          if (!isEmail(item.email)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'invalid_email' });
+            break;
+          }
+          if (existingEmails.has(item.email)) {
+            results.push({ clientId: item.clientId, status: 'conflict', errorCode: 'duplicate_email' });
+            break;
+          }
+          const id = createUser(item);
+          existingEmails.add(item.email);
+          results.push({ clientId: item.clientId, status: 'created', userId: id });
+        }
+        return { status: 200, body: { results } };
+      }
+
+      // ---- candidate-6 ----
+      function candidate6(items, existingEmails) {
+        const results = [];
+        for (const item of items) {
+          if (!isEmail(item.email)) {
+            results.push({ clientId: item.clientId, status: 'invalid', errorCode: 'invalid_email' });
+            continue;
+          }
+          if (existingEmails.has(item.email)) {
+            results.push({ clientId: item.clientId, status: 'conflict', errorCode: 'duplicate_email' });
+            continue;
+          }
+          const id = createUser(item);
+          existingEmails.add(item.email);
+          results.push({ clientId: item.clientId, status: 'created', userId: id });
+        }
+        return { status: 200, body: { results } };
+      }
+  - id: reviewer-thread
+    type: note
+    label: review comments on bulk handlers
+    content: |
+      Review thread for POST /v1/bulk/users (PR #8199).
+
+      @kai: "candidate-2 should win. HTTP 207 is the right protocol-level status for mixed per-item
+      outcomes."
+
+      @lena: "This endpoint contract explicitly standardizes on HTTP 200 and puts per-item outcome in
+      the response body for compatibility with existing clients."
+
+      @dean: "One candidate exits early after an invalid row, so downstream valid items never produce
+      results. That breaks the full-results guarantee."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5,
+      candidate-6. This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against terms T1..T5 and canonical-scenario;
+      submissions that satisfy every term are accepted.
+tags: [generation, api-contract-adherence, bulk-api, partial-success, ordering]

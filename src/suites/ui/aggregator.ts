@@ -7,7 +7,8 @@
  * from different seasons are never mixed.
  */
 
-import { ENGINE_VERSION, SEASON, THREE_VERSION } from '../../config.js';
+import { SEASON, THREE_VERSION } from '../../config.js';
+import { ENGINE_VERSION } from '../../version.js';
 import {
   UI_TASK_CATEGORIES,
   type UiBenchLeaderboardEntry,

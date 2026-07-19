@@ -1,10 +1,10 @@
 id: api-contract-adherence-etag-concurrency
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: api-contract-adherence
 difficulty: expert
 title: GET and PUT /v1/docs — Which Handler Obeys Every ETag Precondition Term
-summary: A conditional-request contract for a document endpoint fixes not-modified 304 handling on a matching If-None-Match, ETag rotation on every successful write, a 412 on a stale If-Match with no change, a 428 when If-Match is absent, and a 404 with no upsert for an unknown id. Six handler submissions are under review; exactly one obeys every term while each decoy breaks exactly one. Classify all six against the contract and fixed request scenarios.
+summary: A conditional-request contract for a document endpoint fixes not-modified 304 handling on a matching If-None-Match, ETag rotation on every successful write, a 412 on a stale If-Match with no change, a 428 when If-Match is absent, and a 404 with no upsert for an unknown id. Six handler submissions are under review. Classify all six against the contract and fixed request scenarios, naming the term any non-conformer breaks.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (api-contract, error-code-table,
   request-scenarios, handlers-a, handlers-b, submission-manifest). Cite artifact id(s) for every
@@ -12,8 +12,8 @@ prompt: |
   is exactly: conforms / violates. A handler `conforms` only if it satisfies EVERY term T1..T5 in
   api-contract.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that obeys
-  every term. No code is executed; reason about each handler's response for the canonical
+  submission-manifest declares candidate-1..candidate-6 the complete set. No code is executed;
+  reason about each handler's response for the canonical
   request-scenarios. Each scenario is evaluated against the INITIAL store state (document d1 with
   ETag "v1"); the scenarios are independent, not applied one after another.
 
@@ -23,7 +23,7 @@ prompt: |
      and cite the request-scenarios request that exposes it. State the contract-correct response (HTTP
      status + relevant header/body) and the candidate's response.
 
-  3. Exactly one candidate `conforms`. Identify it.
+  3. Identify which candidates, if any, `conform`.
 
   4. In submission-manifest's review note, a reviewer argues candidate-3 conforms because "on a
      matching If-Match it applies the update and returns 200 with the new document body." State
@@ -118,19 +118,19 @@ artifacts:
       function handle1(req, store) {
         const cur = store.get(req.id);
         if (req.method === 'GET') {
-          if (!cur) return { status: 404, body: { error: 'not_found' } };                    // T5
+          if (!cur) return { status: 404, body: { error: 'not_found' } };
           if (req.headers['if-none-match'] === cur.etag)
-            return { status: 304, headers: { ETag: cur.etag } };                             // T1 match
-          return { status: 200, body: cur.doc, headers: { ETag: cur.etag } };                // T1 else
+            return { status: 304, headers: { ETag: cur.etag } };
+          return { status: 200, body: cur.doc, headers: { ETag: cur.etag } };
         }
-        if (!cur) return { status: 404, body: { error: 'not_found' } };                      // T5 no upsert
+        if (!cur) return { status: 404, body: { error: 'not_found' } };
         if (req.headers['if-match'] === undefined)
-          return { status: 428, body: { error: 'precondition_required' } };                  // T4
+          return { status: 428, body: { error: 'precondition_required' } };
         if (req.headers['if-match'] !== cur.etag)
-          return { status: 412, body: { error: 'precondition_failed' } };                    // T3 no change
-        const etag = rotate(cur.etag);                                                       // rotate (T2)
+          return { status: 412, body: { error: 'precondition_failed' } };
+        const etag = rotate(cur.etag);
         store.set(req.id, { doc: req.body, etag });
-        return { status: 200, body: req.body, headers: { ETag: etag } };                     // T2 200 + new ETag
+        return { status: 200, body: req.body, headers: { ETag: etag } };
       }
 
       // ---- candidate-2 ----
@@ -139,7 +139,7 @@ artifacts:
         if (req.method === 'GET') {
           if (!cur) return { status: 404, body: { error: 'not_found' } };
           if (req.headers['if-none-match'] === cur.etag)
-            return { status: 200, body: cur.doc, headers: { ETag: cur.etag } };  // returns 200, not 304
+            return { status: 200, body: cur.doc, headers: { ETag: cur.etag } };
           return { status: 200, body: cur.doc, headers: { ETag: cur.etag } };
         }
         if (!cur) return { status: 404, body: { error: 'not_found' } };
@@ -166,8 +166,8 @@ artifacts:
           return { status: 428, body: { error: 'precondition_required' } };
         if (req.headers['if-match'] !== cur.etag)
           return { status: 412, body: { error: 'precondition_failed' } };
-        store.set(req.id, { doc: req.body, etag: cur.etag });                    // keeps the SAME ETag
-        return { status: 200, body: req.body, headers: { ETag: cur.etag } };     // 200 but ETag not rotated
+        store.set(req.id, { doc: req.body, etag: cur.etag });
+        return { status: 200, body: req.body, headers: { ETag: cur.etag } };
       }
   - id: handlers-b
     type: code
@@ -187,7 +187,6 @@ artifacts:
         if (!cur) return { status: 404, body: { error: 'not_found' } };
         if (req.headers['if-match'] === undefined)
           return { status: 428, body: { error: 'precondition_required' } };
-        // no If-Match mismatch check: a stale If-Match still overwrites
         const etag = rotate(cur.etag);
         store.set(req.id, { doc: req.body, etag });
         return { status: 200, body: req.body, headers: { ETag: etag } };
@@ -205,8 +204,8 @@ artifacts:
         if (!cur) return { status: 404, body: { error: 'not_found' } };
         const ifMatch = req.headers['if-match'];
         if (ifMatch !== undefined && ifMatch !== cur.etag)
-          return { status: 412, body: { error: 'precondition_failed' } };   // only checks when present
-        const etag = rotate(cur.etag);                                       // missing If-Match still writes
+          return { status: 412, body: { error: 'precondition_failed' } };
+        const etag = rotate(cur.etag);
         store.set(req.id, { doc: req.body, etag });
         return { status: 200, body: req.body, headers: { ETag: etag } };
       }
@@ -223,7 +222,7 @@ artifacts:
         if (!cur) {
           const etag = rotate(null);
           store.set(req.id, { doc: req.body, etag });
-          return { status: 201, body: req.body, headers: { ETag: etag } };   // upserts instead of 404
+          return { status: 201, body: req.body, headers: { ETag: etag } };
         }
         if (req.headers['if-match'] === undefined)
           return { status: 428, body: { error: 'precondition_required' } };
@@ -241,10 +240,9 @@ artifacts:
       candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
       being considered.
 
-      Acceptance rule: exactly one submission satisfies ALL terms T1..T5 (it reproduces the
-      contract-correct response for every request-scenarios line) and is to be accepted. Each of the
-      other five breaks exactly one term. The process assumes precisely one such all-terms-correct
-      submission exists.
+      Acceptance rule: submissions are evaluated against ALL terms T1..T5 (a submission must
+      reproduce the contract-correct response for every request-scenarios line); submissions that
+      satisfy every term are accepted.
 
       Review note (@priya): "I'd approve candidate-3 — on a matching If-Match it applies the update
       and returns 200 with the new document body, which is exactly the successful-write case."

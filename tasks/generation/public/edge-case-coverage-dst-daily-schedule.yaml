@@ -1,0 +1,108 @@
+id: edge-case-coverage-dst-daily-schedule
+version: 1.0.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: Resolve Daily Local Schedules Across DST Gaps, Overlaps, and Date Boundaries
+summary: >-
+  Four Java implementations compute the next daily wall-clock occurrence. They agree on most days
+  but differ on strict-after semantics, daylight-saving gaps and overlaps, skipped dates, and
+  sub-second inputs. Frozen zone transitions make every edge independently traceable.
+prompt: |
+  Use only schedule-contract, zone-rules, time-vectors, implementations, and manifest. Cite artifact
+  ids. Verdicts are covers / misses.
+
+  1. Classify implementation-a through implementation-d against T1..T8.
+  2. For each miss, give the first Z1..Z7 vector and exact returned Instant.
+  3. Identify the unique covering implementation and trace Z4's candidate selection.
+  4. Explain why Z3 chooses the later date rather than the gap transition instant on the same date.
+  5. State how strict-after affects an instant exactly equal to the earlier overlap occurrence.
+  6. Evaluate reviewer Sam's proposal to add 24 hours to the previous occurrence.
+artifacts:
+  - id: schedule-contract
+    type: spec
+    label: Complete nextDaily Java contract
+    content: |
+      nextDaily(Instant after, LocalTime wall, ZoneId zone) returns the earliest valid Instant
+      strictly greater than after whose local date-time in zone has local time exactly wall.
+
+      T1 search local dates starting at after.atZone(zone).toLocalDate(), then later dates.
+      T2 for a normal local date-time with one offset, use its one Instant if strictly after.
+      T3 for an overlap with two valid offsets, consider both Instants and choose the earliest one
+         strictly after; the two offsets are not assumed to be listed chronologically.
+      T4 for a gap with zero valid offsets, that date has no occurrence; advance to next local date.
+         Do not shift the requested wall time to the transition boundary.
+      T5 preserve wall nanoseconds exactly; comparisons are full Instant precision.
+      T6 zones may skip an entire local date; continue until a valid date.
+      T7 no fixed 24-hour duration arithmetic.
+      T8 function is total for the supplied finite transition tables and does not mutate arguments.
+  - id: zone-rules
+    type: table
+    label: Frozen rules for the benchmark zones
+    content: |
+      Zone Arc:
+        2026-03-29 local clocks jump 01:59:59+01 to 03:00:00+02; 02:00..02:59:59 is a gap.
+        2026-10-25 local clocks repeat 02:00..02:59:59 with offsets +02 then +01.
+        Other shown dates use +01 in winter, +02 in summer.
+      Zone Skip:
+        2026-12-30 23:59:59-10 jumps to 2027-01-01 00:00:00+14; local 2026-12-31 does not exist.
+        Other shown dates have one valid offset.
+
+      getValidOffsets(ldt) returns [] for gaps, both offsets for overlaps, and one otherwise.
+      Converting ldt with a supplied valid offset to Instant is exact.
+  - id: time-vectors
+    type: table
+    label: Authoritative next-occurrence witnesses
+    content: |
+      Z1 Arc after 2026-03-28T00:00:00Z, wall 09:00 -> 2026-03-28T08:00:00Z.
+      Z2 Arc after exactly 2026-03-28T08:00:00Z, wall 09:00 -> 2026-03-29T07:00:00Z.
+      Z3 Arc after 2026-03-28T23:00:00Z, wall 02:30 -> 2026-03-30T00:30:00Z
+         (March 29 02:30 is nonexistent; March 30 offset +02).
+      Z4 Arc after 2026-10-25T00:45:00Z, wall 02:30 -> 2026-10-25T01:30:00Z.
+         Earlier overlap occurrence was 00:30Z; later is 01:30Z.
+      Z5 Arc after 2026-10-25T00:30:00Z exactly, wall 02:30 -> 2026-10-25T01:30:00Z.
+      Z6 Arc after 2026-03-28T07:00:00.123456788Z, wall 08:00:00.123456789
+         -> 2026-03-28T07:00:00.123456789Z.
+      Z7 Skip after 2026-12-30T23:00:00Z, wall 12:00 -> 2026-12-31T22:00:00Z
+         (local date is 2027-01-01 at +14; skipped December 31 contributes no occurrence).
+  - id: implementations
+    type: code
+    label: Four complete implementation strategies
+    content: |
+      implementation-a:
+        for dates from after's local date upward:
+          ldt = date.atTime(wall); offsets = rules.getValidOffsets(ldt)
+          map every valid offset to Instant, filter instant>after, return minimum if any
+          if none, advance local date
+
+      implementation-b:
+        create ZonedDateTime.of(date,wall,zone), relying on Java's default gap shift and earlier
+        overlap offset; if its Instant is not after, advance date
+
+      implementation-c:
+        obtain valid offsets, but examine only offsets.get(0); if absent advance date
+        if its Instant is not after, advance date
+
+      implementation-d:
+        compute the previous scheduled Instant, then repeatedly add Duration.ofHours(24) until after
+        the argument; return that Instant without re-resolving wall time
+  - id: precision-and-order
+    type: note
+    label: Frozen implementation assumptions
+    content: |
+      implementation-a compares Instants including nanoseconds and takes min after mapping offsets,
+      so offset list order is irrelevant. implementation-b's Java behavior shifts a gap local time
+      forward by the gap duration and selects the earlier overlap offset. implementation-c receives
+      overlap offsets in earlier-Instant then later-Instant order for Arc. implementation-d starts
+      from a correct occurrence but duration addition drifts after any offset transition.
+  - id: manifest
+    type: note
+    label: Complete search horizon and reviewer claim
+    content: |
+      implementation-a through implementation-d are complete. LocalDate plusDays follows the ISO
+      calendar; supplied rules guarantee a valid occurrence within three searched dates. No system
+      default zone or tzdb outside zone-rules is consulted.
+
+      Sam's 24-hour proposal violates T7 because a daily wall-clock recurrence is not a fixed-duration
+      recurrence when offsets change.
+tags: [generation, edge-case-coverage, java, timezones, daylight-saving]

@@ -1,0 +1,80 @@
+id: speed-markdown-toc-generator
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: hard
+title: Build a Markdown TOC Generator Module
+summary: >-
+  Produce a full TypeScript module that parses ATX headings, generates deterministic anchor slugs with
+  de-duplication, and emits a nested markdown table of contents plus a compact assertion-style test block.
+prompt: |
+  Write a complete TypeScript file `markdownToc.ts` implementing the behavior in [toc-spec] and using
+  [doc-sample] in tests. Emit the full module.
+
+  1. Export `generateMarkdownToc(markdown: string, minLevel?: number, maxLevel?: number): string`.
+  2. Include any helper functions and types needed, with clear doc comments on exported members.
+  3. Include an inline test section with at least 8 `expect(...).toBe(...)` assertions covering slug
+     normalization, duplicate headings, skipped code-fence headings, level filtering, and empty output.
+artifacts:
+  - id: toc-spec
+    type: spec
+    label: TOC generation rules
+    content: |
+      Parse headings:
+      - only ATX headings count: lines matching ^(#{1,6})\s+(.+?)\s*$
+      - ignore headings inside fenced code blocks delimited by lines starting with ```
+      - heading level is the number of # characters
+      - include only headings with level in [minLevel, maxLevel], default minLevel=2, maxLevel=4
+
+      Normalize heading text:
+      - trim surrounding whitespace
+      - strip trailing # markers and trailing whitespace
+      - if text is empty after normalization, skip that heading
+
+      Build slug from normalized text:
+      - lowercase
+      - remove any character not [a-z0-9 -]
+      - replace one or more spaces with a single hyphen
+      - collapse repeated hyphens
+      - trim leading/trailing hyphens
+      - if slug becomes empty, use "section"
+      - duplicates are suffixed in encounter order: "intro", "intro-2", "intro-3", ...
+
+      Emit TOC:
+      - one bullet per included heading
+      - format: <indent>- [<normalized text>](#<slug>)
+      - indent is two spaces per level deeper than minLevel
+      - join lines with "\n"
+      - if no headings are included, return an empty string
+  - id: doc-sample
+    type: note
+    label: Sample markdown for tests
+    content: |
+      # Project Alpha
+      Intro paragraph.
+
+      ## Getting Started
+      Steps.
+
+      ### Install
+      Use npm.
+
+      ```md
+      ## Not A Real Heading
+      ```
+
+      ## API Reference
+      Endpoints.
+
+      ### GET /users
+      Returns users.
+
+      ### GET /users
+      Duplicate heading text.
+
+      #### Query Params
+      Details.
+
+      ## !!!
+      punctuation-only heading
+tags: [typescript, markdown, parser]

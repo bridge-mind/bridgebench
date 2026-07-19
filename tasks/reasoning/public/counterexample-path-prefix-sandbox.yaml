@@ -1,0 +1,89 @@
+id: counterexample-path-prefix-sandbox
+version: 1.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Constructive Counterexamples to a Claimed Path-Sandbox Equivalence
+summary: Disprove equivalence between lexical prefix authorization and canonical component containment using the smallest supplied-domain witnesses, while separating traversal, sibling-prefix, and symlink cases.
+prompt: |
+  The team claims `legacyAllowed` and `contractAllowed` agree for every input in [finite-domain]. Audit
+  the claim by exhaustive reasoning over that domain only; do not invent filesystem entries.
+
+  1. State whether the equivalence claim holds. If false, give the lexicographically first path in the
+     stated enumeration order where results differ, with both evaluations.
+  2. Give one minimal witness each for sibling-prefix escape, dot-segment escape, and symlink escape,
+     or prove that the finite domain contains no witness of that class.
+  3. Enumerate every input that `legacyAllowed` accepts but `contractAllowed` rejects, in domain order.
+  4. Enumerate every input rejected by legacy but accepted by contract, or prove the set empty.
+  5. Evaluate patches A-D against the contract, using a concrete surviving counterexample for every
+     incorrect patch.
+  6. Provide a table-driven regression test over the full finite domain with exact expected booleans;
+     also state the required failure behavior when canonicalization errors.
+artifacts:
+  - id: authorization-contract
+    type: spec
+    label: Canonical component-containment policy
+    content: |
+      Sandbox root is `/srv/jobs/a`. Resolve an input relative to the root unless absolute, normalize
+      dot segments, then resolve every symlink using [filesystem]. Access is allowed only if the
+      canonical result is exactly `/srv/jobs/a` or begins with `/srv/jobs/a/`. A canonicalization
+      error denies. String prefixes that do not end at a path-component boundary are insufficient.
+  - id: implementations
+    type: code
+    label: Claimed-equivalent evaluators
+    content: |
+      const root = "/srv/jobs/a";
+      function legacyAllowed(input) {
+        return path.resolve(root, input).startsWith(root);
+      }
+      function contractAllowed(input) {
+        const p = realpath(path.resolve(root, input));
+        return p === root || p.startsWith(root + "/");
+      }
+  - id: filesystem
+    type: table
+    label: Complete relevant filesystem
+    content: |
+      path                     | kind    | target
+      /srv/jobs/a              | dir     | —
+      /srv/jobs/a/data         | dir     | —
+      /srv/jobs/a/data/x.txt   | file    | —
+      /srv/jobs/a/link-out     | symlink | /srv/jobs/ab/secret.txt
+      /srv/jobs/a/link-in      | symlink | /srv/jobs/a/data
+      /srv/jobs/ab             | dir     | —
+      /srv/jobs/ab/secret.txt  | file    | —
+      /srv/jobs/b              | dir     | —
+      /srv/jobs/b/y.txt        | file    | —
+
+      All listed `realpath` calls succeed; no other entries are referenced by the finite domain.
+  - id: finite-domain
+    type: table
+    label: Exhaustive input domain and enumeration order
+    content: |
+      1  .
+      2  data/x.txt
+      3  link-in/x.txt
+      4  link-out
+      5  ../ab/secret.txt
+      6  ../b/y.txt
+      7  /srv/jobs/a/data
+      8  /srv/jobs/ab/secret.txt
+      9  data/../link-out
+
+      Minimal means earliest row for each requested witness class.
+  - id: candidate-patches
+    type: diff
+    label: Proposed authorization rewrites
+    content: |
+      A. `resolve(root,input).startsWith(root + "/")`
+      B. `const p=realpath(resolve(root,input)); p===root || p.startsWith(root+"/")`; deny on error
+      C. reject input containing `..`, otherwise keep legacy prefix check
+      D. `realpath(resolve(root,input)).startsWith(root)`
+  - id: security-notes
+    type: note
+    label: Scope and fail-closed requirement
+    content: |
+      Inputs are untrusted job artifact paths. The policy is read-only containment; it does not grant
+      access based on file ownership. Do not propose shell checks or a check-then-open sequence as the
+      answer. For this finite proof, `realpath` values are stable during each evaluation.
+tags: [path-traversal, symlink, counterexample, sandbox, authorization]

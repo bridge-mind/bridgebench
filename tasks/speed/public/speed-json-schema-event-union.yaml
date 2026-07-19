@@ -1,0 +1,25 @@
+id: speed-json-schema-event-union
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: expert
+title: Emit a Strict JSON Schema Event Union
+summary: Generate a Draft 2020-12 JSON Schema for a versioned discriminated event envelope with closed payload variants.
+prompt: |
+  Output JSON only: one schema satisfying [event-contract]. Do not use comments or external refs.
+artifacts:
+  - id: event-contract
+    type: spec
+    label: Complete event schema contract
+    content: |
+      Draft 2020-12, `$id`=`https://schemas.example/events/v1.json`, title `EventV1`.
+      Root is a closed object requiring exactly `id`, `occurredAt`, `type`, `payload`.
+      `id` is a UUID string; `occurredAt` is date-time. Event is exactly one of:
+      - type `account.created`; payload closed object requiring `accountId` UUID and
+        `plan` enum free|pro, optional `referrer` string length 1..120.
+      - type `invoice.paid`; payload closed object requiring `invoiceId` UUID,
+        `amountCents` integer 1..9007199254740991, `currency` string pattern `^[A-Z]{3}$`.
+      Use `$defs` for the shared envelope fields and both payloads, then `oneOf` branches
+      that bind each type const to its payload. Enforce `unevaluatedProperties: false` at
+      the root and `additionalProperties: false` in payloads. Avoid duplicate branch matches.
+tags: [json-schema, structured-output, events, validation]

@@ -1,15 +1,14 @@
 id: fix-adequacy-rate-limit-window
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: fix-adequacy
 difficulty: expert
 title: Rate Limiter Admits Double the Limit at Window Boundaries, With Four Candidate Fixes To Judge
 summary: >-
-  rategate's per-key limiter is a fixed-window counter, so a client can send the full limit just before
-  a boundary and the full limit again just after, admitting twice the limit in a sub-second span. Four
-  candidate fix diffs are on the table. Exactly one enforces the true rolling limit without reintroducing
-  a described regression; one shortens the window, one raises the limit, and one moves enforcement to
-  the client. Judge each and name the disqualifying over-rejection of the sliding-window fix.
+  rategate's per-key limiter admits about twice the configured limit in a sub-second span around each
+  window boundary. Four candidate fix diffs are on the table; exactly one enforces the contract without
+  reintroducing a described regression. Using the contract, the current code, the reproduction, and the
+  boundary data, judge each candidate and name the disqualifying over-rejection.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (contract, current-code, bug-report,
   boundary-data, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for every claim. Use this
@@ -31,7 +30,8 @@ prompt: |
   4. WHY A IS NOT ADEQUATE. Using boundary-data, show concretely that fix-a still admits twice the
      allowance at its own (shorter) boundary, and which contract rule it violates.
   5. OVER-REJECTION TRAP. State the contract rule that makes rejecting the adequate fix "because it
-     uses more memory / needs a Redis sorted set" an incorrect disqualification, and quote it.
+     uses more memory / needs additional server-side storage" an incorrect disqualification, and
+     quote it.
 artifacts:
   - id: contract
     type: spec
@@ -44,9 +44,9 @@ artifacts:
            that admits more than `limit` in some 60-second span is non-conforming.
       L2 — NO OVER-REJECTION. A request MUST be admitted if fewer than `limit` requests were admitted in
            the preceding 60 seconds. Rejecting within-limit traffic is non-conforming.
-      L3 — STORAGE IS FREE TO CHANGE. The limiter MAY use additional server-side storage (for example a
-           Redis sorted set of request timestamps per key). Extra memory or a new Redis structure is
-           additive and backward-compatible; requiring more storage is NOT a reason to reject a fix.
+      L3 — STORAGE IS FREE TO CHANGE. The limiter MAY use additional server-side storage or new Redis
+           structures. Extra memory is additive and backward-compatible; requiring more storage is NOT
+           a reason to reject a fix.
       L4 — SERVER-ENFORCED. The limit MUST be enforced on the server. Client-side throttling is
            advisory only and does NOT satisfy L1 (an SDK-less or non-cooperating client must still be
            limited).
@@ -61,10 +61,8 @@ artifacts:
         const windowId = Math.floor(Date.now() / 60000);       // calendar-aligned 60s bucket
         const n = await redis.incr(`rl:${key}:${windowId}`);
         if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 60);
-        return n <= LIMIT;                                     // count resets to 0 at every boundary
+        return n <= LIMIT;
       }
-      // The counter is per fixed bucket. At each minute boundary windowId increments and the count
-      // starts again at 0, independent of how many requests arrived in the seconds just before.
   - id: bug-report
     type: note
     label: reproduction of the boundary burst
@@ -74,19 +72,16 @@ artifacts:
         -> counter rl:key:W goes 1..100, all 100 admitted (n <= 100).
       Just after the boundary (window W+1): send 100 requests in [12:00:00.000, 12:00:00.100].
         -> windowId incremented, counter rl:key:W+1 starts at 0, goes 1..100, all 100 admitted.
-      Net: 200 requests admitted in the ~0.2-second span straddling the boundary — 2x the limit inside a
-      rolling 60-second interval. The limiter never looked back across the boundary.
+      Net: 200 requests admitted in the ~0.2-second span straddling the boundary.
   - id: boundary-data
     type: table
     label: admitted counts around the boundary (limit = 100)
     content: |
-      phase                    time span                       requests  admitted-by-current  note
-      -----------------------  ------------------------------  --------  -------------------  ---------------------------
-      pre-boundary burst       11:59:59.900 - 11:59:59.999     100       100 (window W)       fills the pre-boundary bucket
-      post-boundary burst      12:00:00.000 - 12:00:00.100     100       100 (window W+1)     bucket reset admits 100 more
-      rolling 60s [11:59:59.9..12:00:59.9]                     200       200                  L1 allows only 100 here
-      # Under a correct rolling-60s limiter, the second burst's requests fall inside 60s of the first
-      # burst, so at most 100 total may be admitted across the boundary. current-code admits 200.
+      phase                    time span                       requests  admitted-by-current
+      -----------------------  ------------------------------  --------  -------------------
+      pre-boundary burst       11:59:59.900 - 11:59:59.999     100       100 (window W)
+      post-boundary burst      12:00:00.000 - 12:00:00.100     100       100 (window W+1)
+      rolling 60s [11:59:59.9..12:00:59.9]                     200       200
   - id: fix-a
     type: diff
     label: candidate fix A
@@ -100,7 +95,6 @@ artifacts:
       +   if (n === 1) await redis.expire(`rl:${key}:${windowId}`, 10);
           return n <= LIMIT;
         }
-      # Still a fixed window; the bucket still resets to 0 at each (now 10s) boundary.
   - id: fix-b
     type: diff
     label: candidate fix B
@@ -130,7 +124,6 @@ artifacts:
       +   await redis.pexpire(zkey, 60000);
       +   return true;
         }
-      # No calendar bucket, so no boundary reset; the window slides continuously with each request.
   - id: fix-d
     type: diff
     label: candidate fix D

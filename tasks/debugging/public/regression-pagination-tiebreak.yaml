@@ -1,5 +1,5 @@
 id: regression-pagination-tiebreak
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: regression-introduction
 difficulty: expert
@@ -9,7 +9,7 @@ summary: >-
   A CI matrix that ran a determinism test on every commit, six commit diffs, a data-distribution
   note, and the bug report are provided. An ORM major bump, a new index, and a page-size change all
   look like plausible culprits. Identify the exact commit that introduced the regression, explain the
-  keyset mechanism that breaks, rule out the decoys, and give the fix that restores a total order.
+  mechanism, rule out the decoys, and give the fix that targets it.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (ci-matrix, c2-diff, c3-diff, c4-diff,
   c5-diff, data-note, bug-report). Cite the artifact id(s) for every claim.
@@ -40,13 +40,9 @@ artifacts:
       c1      Mon 10:00   baseline keyset pagination               PASS               PASS
       c2      Mon 16:20   chore: bump feed-orm 4.x -> 5.0          PASS               PASS
       c3      Tue 11:15   perf: add index on events(created_at)    PASS               PASS
-      c4      Tue 15:40   simplify: drop redundant ORDER BY column PASS -> FAIL       PASS
+      c4      Tue 15:40   simplify: drop redundant ORDER BY column FAIL               PASS
       c5      Wed 09:30   tune: raise page size 20 -> 50           FAIL               PASS
       c6      Wed 14:10   docs: update pagination README           FAIL               PASS
-
-      The FIRST commit where paginate-no-dupes fails is c4. It passed on c3 and every prior commit.
-      paginate-count stays PASS throughout (the total number of returned rows is unchanged; only their
-      per-page assignment is wrong), which is why the bug is easy to miss.
   - id: c2-diff
     type: diff
     label: 'c2 — "chore: bump feed-orm 4.x -> 5.0"'
@@ -61,9 +57,7 @@ artifacts:
     type: diff
     label: 'c3 — "perf: add index on events(created_at)"'
     content: |
-      # Adds a non-unique btree index to speed the scan. Indexes affect access path and speed, not the
-      # result-set ordering guarantees: without an ORDER BY tiebreaker, rows with equal created_at have
-      # no defined relative order regardless of which index is used.
+      # Adds a non-unique btree index to speed the scan.
         + CREATE INDEX events_created_at_idx ON events (created_at);
       # The query after c3 is unchanged: ORDER BY created_at DESC, id DESC  WHERE (created_at, id) < ($1,$2).
   - id: c4-diff
@@ -88,8 +82,7 @@ artifacts:
     content: |
         - const PAGE_SIZE = 20;
         + const PAGE_SIZE = 50;
-      # Changes how many rows each page returns. Does not touch ORDER BY, the WHERE cursor predicate,
-      # or the tiebreaker.
+      # Changes how many rows each page returns.
   - id: data-note
     type: note
     label: events table — column and data distribution (verified)

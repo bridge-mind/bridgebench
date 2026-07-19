@@ -1,0 +1,40 @@
+id: speed-callback-to-async-generator
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: expert
+title: Transform a Callback Stream Into a Bounded Async Generator
+summary: Rewrite an event-callback subscription as a bounded async generator while preserving ordering, terminal errors, cleanup, and backpressure.
+prompt: |
+  Transform [callback-api] into the exported async generator required by [target-contract].
+  Output TypeScript code only. Preserve the declared event semantics exactly.
+artifacts:
+  - id: callback-api
+    type: code
+    label: Existing source interface
+    content: |
+      export interface Subscription<T> { unsubscribe(): void; }
+      export interface Source<T> {
+        subscribe(observer: {
+          next(value: T): void;
+          error(error: Error): void;
+          complete(): void;
+        }): Subscription<T>;
+        pause(): void;
+        resume(): void;
+      }
+  - id: target-contract
+    type: spec
+    label: Exact transformation contract
+    content: |
+      Export `async function* toAsync<T>(source: Source<T>, options: { highWaterMark: number; signal?: AbortSignal }): AsyncGenerator<T>`.
+      Reject highWaterMark < 1 before subscribing. Preserve FIFO order. At exactly
+      highWaterMark buffered values call pause once; call resume once when the buffer later
+      falls below highWaterMark. Multiple pending `next()` pulls must resolve FIFO and each
+      receive at most one value. Completion drains buffered values, then ends. Error drops
+      no already-buffered values: drain them, then throw the original Error. Abort rejects
+      pending/future pulls with signal.reason, does not drain, and wins if observed before a
+      source terminal callback. In every exit path unsubscribe exactly once, remove the
+      abort listener, and leave a paused source resumed. Ignore callbacks after terminal or
+      abort. Use no polling, timers, external packages, `any`, or Node-only APIs.
+tags: [typescript, async-generator, callbacks, backpressure, cancellation]

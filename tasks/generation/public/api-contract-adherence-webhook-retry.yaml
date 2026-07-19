@@ -1,0 +1,173 @@
+id: api-contract-adherence-webhook-retry
+version: 1.1.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: calculateNextRetry — Webhook Exponential Backoff & Jitter Adherence
+summary: A webhook dispatch system uses exponential backoff and full jitter for retries. The contract mandates exponential scaling, a maximum delay cap, full jitter bounds, a retry limit check, and flooring integer rounding. Six candidates are submitted. Classify all six against the contract, pinning the broken term and a distinguishing input for any non-conformer.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (retry-contract, config-params,
+  test-vectors, candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite the artifact
+  id(s) for every claim. Do not invent contract terms and do not overlook ones that are stated. The
+  verdict vocabulary is exactly: conforms / violates.
+
+  retry-contract fixes required terms T1..T5 and is the complete contract. submission-manifest
+  declares candidate-1..candidate-6 the entire set.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates` against retry-contract.
+
+  2. For every candidate you mark `violates`, name the single contract term (one of T1..T5) it breaks
+     and give one concrete combination of (attempt, randomFloat) on which its output differs from the
+     spec-correct value. State both returned numbers.
+
+  3. Identify which candidates, if any, `conform`, and state the delay value a conforming
+     implementation returns for the input attempt: 4 and randomFloat: 0.35.
+
+  4. In reviewer-thread, reviewer @liam argues candidate-3 is correct because "applying the maxDelay cap
+     after the jitter is calculated is mathematically identical to applying it before, since the capped value is
+     never exceeded." State candidate-3's verdict and cite the term and a concrete input (with outputs)
+     that disproves @liam.
+
+  5. Identify which candidate performs an invalid retry past the maxRetries limit and specify the value it
+     wrongly returns for attempt: 6 and randomFloat: 0.5 instead of returning -1.
+artifacts:
+  - id: retry-contract
+    type: spec
+    label: calculateNextRetry contract (frozen, complete)
+    content: |
+      calculateNextRetry(attempt: number, config: Config, randomFloat: number): number
+
+      Where Config is:
+        interface Config {
+          baseDelay: number;    // base delay in milliseconds (e.g. 1000)
+          multiplier: number;   // exponential growth factor (e.g. 2)
+          maxDelay: number;     // maximum delay cap in milliseconds (e.g. 32000)
+          maxRetries: number;   // maximum retry limit (e.g. 5)
+        }
+
+      This function calculates the retry delay in milliseconds for a failed webhook delivery attempt.
+      `attempt` starts at 1 for the first retry. A conforming implementation MUST adhere to all terms:
+
+      T1  EXPONENTIAL BACKOFF. The delay at retry `attempt` scales as:
+            `baseDelay * (multiplier ** (attempt - 1))`
+          Attempt 1 starts at baseDelay (multiplier ** 0 = 1). Using attempt as the exponent (multiplier ** attempt)
+          violates this term.
+
+      T2  MAX DELAY CAP. The exponential delay computed in T1 MUST be capped at `maxDelay` BEFORE jitter is
+          applied. The base backoff delay is therefore `min(exponential_delay, maxDelay)`. Applying the cap
+          after the jitter violates this term.
+
+      T3  FULL JITTER. The final delay is computed by multiplying the capped base delay by a pseudo-random float
+          `randomFloat` (where 0 <= randomFloat < 1):
+            `delay = capped_base_delay * randomFloat`
+          Using alternative jitter formulas (e.g. half-jitter or decorrelated jitter) violates this term.
+
+      T4  MAX RETRIES GATE. If `attempt` is strictly greater than `maxRetries`, the function must return -1
+          to signal that the webhook dispatch should stop.
+
+      T5  INTEGER ROUNDING. The final delay value MUST be an integer rounded down to the nearest integer
+          using `Math.floor()`. Using other rounding methods (like Math.round or Math.ceil) violates this term.
+
+      This is the complete contract.
+  - id: config-params
+    type: config
+    label: static configuration values
+    content: |
+      The system is configured with these parameters:
+        baseDelay: 1000
+        multiplier: 3
+        maxDelay: 5000
+        maxRetries: 5
+  - id: test-vectors
+    type: table
+    label: authoritative input/output vectors (spec-correct)
+    content: |
+      Authoritative outputs computed from retry-contract under the static config-params.
+      (Each scenario: attempt, randomFloat -> expected integer output)
+
+      #  attempt   randomFloat     expected output
+      -- --------- --------------- ----------------------------------------
+      1  1         0.5             500      (base: 1000 * 3^0 = 1000; capped: 1000; 1000 * 0.5 = 500)
+      2  3         0.12            600      (base: 1000 * 3^2 = 9000; capped: 5000; 5000 * 0.12 = 600)
+      3  6         0.5             -1       (attempt 6 > maxRetries 5 -> -1)
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function calculateNextRetry1(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt - 1);
+        const capped = Math.min(base, config.maxDelay);
+        return Math.floor(capped * randomFloat);
+      }
+
+      // ---- candidate-2 ----
+      function calculateNextRetry2(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt);
+        const capped = Math.min(base, config.maxDelay);
+        return Math.floor(capped * randomFloat);
+      }
+
+      // ---- candidate-3 ----
+      function calculateNextRetry3(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt - 1);
+        const jittered = base * randomFloat;
+        return Math.floor(Math.min(jittered, config.maxDelay));
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function calculateNextRetry4(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries + 1) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt - 1);
+        const capped = Math.min(base, config.maxDelay);
+        return Math.floor(capped * randomFloat);
+      }
+
+      // ---- candidate-5 ----
+      function calculateNextRetry5(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt - 1);
+        const capped = Math.min(base, config.maxDelay);
+        return Math.floor((capped / 2) + (capped * randomFloat) / 2);
+      }
+
+      // ---- candidate-6 ----
+      function calculateNextRetry6(attempt, config, randomFloat) {
+        if (attempt > config.maxRetries) return -1;
+        const base = config.baseDelay * Math.pow(config.multiplier, attempt - 1);
+        const capped = Math.min(base, config.maxDelay);
+        return Math.round(capped * randomFloat);
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on retry strategies
+    content: |
+      Review thread for calculateNextRetry (PR #3412).
+
+      @liam: "candidate-3 applies the maxDelay cap after the jitter is calculated. Since the final delay
+      returned is capped at maxDelay, it guarantees we never exceed the delay cap. This is mathematically
+      equivalent and is standard when we want the maximum potential jitter."
+
+      @olivia: "No, it's not equivalent! If base backoff grows to 27,000 ms, capping it to 5,000 ms
+      BEFORE jitter means we scale down a 5,000 ms value (e.g. 5,000 * 0.1 = 500 ms). If we cap it AFTER
+      jitter, we take 27,000 * 0.1 = 2,700 ms, which is below 5,000 ms, so the cap does nothing! This results
+      in much larger actual delays than the spec dictates."
+
+      @noah: "One of the candidates checks `attempt > config.maxRetries + 1`, which allows 6 attempts
+      before stopping. That's an off-by-one."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4,
+      candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: submissions are evaluated against all five required terms (T1..T5);
+      submissions that satisfy every term are accepted.
+tags: [generation, api-contract-adherence, backoff, back-end, code-review]

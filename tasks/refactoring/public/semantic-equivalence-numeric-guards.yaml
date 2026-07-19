@@ -1,10 +1,10 @@
 id: semantic-equivalence-numeric-guards
-version: 1.1.0
+version: 1.2.0
 category: refactoring
 cluster: semantic-equivalence
 difficulty: expert
 title: Are these six JavaScript simplifications behavior-preserving across all inputs?
-summary: Six small pure functions each have a proposed one-line simplification. Some are equivalent for every input; others break on a specific edge case (falsy zero vs nullish, 32-bit shift truncation, IEEE-754 rounding and overflow, floor vs truncation of negatives). Using the cited language semantics, classify each rewrite as behavior-preserving or changes-behavior and give a witness input for every change.
+summary: Six small pure functions each have a proposed one-line simplification. Using the cited language semantics, classify each rewrite as behavior-preserving or changes-behavior and give a concrete witness input for every change.
 prompt: |
   A "simplify" PR rewrites six pure JavaScript functions (originals O1..O6) into shorter forms
   (proposed P1..P6). Judge each rewrite for FULL semantic equivalence: it is behavior-preserving

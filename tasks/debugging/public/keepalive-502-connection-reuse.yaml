@@ -1,5 +1,5 @@
 id: keepalive-502-connection-reuse
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: root-cause-isolation
 difficulty: expert
@@ -81,27 +81,22 @@ artifacts:
     type: log
     label: interleaved nginx error log (E) + charge-api app log (A), 12:00-12:04
     content: |
-      # conn=<id> is the upstream socket nginx uses. Node closes an idle socket 5s after its last use.
-      # A req.start is emitted for every request the app begins; a 502 with no matching A line means
-      # the app never saw the request.
+      # conn=<id> is the upstream socket nginx uses. A req.start line is emitted for every request
+      # the app begins to handle.
 
-      12:00:01.010 A req.start conn=c-208 POST /v1/charge -> 200 in 42ms   (fresh conn, first use)
-      12:00:01.402 A req.start conn=c-208 POST /v1/charge -> 200 in 39ms   (reused after 0.4s idle, OK)
-      12:00:02.900 A req.start conn=c-208 POST /v1/charge -> 200 in 41ms   (reused after 1.5s idle, OK)
+      12:00:01.010 A req.start conn=c-208 POST /v1/charge -> 200 in 42ms
+      12:00:01.402 A req.start conn=c-208 POST /v1/charge -> 200 in 39ms
+      12:00:02.900 A req.start conn=c-208 POST /v1/charge -> 200 in 41ms
       # ---- quiet period: no /v1/charge traffic from 12:00:03 to 12:00:46 ----
       12:00:47.120 E * upstream prematurely closed connection while reading response header;
                        conn reused=c-208 upstream 10.0.3.11:8080 request "POST /v1/charge" -> 502
-      12:00:47.121 E * errno reported: 104 (Connection reset by peer). No "upstream timed out (110)".
-      # c-208 was last used 12:00:02.900, i.e. idle 44.2s (>> Node's 5s). There is NO A req.start line
-      # for c-208 at 12:00:47: the app never began this request.
-      12:00:47.640 A req.start conn=c-311 POST /v1/charge -> 200 in 43ms   (client's own retry, fresh conn, OK)
+      12:00:47.121 E * errno reported: 104 (Connection reset by peer)
+      12:00:47.640 A req.start conn=c-311 POST /v1/charge -> 200 in 43ms
       12:03:10.005 A req.start conn=c-402 POST /v1/charge -> 200 in 40ms
-      12:03:11.220 A req.start conn=c-402 POST /v1/charge -> 200 in 44ms   (reused after 1.2s idle, OK)
+      12:03:11.220 A req.start conn=c-402 POST /v1/charge -> 200 in 44ms
       # ---- quiet period from 12:03:12 to 12:04:02 ----
       12:04:03.700 E * recv() failed (104: Connection reset by peer) while reading response header
                        from upstream; conn reused=c-402 request "POST /v1/charge" -> 502
-      # c-402 last used 12:03:11.220, idle 52.5s. Again no A req.start on c-402 at 12:04:03.
-      # Every 502 in this window is a 104 reset on a connection idle > 5s, with no app-side req.start.
   - id: metrics
     type: table
     label: charge-api + database, 5-minute buckets (11:55-12:15)
@@ -111,9 +106,6 @@ artifacts:
       12:00-12:05   3        180        0                  41         46       0         0
       12:05-12:10   0        5330       0                  39         71       0         0
       12:10-12:15   0        6010       0                  40         77       0         0
-      # On-call note: the 502s land in the LOW-traffic 12:00-12:05 bucket (only 180 requests), the one
-      # with the longest idle gaps. The HIGH-traffic buckets, where db_cpu peaked at 77%, had ZERO 502s.
-      # read_timeouts_110 (nginx "upstream timed out") = 0 all window. http_429 = 0. tls_errs = 0.
   - id: deploy-diff
     type: diff
     label: deploy d-914 — "tighten edge timeouts" (rolled out 11:30, ~30 min before first 502)
@@ -126,9 +118,6 @@ artifacts:
       -     proxy_read_timeout 60s;
       +     proxy_read_timeout 30s;
         }
-      # d-914 did NOT touch: upstream keepalive / keepalive_timeout, proxy_next_upstream, or anything
-      # in charge-api/server.ts. server.keepAliveTimeout has been 5000ms since the service launched;
-      # this deploy did not introduce it.
   - id: fixes
     type: note
     label: candidate fixes under discussion (pick the one that holds)
@@ -155,8 +144,8 @@ artifacts:
       Path: client -> nginx (edge) -> keepalive pool -> charge-api (Node) -> Postgres.
       nginx reuses an idle upstream connection if one is available in the pool and within its
       keepalive_timeout window. Node independently closes any keep-alive socket that has been idle
-      longer than server.keepAliveTimeout. If nginx selects a socket that Node has already closed,
-      Node's side is gone: the first bytes nginx writes draw a TCP RST (errno 104), surfaced to the
-      client as 502 "upstream prematurely closed connection". This is distinct from errno 110
-      ("upstream timed out"), which is what a slow-but-open upstream would produce.
+      longer than server.keepAliveTimeout.
+      errno reference: 104 (Connection reset by peer) means the peer reset the TCP connection;
+      110 ("upstream timed out") means the upstream connection stayed open but did not respond
+      within the read timeout.
 tags: [debugging, root-cause-isolation, nginx, keepalive, http-502]

@@ -39,9 +39,13 @@ behavior through one aggregator's routing rather than direct provider APIs.
 The canonical roster and request policies live in
 [`src/models.ts`](../src/models.ts). A model may hold both roles: a
 dual-role entry (competitor with a `judgeRequest` policy) competes in the
-arena and keeps its seat on the judge panel, judging its own matches under
-the same blind protocol as any other match (anonymized sides, identity
-redaction, per-judge permutation). Grok 4.5 is the first dual-role model.
+arena and sits in the judge pool. Since `arena-v0.4.0` each match seats
+three judges from that pool deterministically (`src/seating.ts`), and a
+judge is never eligible for a match where it — or any model from its
+vendor — competes, so a dual-role model cannot judge itself. Note the
+journal version guard: `arena-v0.4.0` matches cannot append to an
+`arena-v0.3.0` journal — archive the old journal and start fresh; do not
+weaken the guard.
 OpenRouter generation records can be retrieved later with
 `npm run arena -- generation <id>` for independent cost, token, and routing
 checks.

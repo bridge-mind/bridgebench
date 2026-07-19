@@ -1,0 +1,200 @@
+id: root-cause-dns-cache-poison
+version: 1.1.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Order Service Returns Connection-Refused Errors After Inventory Backend Migration While Health Checks Report Healthy
+summary: >-
+  After migrating inventory-svc to a new subnet, long-running order-svc pods return connection-refused
+  errors while fresh pods work and health checks pass. A misconfigured record, a firewall,
+  health-check masking, and pool corruption all look guilty. Reconcile the artifacts to isolate the
+  root cause and pick the fix that holds.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (http-client-config, dns-zone, pod-logs,
+  health-probe, network-diag, migration-timeline, fixes). Cite the artifact id(s) for every claim.
+  Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  After a routine migration of inventory-svc from subnet-A (10.0.1.50) to subnet-B (10.0.2.80), the
+  order-svc returns connection-refused errors for ~30% of inventory calls — but ONLY from pods that
+  were running before the migration. Pods started after the migration work perfectly.
+
+  1. ROOT CAUSE. Name the single defect and cite the exact artifact id and configuration line. State
+     precisely why long-running pods keep connecting to the old IP after the DNS record was updated,
+     while fresh pods connect to the correct new IP.
+  2. SYMPTOM-TO-CAUSE CHAIN. From pod-logs and migration-timeline, trace one failing request from the
+     connection-refused error back through the DNS resolution to the stale cache entry. Cite the lines
+     that establish (a) the pod's cached IP is 10.0.1.50 while the authoritative record points to
+     10.0.2.80, (b) the DNS record was updated before the errors began, and (c) the cache expiry
+     time exceeds the DNS record TTL by a factor of 60.
+  3. RED HERRING: DNS RECORD MISCONFIGURATION. Explain why the DNS A record is NOT misconfigured,
+     citing dns-zone. Explain why fresh pods resolve the correct IP immediately.
+  4. RED HERRING: FIREWALL / SECURITY GROUP. Explain why a subnet-B firewall rule is NOT blocking
+     traffic, citing network-diag. Explain why the connection-refused errors target the OLD IP, not
+     the new one.
+  5. RED HERRING: HEALTH CHECK MASKING. Explain why health checks pass despite the failures, citing
+     health-probe. State the precise difference in DNS resolution path between the health check and
+     the HTTP client's application requests.
+  6. RED HERRING: CONNECTION POOL CORRUPTION. Explain why "corrupted connection pools" is not the root
+     cause, citing http-client-config and pod-logs. State what observable difference would exist if the
+     pool itself (rather than DNS resolution) were the defect.
+  7. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression, and
+     state the invariant it enforces between the resolver cache lifetime and the upstream DNS TTL.
+  8. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow or
+     harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: http-client-config
+    type: config
+    label: order-svc/http-client.yaml — HTTP client DNS resolver configuration (complete)
+    content: |
+      # This is the COMPLETE HTTP client configuration for order-svc. There is no sidecar proxy, no
+      # service mesh DNS interception, and no other DNS resolution path. The HTTP client's internal
+      # caching-resolver is the SOLE mechanism for resolving inventory-svc.internal to an IP address
+      # for application traffic. The system resolver (resolv.conf / kube-dns) is used only by health
+      # probes and CLI tools — never by this HTTP client.
+      httpClient:
+        resolver:
+          type: caching-resolver
+          cacheTtlSeconds: 3600          # process-local DNS cache; entries live 3600s (1 hour)
+                                          # regardless of the DNS record's own TTL
+          respectDnsTtl: false           # when false, cacheTtlSeconds overrides the record TTL;
+                                          # when true, the cache would honor the record's TTL field
+          maxEntries: 10000
+          negCacheTtlSeconds: 30
+        connectionPool:
+          maxConnectionsPerHost: 50
+          idleTimeoutSeconds: 120        # idle connections closed after 120s
+          healthCheckIntervalSeconds: 30 # pool health check pings the resolved IP every 30s
+        retryPolicy:
+          maxRetries: 2
+          retryableErrors: [502, 503, 504]   # ECONNREFUSED is NOT in this list — not retried
+      # connectionPool.healthCheckIntervalSeconds pings whatever IP the resolver last returned.
+      # The pool does NOT trigger a DNS re-resolution on health-check failure; it discards the
+      # dead connection and creates a new one to the same resolved IP.
+  - id: dns-zone
+    type: config
+    label: internal DNS zone for inventory-svc.internal (authoritative, post-migration)
+    content: |
+      ; Zone file for internal.svc (authoritative nameserver)
+      ; Last modified: 2025-06-10T14:00:00Z (during migration — see migration-timeline)
+      ;
+      inventory-svc.internal.   60   IN   A   10.0.2.80    ; new IP (subnet-B), TTL = 60s
+      ;
+      ; Previous record (removed at 14:00:00Z):
+      ;   inventory-svc.internal.   60   IN   A   10.0.1.50    ; old IP (subnet-A)
+      ;
+      ; TTL is 60 seconds. Any resolver that honors this TTL will re-resolve within 60s of the
+      ; change. The record is a direct A record (no CNAME indirection). Propagation to all
+      ; authoritative nameservers confirmed complete by 14:00:05Z (see migration-timeline).
+      ; The record has been stable at 10.0.2.80 since 14:00:00Z — no subsequent changes.
+  - id: pod-logs
+    type: log
+    label: order-svc pod logs — old pod (started 09:00) vs new pod (started 14:10)
+    content: |
+      # --- OLD POD ord-svc-7a3b (started 09:00:00Z, running since before migration) ---
+      13:15:00Z  ord-svc-7a3b  resolver  CACHE-WRITE inventory-svc.internal -> 10.0.1.50 (ttl=3600s, expires 14:15:00Z)
+      13:15:00Z  ord-svc-7a3b  http      GET inventory-svc.internal/api/stock -> 10.0.1.50:443 -> 200 OK (14ms)
+      ...
+      13:59:58Z  ord-svc-7a3b  http      GET inventory-svc.internal/api/stock -> 10.0.1.50:443 -> 200 OK (12ms)
+      # --- DNS record changes at 14:00:00Z; old VM terminated at 14:00:10Z (see migration-timeline) ---
+      14:00:30Z  ord-svc-7a3b  resolver  CACHE-HIT inventory-svc.internal -> 10.0.1.50 (cached at 13:15:00Z, expires 14:15:00Z)
+      14:00:30Z  ord-svc-7a3b  http      CONNECT 10.0.1.50:443 -> ECONNREFUSED (host unreachable)
+      14:00:30Z  ord-svc-7a3b  http      ERROR connection refused to inventory-svc.internal [resolved: 10.0.1.50]
+      14:01:00Z  ord-svc-7a3b  resolver  CACHE-HIT inventory-svc.internal -> 10.0.1.50 (expires 14:15:00Z)
+      14:01:00Z  ord-svc-7a3b  http      CONNECT 10.0.1.50:443 -> ECONNREFUSED
+      14:05:00Z  ord-svc-7a3b  resolver  CACHE-HIT inventory-svc.internal -> 10.0.1.50 (expires 14:15:00Z)
+      14:05:00Z  ord-svc-7a3b  http      CONNECT 10.0.1.50:443 -> ECONNREFUSED
+      14:10:00Z  ord-svc-7a3b  resolver  CACHE-HIT inventory-svc.internal -> 10.0.1.50 (expires 14:15:00Z)
+      14:10:00Z  ord-svc-7a3b  http      CONNECT 10.0.1.50:443 -> ECONNREFUSED
+      14:15:01Z  ord-svc-7a3b  resolver  CACHE-EXPIRED inventory-svc.internal (entry from 13:15:00Z, 3600s elapsed)
+      14:15:01Z  ord-svc-7a3b  resolver  CACHE-WRITE inventory-svc.internal -> 10.0.2.80 (ttl=3600s, expires 15:15:01Z)
+      14:15:01Z  ord-svc-7a3b  http      CONNECT 10.0.2.80:443 -> OK 200 (12ms)
+
+      # --- NEW POD ord-svc-9f2c (started 14:10:00Z, after migration) ---
+      14:10:01Z  ord-svc-9f2c  resolver  CACHE-MISS inventory-svc.internal (no cached entry, pod just started)
+      14:10:01Z  ord-svc-9f2c  resolver  CACHE-WRITE inventory-svc.internal -> 10.0.2.80 (ttl=3600s, expires 15:10:01Z)
+      14:10:01Z  ord-svc-9f2c  http      CONNECT 10.0.2.80:443 -> OK 200 (11ms)
+  - id: health-probe
+    type: config
+    label: Kubernetes liveness/readiness probes for order-svc (complete health-check configuration)
+    content: |
+      # The health check does NOT use the HTTP client's caching-resolver. It uses the pod's system
+      # DNS resolver (/etc/resolv.conf -> kube-dns), which honors the DNS record's own 60s TTL.
+      # This is a DIFFERENT code path from the application HTTP client (see http-client-config).
+      livenessProbe:
+        httpGet:
+          path: /healthz             # /healthz checks process liveness only — does NOT call external services
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 15
+      readinessProbe:
+        httpGet:
+          path: /readyz              # /readyz calls inventory-svc.internal/ping using NET/HTTP DEFAULT RESOLVER
+          port: 8080                 # which uses system DNS (resolv.conf -> kube-dns), NOT the httpClient caching-resolver
+        initialDelaySeconds: 5
+        periodSeconds: 10
+
+      # Health-check results during incident window (14:00–14:15):
+      #   ord-svc-7a3b /healthz: PASS every 15s (does not call inventory-svc)
+      #   ord-svc-7a3b /readyz:  PASS every 10s
+      #   At 14:01:00Z system DNS returns 10.0.2.80 for inventory-svc.internal.
+  - id: network-diag
+    type: log
+    label: network connectivity tests run from the cluster at 14:05Z during the incident
+    content: |
+      # All tests run FROM the order-svc pod network namespace at 14:05:00Z:
+      $ curl -sS https://10.0.2.80:443/ping                    -> HTTP 200 OK (2ms)
+      $ curl -sS https://10.0.1.50:443/ping                    -> connection refused
+      $ nslookup inventory-svc.internal                          -> 10.0.2.80 (TTL 60)
+      $ dig inventory-svc.internal @kube-dns                     -> 10.0.2.80 (TTL 58)
+      $ traceroute -n 10.0.2.80                                  -> 3 hops, 0% loss
+      $ traceroute -n 10.0.1.50                                  -> *** host unreachable
+
+      # Security group sg-inventory-new (attached to inventory-svc in subnet-B):
+      #   Inbound Rule 1: TCP 443 from 10.0.0.0/16 ALLOW     (covers all order-svc pod IPs)
+      #   Inbound Rule 2: TCP 8080 from 10.0.0.0/16 ALLOW    (internal health check port)
+      #   No DENY rules matching any order-svc source IP.
+  - id: migration-timeline
+    type: note
+    label: inventory-svc migration timeline (complete, all steps)
+    content: |
+      13:50:00Z  Migration window opens. Old inventory-svc running on 10.0.1.50 (subnet-A).
+      13:55:00Z  New inventory-svc instance starts on 10.0.2.80 (subnet-B). Passes all health checks.
+      14:00:00Z  DNS A record updated: inventory-svc.internal A 10.0.1.50 -> 10.0.2.80 (TTL=60s).
+      14:00:05Z  DNS propagation confirmed across all authoritative nameservers.
+      14:00:10Z  Old VM (10.0.1.50) terminated. Any TCP connection to 10.0.1.50 now returns ECONNREFUSED.
+      14:00:30Z  First ECONNREFUSED errors from order-svc pod ord-svc-7a3b (running since 09:00).
+      14:05:00Z  Incident opened. Network diagnostics run (see network-diag) — all connectivity clear.
+      14:10:00Z  New order-svc pod ord-svc-9f2c started (routine scaling) — connects successfully immediately.
+      14:15:01Z  ord-svc-7a3b recovers; its inventory calls succeed from this point on.
+      14:20:00Z  Error rate drops to zero cluster-wide.
+
+      # Observed recovery times of other old pods: ord-svc-4d1a stopped erroring at 14:42;
+      # ord-svc-2e8f stopped erroring at 14:50. Fresh pods (started after 14:00) had zero errors.
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Set respectDnsTtl=true in http-client-config so the HTTP client's resolver cache honors
+          the DNS record's own TTL instead of the hardcoded cacheTtlSeconds=3600.
+
+      F2: After every DNS change, perform a rolling restart of all order-svc pods to flush their
+          in-process resolver caches.
+
+      F3: Reduce connectionPool.healthCheckIntervalSeconds from 30 to 5 so stale connections are
+          detected and discarded faster.
+
+      F4: Add ECONNREFUSED to retryPolicy.retryableErrors so connection-refused errors are retried
+          (up to maxRetries=2).
+
+      Constraints:
+        - inventory-svc DNS may change during future migrations, scaling events, failovers, or
+          blue-green deployments; the fix must handle all such changes automatically without manual
+          intervention per change.
+        - The HTTP client's caching-resolver is the sole DNS path for application traffic
+          (http-client-config). The system resolver is a separate code path used only by health
+          probes and CLI tools.
+        - The pool health check pings whatever IP the resolver returned; it does NOT trigger DNS
+          re-resolution on failure (see http-client-config notes).
+tags: [debugging, root-cause-isolation, dns, caching, migration, connectivity]

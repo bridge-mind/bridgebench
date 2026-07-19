@@ -1,0 +1,105 @@
+id: supply-oci-attestation-subject
+version: 1.0.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: Valid OCI Attestation Covers a Builder Image, Not the Deployed Application
+summary: >-
+  A Kubernetes admission controller sees signed provenance, pinned digests, a trusted registry, and an
+  SBOM, but joins evidence by mutable tag and accepts an attestation whose subject is a different image.
+  Trace registry manifests and in-toto subjects to distinguish the substituted application from normal
+  multi-architecture indirection and choose a policy that binds source, build, and deployed bytes.
+prompt: |
+  Analyze the fictional Northstar release using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use compromised, benign, and policy-gap. Provide defensive containment and policy changes,
+  not attack steps.
+
+  1. Reconstruct the intended chain from source commit through builder, platform manifests, index digest,
+     provenance subject, admission decision, and runtime image.
+  2. Identify the exact subject/deployment mismatch and the join operation that hides it. State which
+     digest is signed, which digest is deployed, and which bytes execute.
+  3. Classify findings F1 through F6 in finding-matrix as compromised, benign, or policy-gap, with a
+     field-by-field provenance explanation.
+  4. Explain why a trusted Fulcio identity, Rekor inclusion, registry hostname, digest pin, SBOM presence,
+     and normal OCI index-to-platform traversal do not repair a wrong attestation subject.
+  5. Evaluate policy candidates P1 through P4 and select the one that closes the chain without rejecting
+     valid multi-architecture images. State exact subject and source-material equivalence rules.
+  6. Give ordered containment, credential-review, rebuild, redeploy, and admission regression steps. Include
+     tests for tag movement, platform selection, wrong subject, wrong source commit, and missing Rekor entry.
+
+  Registry-reference and trust-policy are authoritative. Exactly one application manifest is substituted.
+artifacts:
+  - id: release-intent
+    type: spec
+    label: authoritative release inputs and expected outputs
+    content: |
+      Release r-81 must deploy source commit c0ffee81 from bridge/northstar, built by workflow
+      release.yml@refs/tags/v8.1.0. Expected OCI index I-good contains linux/amd64 M-amd64-good and
+      linux/arm64 M-arm64-good. Provenance may name the index digest or the selected platform manifest,
+      but admission must cryptographically connect the deployed digest to that subject and source commit.
+      Tags are discovery metadata only and are never identity.
+  - id: registry-reference
+    type: table
+    label: immutable registry objects and hashes
+    content: |
+      digest           media/type       children or layer identity                  first seen
+      I-good           OCI index        amd64=M-amd64-good arm64=M-arm64-good       09:00
+      M-amd64-good     image manifest   layers=[L-base,L-app-good-amd64]             09:00
+      M-arm64-good     image manifest   layers=[L-base,L-app-good-arm64]             09:00
+      M-builder        image manifest   layers=[L-buildkit,L-toolchain]              08:00
+      M-amd64-evil     image manifest   layers=[L-base,L-app-substituted]            09:14
+      I-evil           OCI index        amd64=M-amd64-evil arm64=M-arm64-good        09:14
+      registry.example/northstar:8.1.0 pointed to I-good at 09:01 and I-evil at 09:15.
+      Digests are immutable SHA-256 values abbreviated symbolically; no digest itself changed bytes.
+  - id: provenance-and-sbom
+    type: config
+    label: verified signatures and subjects
+    content: |
+      Attestation A1: signature valid; Rekor included; identity release.yml@refs/tags/v8.1.0;
+        subject=M-builder; materials repo=bridge/northstar commit=c0ffee81; predicate=SLSA provenance.
+      Attestation A2: signature valid; Rekor included; identity sbom.yml@refs/tags/v8.1.0;
+        subject=I-good; materials commit=c0ffee81; predicate=SPDX SBOM.
+      There is no provenance attestation whose subject is I-good, M-amd64-good, I-evil, or M-amd64-evil.
+      There is no SBOM whose subject is I-evil or M-amd64-evil. All signature verifications are genuine.
+  - id: admission-code
+    type: code
+    label: admission controller policy at deployment time
+    content: |
+      imageRef := pod.image                         // registry.example/northstar:8.1.0
+      resolved := registry.Resolve(imageRef)        // I-evil at 09:16
+      attestations := registry.Referrers(imageRef)  // queried by repository:tag, returns A1 and A2
+      if any(attestations, validTrustedSignature) &&
+         any(attestations, predicateType == "https://slsa.dev/provenance/v1") &&
+         strings.HasPrefix(imageRef, "registry.example/") {
+        allow(pod.withImage(imageRef + "@" + resolved))
+      }
+      // subject digests, source materials, workflow ref, and relation to `resolved` are not compared.
+  - id: deployment-trace
+    type: log
+    label: release and node resolution trace
+    content: |
+      09:01 release job pushes tag 8.1.0 -> I-good
+      09:02 A1 and A2 attached under tag-referrer index
+      09:15 registry writer credential moves tag 8.1.0 -> I-evil
+      09:16 admission resolves I-evil, finds valid A1/A2 by tag, allows pod pinned to I-evil
+      09:17 amd64 kubelet selects M-amd64-evil and executes L-app-substituted
+      09:17 arm64 control selects M-arm64-good and passes functional smoke tests
+      Registry audit attributes the tag move to a credential not used by release.yml.
+  - id: finding-matrix
+    type: table
+    label: findings and proposed policy candidates
+    content: |
+      F1 deployment uses an immutable digest after admission
+      F2 A1 is valid provenance for M-builder
+      F3 A2 is a valid SBOM for I-good
+      F4 admission accepts provenance without matching subject to deployed digest
+      F5 amd64 application layer differs from release-intent
+      F6 arm64 child under I-evil equals the good arm64 child
+
+      P1 trust any signed attestation discoverable by repository tag
+      P2 require only that an SBOM and provenance share a tag
+      P3 resolve tag once; require trusted provenance subject equals resolved index OR selected child with
+         a verified index-child edge, require materials commit/workflow equal release-intent, verify Rekor,
+         then persist and admit that exact digest; require SBOM subject connected by the same digest graph
+      P4 reject every OCI index and allow only single-platform tags
+tags: [security, supply-chain, oci, provenance, admission-control]

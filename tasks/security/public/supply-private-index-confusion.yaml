@@ -1,0 +1,139 @@
+id: supply-private-index-confusion
+version: 1.0.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: CI Resolves an Internal Build Package from the Public Index
+summary: >-
+  A Python build uses a private package name, two indexes, a constraints file, and a generated resolver
+  report. A public package with the same name wins by version and executes a build backend during wheel
+  creation, while a similarly named dev tool and an unpinned-but-hash-verified dependency are decoys.
+  Reconstruct the actual dependency-confusion path and choose a repair that closes it.
+prompt: |
+  Analyze the fictional Northstar Python build using ONLY the supplied artifacts. Cite artifact ids for
+  every conclusion. Use vulnerable, not-a-vulnerability, and unreachable where applicable. Do not give
+  publication or exploitation instructions; limit the answer to provenance, resolution, and impact.
+
+  1. Trace the exact dependency selected for `northstar-buildkit`: declaring file, index policy,
+     candidates, resolver decision, downloaded artifact, build hook, and CI secret/permission exposure.
+  2. State whether this is a reachable dependency-confusion vulnerability and bound the demonstrated
+     impact. Distinguish what the artifacts prove from broader host or production compromise.
+  3. Classify candidate findings A through D in review-findings. Explain each false positive or
+     unreachable item using install groups, hashes, and package identities.
+  4. Identify the earliest repository change that made the vulnerable resolution possible, without
+     blaming the later public publication as a code change.
+  5. Classify fixes F1 through F4 as closes or does-not-close. Select the minimal compatible repair and
+     explain why version pinning alone is not a provenance boundary.
+  6. Give verification checks for a clean CI rebuild: selected index, artifact hash, absence of public
+     fallback for internal names, and no execution of an untrusted build backend.
+
+  Registry-inventory and install groups are exhaustive for this task.
+artifacts:
+  - id: project-config
+    type: config
+    label: pyproject.toml and CI dependency groups
+    content: |
+      [project]
+      name = "northstar-service"
+      dependencies = [
+        "fastapi==0.115.2",
+        "northstar-buildkit>=2.4",
+        "orjson==3.10.7",
+      ]
+
+      [project.optional-dependencies]
+      dev = ["north-star-build-tools==1.1.0"]
+
+      CI command: python -m pip install --requirement requirements-ci.txt
+      requirements-ci.txt contains exactly:
+        -c constraints.txt
+        .
+      CI does NOT install `.[dev]`, test extras, or the package named north-star-build-tools.
+  - id: pip-policy
+    type: config
+    label: pip.conf introduced in commit 8c2f and resolver semantics
+    content: |
+      [global]
+      index-url = https://packages.northstar.example/simple
+      extra-index-url = https://pypi.org/simple
+      timeout = 15
+
+      Resolver contract for the pinned pip version in CI:
+      - index-url is not exclusive when extra-index-url is present.
+      - candidates with the normalized requested name are collected from both indexes.
+      - among candidates satisfying version constraints, the highest version wins; index priority is not
+        a provenance preference.
+      - package names normalize runs of `-`, `_`, and `.` to `-`, but `northstar-buildkit` and
+        `north-star-build-tools` remain distinct normalized names.
+  - id: constraints
+    type: config
+    label: constraints.txt at the incident commit
+    content: |
+      fastapi==0.115.2 --hash=sha256:FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57FA57
+      northstar-buildkit>=2.4
+      orjson==3.10.7 --hash=sha256:0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B0A1B
+      # pip is invoked without --require-hashes because the local project has no archive hash.
+      # Only fastapi and orjson have hashes. The internal package has neither an exact pin nor a hash.
+  - id: registry-inventory
+    type: table
+    label: exhaustive package candidates visible during the build
+    content: |
+      index    normalized name          version  artifact                         sha256 prefix
+      private  northstar-buildkit       2.4.1    northstar_buildkit-2.4.1.whl     24124124
+      public   northstar-buildkit       9.9.9    northstar_buildkit-9.9.9.tar.gz  99999999
+      public   north-star-build-tools   1.1.0    north_star_build_tools-1.1.0.whl 11111111
+      public   fastapi                  0.115.2   fastapi-0.115.2.whl              FA57FA57
+      public   orjson                   3.10.7    orjson-3.10.7.whl                0A1B0A1B
+      The private index has no 9.9.9, and the public index has no other northstar-buildkit version.
+      Internal policy owns the name northstar-buildkit but had not reserved it on the public index.
+  - id: resolver-log
+    type: log
+    label: verbose CI resolver and build log
+    content: |
+      Looking in indexes: https://packages.northstar.example/simple, https://pypi.org/simple
+      Collecting northstar-buildkit>=2.4
+        Found private candidate 2.4.1
+        Found public candidate 9.9.9
+        Selected northstar-buildkit==9.9.9 (highest satisfying candidate)
+        Downloading https://pypi.org/.../northstar_buildkit-9.9.9.tar.gz sha256=99999999...
+        Installing build dependencies ... done
+        Getting requirements to build wheel ...
+        northstar backend: read CI environment PACKAGE_UPLOAD_TOKEN=present
+        northstar backend: HTTPS POST https://telemetry.invalid/collect blocked (egress policy)
+        Building wheel ... done
+      Installing collected packages: orjson, northstar-buildkit, fastapi, northstar-service
+      Successfully installed northstar-buildkit-9.9.9
+  - id: build-runtime
+    type: spec
+    label: CI trust boundary and demonstrated blast radius
+    content: |
+      Source distributions execute their declared PEP 517 build backend during wheel construction.
+      This runner exposes PACKAGE_UPLOAD_TOKEN to the install step and permits writes inside the checkout
+      and temporary build directory. Network egress permits only packages.northstar.example, pypi.org,
+      and telemetry.invalid is blocked as shown. The runner has no production cloud role, deploy key,
+      container socket, or host mount. Logs prove the untrusted backend could read the token, but do not
+      prove successful exfiltration or production access. The token must nevertheless be rotated.
+  - id: review-findings
+    type: table
+    label: candidate findings to classify
+    content: |
+      A  northstar-buildkit resolves from the public index and executes its build backend.
+      B  north-star-build-tools is a typosquat installed in production CI.
+      C  orjson is untrusted because it is downloaded from the public index.
+      D  the package can escape to the Docker host through /var/run/docker.sock.
+      Facts: B is a distinct optional-dev package and that group is not installed. C's selected version
+      and hash match the declared constraint. D's socket and any host mount are absent per build-runtime.
+  - id: candidate-fixes
+    type: note
+    label: proposed dependency-policy repairs
+    content: |
+      F1: Change `northstar-buildkit>=2.4` to `northstar-buildkit==2.4.1`, keep both indexes and no hash.
+      F2: Keep current constraints but place `--extra-index-url` before `--index-url`.
+      F3: Build a wheel for northstar-buildkit 2.4.1 in a trusted release job, record its sha256, and
+          install internal requirements in a separate command using `--index-url` private with
+          `--no-deps --require-hashes`; install the public, fully-hashed requirements separately. Fail
+          if the internal artifact URL is not under packages.northstar.example.
+      F4: Keep both indexes and add `--prefer-binary`; private 2.4.1 is a wheel while public 9.9.9 is sdist.
+      Compatibility: CI must continue installing private northstar-buildkit 2.4.1 and the declared public
+      packages. The repair must bind internal name, version, index origin, and artifact digest.
+tags: [security, supply-chain, dependency-confusion, python, ci]

@@ -1,0 +1,106 @@
+id: interface-compatibility-c-allocator-plugin
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Shim a C Plugin Across Allocator Ownership and ABI-Compatible Error Semantics
+summary: >-
+  Four C shims adapt a v2 transform plugin to a frozen v1 host ABI. They differ subtly in allocator
+  domains, embedded-NUL handling, zero-length outputs, error ownership, and callback lifetime; one is
+  a true binary-compatible replacement.
+prompt: |
+  Use only v1-abi, v2-api, host-vectors, shims, and manifest. Cite artifact ids. Verdicts are
+  compatible / incompatible.
+
+  1. Classify shim-a through shim-d against A1..A9.
+  2. For every incompatibility, give the first H1..H7 witness and exact status/bytes/free/lifetime issue.
+  3. Identify the unique compatible shim and trace H4 through allocation and release.
+  4. State which function must free each successful and failed allocation.
+  5. Explain why strlen is invalid even when most payload fixtures are textual.
+  6. Evaluate reviewer Inez's proposal to represent an empty success as {NULL,0}.
+artifacts:
+  - id: v1-abi
+    type: spec
+    label: Frozen host ABI and ownership contract
+    content: |
+      typedef struct { uint8_t *ptr; size_t len; } bb_buf;
+      typedef struct { int32_t code; bb_buf message; } bb_error;
+      typedef int32_t (*transform_fn)(const uint8_t *in, size_t in_len,
+                                      bb_buf *out, bb_error *err, void *ctx);
+      typedef void (*release_fn)(uint8_t *ptr, size_t len, void *ctx);
+      typedef struct { uint32_t abi; transform_fn transform; release_fn release; void *ctx; } plugin_v1;
+
+      A1 abi is exactly 1 and every function pointer/ctx remains valid until host shutdown.
+      A2 input is arbitrary bytes and valid only during transform; pass exact pointer+length.
+      A3 success returns 0, sets err={0,{NULL,0}}, and sets out to host-owned result allocated by shim.
+      A4 even a zero-length success has a distinct non-NULL releasable pointer and len=0.
+      A5 host calls release(out.ptr,out.len,ctx) exactly once; release must use the matching allocator.
+      A6 failure returns the exact negative v2 code, sets out={NULL,0}, and provides a copied UTF-8
+         error message allocated in the same release domain; host releases err.message through release.
+      A7 no v2-owned pointer escapes transform; embedded NUL bytes are preserved.
+      A8 overflow converting lengths returns -75 with copied message "length overflow".
+      A9 output structs are fully initialized on every path and no callback is retained past shutdown.
+  - id: v2-api
+    type: spec
+    label: Complete v2 plugin and allocator API
+    content: |
+      v2_result v2_transform(v2_handle*, v2_slice input) returns
+        {code:0,data:{ptr:uint8_t*,len:uint64_t},error:{NULL,0}} or
+        {code:negative,data:{NULL,0},error:{ptr:uint8_t*,len:uint64_t}}.
+      v2_free(handle,ptr,len) must release every non-NULL pointer returned by v2 exactly once.
+      v2_shutdown(handle) invalidates handle after host shutdown.
+
+      host_alloc(n) and host_free(ptr) form the shim's release domain. host_alloc_zero_token()
+      returns a non-NULL unique allocation valid for host_free. copy_host(ptr,n) copies exactly n
+      bytes, returns host allocation, and never uses C-string functions. Size conversion is checked.
+  - id: host-vectors
+    type: table
+    label: Authoritative host calls
+    content: |
+      H1 input ['a',0,'b'] -> success output same three bytes; v2 data freed once; host output freed once.
+      H2 v2 success data len 0 -> out.ptr non-NULL/out.len 0 and releasable.
+      H3 v2 failure -9 with error bytes "bad\0key" length 7 -> exact code and seven copied bytes.
+      H4 success "ok": v2 alloc -> copy to host alloc -> v2_free before return -> later host release.
+      H5 v2 data length SIZE_MAX+1 -> -75, out NULL, copied "length overflow"; v2 data freed.
+      H6 host pre-fills out/err with junk then v2 fails -> every required field overwritten.
+      H7 after 100 transforms, callbacks remain valid; at shutdown v2_shutdown occurs after final call.
+  - id: shims
+    type: code
+    label: Four complete shim strategies
+    content: |
+      shim-a:
+        static heap-allocated ctx owns v2 handle until shutdown
+        initialize out/err; call v2 with exact slice; checked lengths
+        copy success/error bytes to host allocations, v2_free originals before return
+        use host_alloc_zero_token for empty success; release ignores len and calls host_free
+
+      shim-b:
+        return v2 result pointers directly in out/error
+        release calls host_free; otherwise statuses and lengths match shim-a
+
+      shim-c:
+        copy successful data with copy_host(v2.ptr, strlen((char*)v2.ptr))
+        copy errors the same way; other ownership and initialization match shim-a
+
+      shim-d:
+        copy exact lengths and free v2 pointers like shim-a
+        represent zero-length success as {NULL,0}; all nonempty/error paths match shim-a
+  - id: ownership-ledger
+    type: table
+    label: Frozen allocation ledger
+    content: |
+      v2 result data/error -> always v2_free(handle,ptr,len), never host release.
+      copied v1 out/error -> always plugin_v1.release -> host_free, never v2_free.
+      zero token -> host_free through release despite len 0.
+      ctx/handle -> retained through callback lifetime, shutdown only after host's final callback.
+      SIZE_MAX conversion failure still releases the unrepresentable v2 allocation.
+  - id: manifest
+    type: note
+    label: Complete platform and review assumption
+    content: |
+      shim-a through shim-d are complete. ABI packing, calling convention, integer widths, and v2
+      thread safety are correct in every candidate. host_alloc cannot fail in supplied vectors.
+
+      Inez's {NULL,0} proposal conflicts with A4: the host uses non-NULL as the success-resource
+      token even when the logical byte sequence is empty.
+tags: [generation, interface-compatibility, c, abi, memory-ownership]

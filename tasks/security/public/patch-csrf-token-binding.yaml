@@ -1,0 +1,220 @@
+id: patch-csrf-token-binding
+version: 1.1.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Portage Account API — Verifying Four Candidate CSRF Fixes
+summary: >-
+  A reported CSRF on Portage's cookie-session POST /account/email draws four
+  candidate patches: a session-bound synchronizer token, a one-line SameSite=Lax
+  cookie change, an unkeyed double-submit token, and a Referer check that allows a
+  missing Referer. Against an authoritative closing spec and threat model, decide
+  which patches actually close the finding and which only look sufficient — analysis
+  only, no payloads.
+prompt: |
+  You are reviewing candidate fixes for a reported CSRF finding in "Portage", a
+  web app that authenticates with a cookie-based session. The state-changing
+  endpoint POST /account/email currently has no CSRF defense. Four engineers
+  submitted competing patches (A, B, C, D); one or more will be merged.
+
+  You are given seven artifacts: original-handler (the vulnerable login + endpoint),
+  csrf-spec (the authoritative closing criteria and threat model), patch-a, patch-b,
+  patch-c, patch-d (four candidate diffs), and change-context (a summary of what each
+  patch changes). Answer each deliverable using ONLY the supplied artifacts. Cite the
+  artifact id(s) you rely on for every claim. This is analysis only: reason about
+  whether each patch satisfies the declared closing criteria — do NOT write a CSRF
+  proof-of-concept page, a forged request, or any working exploit.
+
+  Definitions you must use:
+  - The scope is exactly one state-changing endpoint: POST /account/email. csrf-spec
+    declares there are no state-changing GET endpoints in scope.
+  - A patch CLOSES the finding only if it satisfies one of the closing mechanisms
+    csrf-spec declares sufficient, UNDER the threat model csrf-spec declares. A patch
+    DOES-NOT-CLOSE if its mechanism is one csrf-spec declares insufficient, or it does
+    not meet the stated conditions of a sufficient mechanism.
+  - Judge each patch independently. More than one patch may close the finding; a patch
+    that "looks like" CSRF protection does not close it unless it meets the criteria.
+
+  Deliverables:
+
+  1. Patch A (patch-a): does it CLOSE or NOT-CLOSE the finding? Name the closing
+     mechanism it uses (or the criterion it fails) from csrf-spec and give the reason.
+
+  2. Patch B (patch-b): CLOSE or NOT-CLOSE? Patch B is a single cookie-attribute change
+     and looks minimal; rule strictly from csrf-spec whether that is sufficient for the
+     in-scope POST endpoint, and say why.
+
+  3. Patch C (patch-c): CLOSE or NOT-CLOSE? Name precisely why its token scheme does or
+     does not meet csrf-spec's condition, referencing the declared threat model.
+
+  4. Patch D (patch-d): CLOSE or NOT-CLOSE? State the exact condition in csrf-spec that
+     its check meets or fails.
+
+  5. Considering all four patches, which one(s) CLOSE the finding on their own? Is any
+     single patch sufficient, and is any combination required? Show, per patch, close or
+     not-close, and give the minimal merge that resolves the finding.
+
+  6. Residual risk: if a NOT-CLOSE patch were merged in the belief it resolved the
+     finding, what remains? Address at least (a) merging patch C alone and (b) merging
+     patch D alone. For each, describe at the precondition level only what leaves the
+     endpoint still forgeable — no payloads.
+artifacts:
+  - id: original-handler
+    type: code
+    label: Portage session + email endpoint (original)
+    content: |
+      // portage/auth.ts — session issuance at login.
+      export function onLogin(req, res, user) {
+        const sid = createServerSession(user.id); // opaque id -> server-side session store
+        // Session cookie as currently deployed: cross-site sendable.
+        res.cookie('psid', sid, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'none',   // <-- sent on cross-site requests, including POST
+          domain: 'portage.example',
+        });
+      }
+
+      // portage/account.ts — POST /account/email changes the account's email.
+      // Authenticated purely by the 'psid' session cookie. No token, no origin
+      // check: any request that carries the cookie is honored.
+      export async function changeEmail(req, res) {
+        const session = await loadSession(req.cookies.psid);
+        if (!session) return res.status(401).json({ error: 'unauthenticated' });
+        await db.users.update(session.userId, { email: String(req.body.email) });
+        return res.json({ ok: true });
+      }
+  - id: csrf-spec
+    type: spec
+    label: Portage CSRF closing criteria and threat model (authoritative)
+    content: |
+      Portage CSRF advisory PRT-2026-014 — AUTHORITATIVE closing criteria and threat
+      model. Use these definitions to judge whether a patch closes the finding.
+
+      In scope: exactly one state-changing endpoint, POST /account/email. There are NO
+      state-changing GET endpoints in Portage. Authentication is the 'psid' cookie
+      session; as deployed the cookie is SameSite=None (sent on cross-site requests).
+
+      Threat model (what the attacker can and cannot do):
+        - Can lure a logged-in victim's browser to an attacker-controlled page and cause
+          it to issue a cross-site request to Portage.
+        - CAN set or override cookies on the registrable domain portage.example: Portage
+          serves untrusted user pages on sibling subdomains under *.pages.portage.example,
+          which can write a cookie with Domain=portage.example. So a NON-HttpOnly cookie
+          value the app relies on can be fixed to an attacker-known value.
+        - CANNOT read cross-origin response bodies (same-origin policy holds).
+        - CANNOT read the HttpOnly 'psid' session cookie.
+
+      Closing mechanisms DECLARED SUFFICIENT:
+        M1 — Synchronizer token BOUND TO THE SESSION: an unpredictable token stored in the
+             server-side session and verified on the state-changing request against the
+             session-stored value. Because the expected value lives server-side, a
+             client-set cookie cannot forge it.
+        M2 — SameSite=Strict or SameSite=Lax on the 'psid' SESSION cookie: under Lax or
+             Strict the session cookie is NOT sent on a cross-site POST, so a forged
+             cross-site POST /account/email arrives with no session and is rejected as
+             unauthenticated. Sufficient for the in-scope POST endpoint (there are no
+             state-changing GET endpoints that Lax would still expose).
+        M3 — Double-submit token ONLY IF cryptographically BOUND to the session: e.g. an
+             HMAC/signed token tied to the session id and verified server-side. An
+             UNKEYED double-submit (comparing a cookie value to a header/field with no
+             session binding and no signature) is DECLARED INSUFFICIENT, because under
+             this threat model the attacker can set the cookie via a sibling subdomain and
+             supply the matching field.
+
+      Origin/Referer checks: a check is sufficient ONLY IF it REJECTS a request whose
+      Origin AND Referer are both absent/blank (and rejects a present-but-mismatched
+      origin). A check that ALLOWS a missing/blank Referer is DECLARED INSUFFICIENT,
+      because the forged request can be made to omit the Referer.
+
+      Grading rule: a patch closes the finding iff it implements M1, M2, or M3 as defined,
+      or a conformant Origin/Referer check. Adding token-shaped code that does not meet
+      these conditions does NOT close it.
+  - id: patch-a
+    type: diff
+    label: Patch A — session-bound synchronizer token
+    content: |
+      // Patch A: mint a CSRF token into the server-side session and verify it.
+      --- a/portage/account.ts
+      +++ b/portage/account.ts
+      @@ session creation (auth.ts) @@
+      +  // at login, store an unpredictable token IN the server-side session:
+      +  session.csrf = randomToken32();       // CSPRNG; persisted server-side with the session
+      @@ changeEmail @@
+         const session = await loadSession(req.cookies.psid);
+         if (!session) return res.status(401).json({ error: 'unauthenticated' });
+      +  const presented = String(req.headers['x-csrf-token'] ?? '');
+      +  // compare against the value held in the SERVER-SIDE session (not a cookie):
+      +  if (!timingSafeEqual(presented, session.csrf)) {
+      +    return res.status(403).json({ error: 'bad csrf token' });
+      +  }
+         await db.users.update(session.userId, { email: String(req.body.email) });
+  - id: patch-b
+    type: diff
+    label: Patch B — SameSite=Lax on the session cookie
+    content: |
+      // Patch B: change the session cookie's SameSite attribute from none to lax.
+      --- a/portage/auth.ts
+      +++ b/portage/auth.ts
+      @@ onLogin cookie @@
+         res.cookie('psid', sid, {
+           httpOnly: true,
+           secure: true,
+      -    sameSite: 'none',   // sent on cross-site requests
+      +    sameSite: 'lax',    // not sent on cross-site POST
+           domain: 'portage.example',
+         });
+      // No other change; the endpoint still authenticates by the psid cookie.
+  - id: patch-c
+    type: diff
+    label: Patch C — double-submit cookie token (unkeyed)
+    content: |
+      // Patch C: set a csrf cookie and require a matching header (double submit).
+      --- a/portage/account.ts
+      +++ b/portage/account.ts
+      @@ onLogin @@
+      +  // non-HttpOnly so the page's script can read it and echo it in a header:
+      +  res.cookie('csrf', randomToken32(), { httpOnly: false, secure: true, sameSite: 'none', domain: 'portage.example' });
+      @@ changeEmail @@
+         const session = await loadSession(req.cookies.psid);
+         if (!session) return res.status(401).json({ error: 'unauthenticated' });
+      +  // compare the header to the cookie value. No session binding, no signature.
+      +  if (String(req.headers['x-csrf-token'] ?? '') !== String(req.cookies.csrf ?? '')) {
+      +    return res.status(403).json({ error: 'csrf mismatch' });
+      +  }
+         await db.users.update(session.userId, { email: String(req.body.email) });
+  - id: patch-d
+    type: diff
+    label: Patch D — Referer check (allows missing Referer)
+    content: |
+      // Patch D: reject the request if the Referer is present and off-site.
+      --- a/portage/account.ts
+      +++ b/portage/account.ts
+      @@ changeEmail @@
+         const session = await loadSession(req.cookies.psid);
+         if (!session) return res.status(401).json({ error: 'unauthenticated' });
+      +  const ref = String(req.headers['referer'] ?? '');
+      +  if (ref && new URL(ref).origin !== 'https://portage.example') {
+      +    return res.status(403).json({ error: 'bad referer' });
+      +  }
+      +  // NOTE: when no Referer header is present, the request is allowed through.
+         await db.users.update(session.userId, { email: String(req.body.email) });
+  - id: change-context
+    type: table
+    label: Portage patch summary (mechanism vs csrf-spec)
+    content: |
+      Per-patch summary. "Session-bound?" = does the expected secret live server-side or
+      is it derived from a signature the client cannot forge. "Session cookie cross-site
+      sendable?" = is 'psid' still sent on a cross-site POST after the patch.
+
+      patch | mechanism                              | session-bound? | psid cross-site sendable?
+      ------|----------------------------------------|----------------|---------------------------
+      A     | synchronizer token in server session   | YES (session)  | yes (unchanged)
+      B     | psid cookie SameSite none -> lax        | n/a            | NO (Lax blocks cross-site POST)
+      C     | double-submit cookie vs header (unkeyed)| NO             | yes (unchanged)
+      D     | Referer check, missing Referer allowed  | n/a            | yes (unchanged)
+
+      Reminder (csrf-spec): under the declared threat model the attacker can set a
+      Domain=portage.example cookie via a sibling subdomain, and can cause the forged
+      request to omit the Referer header.
+tags: [security, patch-verification, csrf, same-site, double-submit]

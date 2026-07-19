@@ -1,10 +1,10 @@
 id: constraint-satisfaction-max-drawdown
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: constraint-satisfaction
 difficulty: expert
 title: maxDrawdown — Which Candidate Is Single-Pass, O(1)-Memory, And Pure
-summary: A spec defines maxDrawdown(prices) — the largest peak-to-trough drop in a price series — under four constraints, a single linear scan, O(1) auxiliary memory, purity with no input mutation, and the arithmetic contract. All five candidates compute the correct drawdown, so only the constraints decide; one uses a nested quadratic loop, one allocates an O(n) prefix-max array, one overwrites the caller's array. Classify each conforms/violates and cite the exact violating construct.
+summary: A spec defines maxDrawdown(prices) — the largest peak-to-trough drop in a price series — under four constraints, a single linear scan, O(1) auxiliary memory, purity with no input mutation, and the arithmetic contract. All five candidates compute the correct drawdown, so only the constraints decide. Classify each as conforms or violates and cite the exact violating construct.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, worked-example, candidate-a,
   candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite the artifact id(s) for
@@ -118,7 +118,7 @@ artifacts:
       function maxDrawdown(prices) {
         const n = prices.length;
         if (n === 0) return 0;
-        const peaks = new Array(n);                 // running-maximum array
+        const peaks = new Array(n);
         peaks[0] = prices[0];
         for (let i = 1; i < n; i++) peaks[i] = Math.max(peaks[i - 1], prices[i]);
         let maxDD = 0;
@@ -137,7 +137,7 @@ artifacts:
           const p = prices[i];
           if (p > peak) peak = p;
           else if (peak - p > maxDD) maxDD = peak - p;
-          prices[i] = peak;                          // writes the running peak back into the input
+          prices[i] = peak;
         }
         return maxDD;
       }

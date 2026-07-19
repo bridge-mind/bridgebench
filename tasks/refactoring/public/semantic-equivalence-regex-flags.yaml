@@ -1,0 +1,158 @@
+id: semantic-equivalence-regex-flags
+version: 1.1.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Are these six regex refactors equivalent under flag and lastIndex semantics?
+summary: >-
+  Six validators each get a regex rewrite that changes flags or construction. Using the cited flag
+  and lastIndex semantics and the declared witness inputs, classify each rewrite as
+  behavior-preserving or changes-behavior with a cited witness.
+prompt: |
+  A refactor PR rewrites six regex-backed validators (originals A1..A6) into forms that change how
+  the RegExp is built or flagged (proposed B1..B6). Judge each rewrite for FULL observable
+  equivalence on the declared witness inputs, accounting for flag semantics and lastIndex.
+
+  Answer each deliverable using ONLY the supplied artifacts (regex-spec, originals, proposed,
+  witnesses). Cite the artifact id(s) for every claim; ground each divergence in regex-spec and a
+  concrete witness.
+
+  For each rewrite below, classify it as exactly one of:
+    - behavior-preserving  (same boolean/string result as the original on every witness path)
+    - changes-behavior     (differs on some path; name the single divergence and the witness)
+
+  1. Classify B1 (rewrite of A1).
+  2. Classify B2 (rewrite of A2).
+  3. Classify B3 (rewrite of A3).
+  4. Classify B4 (rewrite of A4).
+  5. Classify B5 (rewrite of A5).
+  6. Classify B6 (rewrite of A6).
+
+  Exactly one classification is defensible per deliverable; it is fully determined by the regex
+  semantics and the witnesses.
+artifacts:
+  - id: regex-spec
+    type: spec
+    label: RegExp flag / lastIndex semantics (authoritative for this task)
+    content: |
+      Semantics you must apply (ECMAScript RegExp, as used by this service):
+
+      A. Flag `i` (ignoreCase): alphabetic matching is case-insensitive. Without `i`, 'A' does not
+         match /a/.
+
+      B. Flag `s` (dotAll): `.` matches Unicode line terminators (including `\n`). Without `s`, `.`
+         does not match `\n`.
+
+      C. Flag `m` (multiline): `^` and `$` match at the start/end of each line (after/before `\n`),
+         not only at the start/end of the whole string. Without `m`, `^` matches only at index 0.
+
+      D. Flag `g` (global): RegExp instances are STATEFUL. `re.test(s)` advances `re.lastIndex` on
+         a match; a subsequent `re.test(s)` continues from lastIndex (or resets to 0 after a
+         failure / full pass depending on the match). A literal `/.../g` shared across calls is a
+         single instance. `new RegExp(pattern, 'g')` per call creates a fresh lastIndex=0 each time.
+
+      E. Flag `u` (unicode): astral symbols are matched as single code points. Without `u`, a pattern
+         like `/^.$/` can fail to match a single emoji (two code units). With `u`, `/^.$/u` matches
+         one code point.
+
+      F. `String.prototype.match(re)` with a non-global re returns the first match array (or null).
+         With a global re it returns all match strings (or null) and does not include capture groups
+         the same way — but none of A1..A6 rely on capture-group shape from match().
+
+      G. Constructing `new RegExp('^a.b$', 's')` is equivalent to `/^a.b$/s` when the pattern string
+         has no escape differences.
+  - id: originals
+    type: code
+    label: original validators A1..A6
+    content: |
+      // A1 — case-insensitive code match (shared helper)
+      const CODE = /^[a-z]{3}-\d{2}$/i;
+      export function isCode(s: string): boolean {
+        return CODE.test(s);
+      }
+
+      // A2 — single-line token: dot must NOT span newlines
+      export function isToken(s: string): boolean {
+        return /^id:[a-z]+$/s.test(s);
+      }
+
+      // A3 — first line must be HEADER (multiline anchors)
+      export function hasHeader(s: string): boolean {
+        return /^HEADER$/m.test(s);
+      }
+
+      // A4 — shared global regex used twice inside one call
+      const PAIR = /(\d+)-(\d+)/g;
+      export function bothPairs(s: string): boolean {
+        const first = PAIR.test(s);
+        const second = PAIR.test(s);
+        return first && second;
+      }
+
+      // A5 — exactly one Unicode code point
+      export function isSingleGlyph(s: string): boolean {
+        return /^.$/u.test(s);
+      }
+
+      // A6 — ASCII tag, case-sensitive
+      export function isTag(s: string): boolean {
+        return /^tag:[a-z]+$/.test(s);
+      }
+  - id: proposed
+    type: code
+    label: proposed rewrites B1..B6
+    content: |
+      // B1 — rewrite of A1: drop the i flag ("codes are always lowercase in docs")
+      const CODE = /^[a-z]{3}-\d{2}$/;
+      export function isCode(s: string): boolean {
+        return CODE.test(s);
+      }
+
+      // B2 — rewrite of A2: remove unused s flag
+      export function isToken(s: string): boolean {
+        return /^id:[a-z]+$/.test(s);
+      }
+
+      // B3 — rewrite of A3: drop m ("HEADER only appears at the start of the payload")
+      export function hasHeader(s: string): boolean {
+        return /^HEADER$/.test(s);
+      }
+
+      // B4 — rewrite of A4: rebuild the regex each call so lastIndex cannot stick
+      export function bothPairs(s: string): boolean {
+        const first = /(\d+)-(\d+)/g.test(s);
+        const second = /(\d+)-(\d+)/g.test(s);
+        return first && second;
+      }
+
+      // B5 — rewrite of A5: drop u ("dot already means one character")
+      export function isSingleGlyph(s: string): boolean {
+        return /^.$/.test(s);
+      }
+
+      // B6 — rewrite of A6: add i for friendliness
+      export function isTag(s: string): boolean {
+        return /^tag:[a-z]+$/i.test(s);
+      }
+  - id: witnesses
+    type: note
+    label: witness inputs (complete set referenced by deliverables)
+    content: |
+      Witnesses (complete for judging). Compute each original and rewritten outcome from regex-spec.
+
+      W1 (A1/B1): s = 'AbC-09'
+
+      W2 (A2/B2): s = 'id:alpha'; s2 = 'id:alpha\n'
+
+      W3 (A3/B3): s = 'meta\nHEADER\nfooter'
+
+      W4 (A4/B4): s = '1-2,3-4'
+           Additional witness W4b: s = '1-2'
+
+      W5 (A5/B5): s = '😀' (single U+1F600 emoji, two UTF-16 code units)
+
+      W6 (A6/B6): s = 'TAG:alpha'
+
+      Exhaustiveness: these witnesses plus regex-spec fully determine every deliverable. No other
+      flag interactions are in scope.
+tags: [refactoring, semantic-equivalence, regex, flags, lastIndex]

@@ -1,16 +1,15 @@
 id: authz-api-key-scope-gap
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: authz-boundary
 difficulty: expert
 title: Stanchion API — Machine-Key Scope Boundary Analysis
 summary: >-
   The Stanchion orders API authenticates callers as either a role-gated JWT session
-  or a scope-gated machine API key. Several routes look under-protected; some are
-  JWT-only, some require a scope no issued key holds. Exactly one mutating route
-  accepts API keys without a scope check, letting a read-only key trigger a
-  money-moving action. Classify five routes, name the single exposure, state the fix
-  — using only the artifacts.
+  or a scope-gated machine API key. Five routes combine @AllowApiKey, @RequireScopes,
+  and @Roles in different ways. Exactly one route is reachable by a machine principal
+  that should not be able to trigger it. Classify five routes, name the single
+  exposure, state the fix — using only the artifacts.
 prompt: |
   You are reviewing authorization on the "Stanchion" orders API. Every request
   authenticates as EITHER a JWT session principal (an interactive user, gated by
@@ -67,7 +66,6 @@ artifacts:
         // This MOVES MONEY and is irreversible once settled.
         @Post(':id/refund')
         @AllowApiKey()
-        // NOTE: no @RequireScopes and no @Roles on this route.
         refundOrder(@Param('id') id: string) {
           return this.orders.refund(id);
         }

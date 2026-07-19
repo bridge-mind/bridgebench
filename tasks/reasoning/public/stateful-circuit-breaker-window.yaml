@@ -1,0 +1,169 @@
+id: stateful-circuit-breaker-window
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Per-Host Circuit Breaker Trace Across Half-Open Probe and Mid-Window Reset
+summary: >-
+  Replay two independently keyed host breakers through consecutive failures, a half-open probe, a
+  success that reopens one host, and a mid-window reset of the other. Derive every call outcome,
+  state transition, final breaker state, and the first divergence from a tempting shared-counter
+  alternative.
+prompt: |
+  RelayGuard enforces one circuit breaker per upstream host. Replay [call-log] in listed order using
+  the complete rules in [breaker-spec], the initial states in [initial-breakers], and the real reset
+  in [reset-event]. Calls at the same timestamp are still ordered by sequence number. [triage-note]
+  contains unverified claims; do not treat any claim as a rule.
+
+  Times are elapsed seconds after 11:00:00. There are no operations other than the ones shown. State
+  transitions occur only immediately before or as part of a listed call or reset.
+
+  1. Call trace. For every call row (all rows except the reset), state ALLOW or REJECT and the
+     breaker state (`closed`, `open`, or `half-open`) immediately after that operation for the
+     target host.
+  2. Transition ledger. List every state transition that occurs, with the sequence number, host,
+     from→to states, and the exact rule that caused it.
+  3. Reset semantics. At sequence 9, state the precise `host-beta` breaker immediately before and
+     after the reset (state, failureCount, successCount, openedAt, lastProbeAt). Identify the first
+     later `host-beta` CALL that is ALLOW under R1 but would be REJECT in the counterfactual where
+     R1 never ran (same log otherwise).
+  4. Final state. Give the final complete state for both `host-alpha` and `host-beta` (state,
+     failureCount, successCount, openedAt, lastProbeAt). Confirm why no unlisted passive transition
+     should be added after sequence 15.
+  5. Claim review. Classify each numbered claim in [triage-note] as correct or incorrect and give the
+     rule and trace fact that decides it.
+  6. Shared-counter counterfactual. Under [proposed-alternative], identify the FIRST call whose
+     ALLOW/REJECT outcome differs from the shipped behavior, give both outcomes and post-call states
+     for the affected host, and explain why `host-alpha` is the host that diverges first.
+artifacts:
+  - id: breaker-spec
+    type: spec
+    label: RelayGuard per-host circuit breaker semantics
+    content: |
+      A breaker state is (state, failureCount, successCount, openedAt, lastProbeAt).
+      Breakers are keyed solely by host; `host-alpha` and `host-beta` never share counters or clocks.
+
+      BEFORE EVERY CALL on host H:
+        - If state is `open` and (now - openedAt) < openDurationSeconds, REJECT immediately.
+          No counters change.
+        - If state is `open` and (now - openedAt) >= openDurationSeconds, transition to `half-open`,
+          set successCount=0, set lastProbeAt=now, then continue as a half-open call below.
+        - If state is `closed` or `half-open`, ALLOW the call attempt (the call then succeeds or fails
+          according to the call-log outcome column).
+
+      AFTER AN ALLOWED CALL that FAILS:
+        - failureCount = failureCount + 1
+        - successCount = 0
+        - If state is `half-open`, immediately transition to `open` and set openedAt=now.
+        - If state is `closed` and failureCount >= failureThreshold, transition to `open` and set
+          openedAt=now.
+
+      AFTER AN ALLOWED CALL that SUCCEEDS:
+        - If state is `closed`, set failureCount=0 (successCount stays 0 in closed).
+        - If state is `half-open`, successCount = successCount + 1; if successCount >=
+          halfOpenSuccessThreshold, transition to `closed`, set failureCount=0 and successCount=0.
+
+      RESET EVENT:
+        - Applies only to the named host.
+        - Sets state=`closed`, failureCount=0, successCount=0, openedAt=null, lastProbeAt=null.
+        - Does not touch any other host and does not change any shared process field in the shipped
+          implementation (there is no shared field).
+
+      There is no background timer. A breaker accrues transitions only when a listed call or reset
+      triggers the rules. After the final listed operation, report its stored state exactly as it is.
+
+      Constants for this deployment (complete):
+        failureThreshold = 3
+        halfOpenSuccessThreshold = 2
+        openDurationSeconds = 10
+  - id: initial-breakers
+    type: config
+    label: Breaker states at 11:00:00
+    content: |
+      host       | state  | failureCount | successCount | openedAt | lastProbeAt
+      host-alpha | closed | 0            | 0            | null     | null
+      host-beta  | closed | 1            | 0            | null     | null
+
+      `openedAt` and `lastProbeAt` are elapsed seconds after 11:00:00, or null. Both rows are
+      complete; there are no hidden hosts, shared pools, or global breakers.
+  - id: call-log
+    type: log
+    label: Ordered raw calls and reset
+    content: |
+      # Apply top-to-bottom. "now" is seconds after 11:00:00.
+      # outcome applies only if the breaker ALLOWs the attempt; REJECT rows never reach the host.
+      seq | now | host       | operation | outcome
+      1   | 1   | host-alpha | CALL      | fail
+      2   | 2   | host-alpha | CALL      | fail
+      3   | 3   | host-beta  | CALL      | fail
+      4   | 4   | host-alpha | CALL      | fail
+      5   | 5   | host-beta  | CALL      | fail
+      6   | 12  | host-alpha | CALL      | success
+      7   | 14  | host-alpha | CALL      | success
+      8   | 15  | host-alpha | CALL      | success
+      9   | 16  | host-beta  | RESET     | —
+      10  | 17  | host-beta  | CALL      | fail
+      11  | 18  | host-alpha | CALL      | fail
+      12  | 20  | host-beta  | CALL      | fail
+      13  | 22  | host-alpha | CALL      | success
+      14  | 25  | host-beta  | CALL      | fail
+      15  | 26  | host-beta  | CALL      | success
+
+      The log is exhaustive: a breaker is never touched between these rows and no call is silently
+      retried. Seq 9 is the reset event described in [reset-event].
+  - id: reset-event
+    type: diff
+    label: Real mid-window reset R1 for host-beta
+    content: |
+      R1 is applied only at sequence 9 (now=16) to the `host-beta` breaker.
+
+      --- host-beta before R1
+      +++ host-beta after R1
+      - state: open
+      - failureCount: 3
+      - successCount: 0
+      - openedAt: 5
+      - lastProbeAt: null
+      + state: closed
+      + failureCount: 0
+      + successCount: 0
+      + openedAt: null
+      + lastProbeAt: null
+
+      The update uses the RESET EVENT rule in [breaker-spec]. `host-alpha` receives no reset.
+  - id: triage-note
+    type: note
+    label: Unverified incident notes
+    content: |
+      These statements were copied from a chat room; each is a claim to verify, not a source of rules.
+
+      1. "host-alpha opens after two failures because failureThreshold counts from the initial zero."
+      2. "The host-alpha CALL at now=12 is a half-open probe that succeeds and moves the breaker to
+          half-open with successCount=1."
+      3. "R1 at now=16 also clears host-alpha because both hosts share the RelayGuard process."
+      4. "host-beta's CALL at now=25 opens the breaker, but the CALL at now=26 is still ALLOW
+          because a success is always admitted from the open state."
+      5. "Under the shipped rules, host-alpha and host-beta share one failureCount."
+  - id: proposed-alternative
+    type: diff
+    label: Rejected shared-counter implementation
+    content: |
+      This is NOT the shipped behavior. Evaluate it only for deliverable 6, starting from the same
+      initial states and replaying the same ordered log (including R1 at seq 9).
+
+      --- per-host failure counters (shipped)
+      +++ proposed alternative
+           // In closed state, failures increment a PER-HOST failureCount.
+      -    host.failureCount += 1
+      +    // Alternative: one process-wide closedFailureCount shared by all hosts.
+      +    // Opening still transitions only the host that just failed, but the shared
+      +    // counter means any host's closed-state failures accelerate every host's trip.
+      +    globalClosedFailureCount += 1
+      +    // Trip when globalClosedFailureCount >= failureThreshold (instead of per-host).
+      +    // On RESET of a host: set that host closed and also globalClosedFailureCount = 0.
+      +    // Half-open success/failure counting remains per-host and unchanged.
+
+      Initial globalClosedFailureCount is the sum of initial per-host failureCounts (= 1 from beta).
+      The alternative does not change openDurationSeconds, half-open rules, call ordering, or
+      outcomes of allowed calls.
+tags: [circuit-breaker, half-open, stateful-execution, failover, per-host]

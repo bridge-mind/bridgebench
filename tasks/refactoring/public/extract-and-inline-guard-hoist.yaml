@@ -1,15 +1,14 @@
 id: extract-and-inline-guard-hoist
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: extract-and-inline
 difficulty: expert
 title: Extracting the Quota Check From a Short-Circuit Guard — Eager Hoisting, Double Metering, Meets-Goal vs Fails-Goal
 summary: >-
   canOpen guards a metered quota.check behind a `&&` null-check, so quota.check runs (and a null
-  dereference is avoided) only when the guard passes. The task is to extract the quota decision into a
-  named helper. One extraction preserves behavior and meets the goal; one hoists the call to a const
-  above the guard (throwing on anonymous sessions); one calls quota.check twice; one is behavior-
-  preserving but never actually extracts. Classify each against both behavior and goal.
+  dereference is avoided) only when the guard passes. The task is to extract the quota decision into
+  a named helper. Four extractions are proposed; classify each against both behavior and the
+  extraction goal, tracing the anonymous and signed-in scenarios.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (canopen-original, access-note, rewrite-a,
   rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
@@ -36,7 +35,7 @@ prompt: |
   4. Classify rewrite-d against BOTH dimensions. If its behavior matches canopen-original, say so, and
      separately state whether it satisfies the extract goal, with the reason.
 
-  5. Exactly one rewrite both preserves behavior AND meets the extract goal. Name it. Then, for
+  5. State which rewrites, if any, both preserve behavior AND meet the extract goal. Then, for
      canopen-original, state the ground truth: under S_anon (the return value, the quota_checks delta,
      and whether a TypeError is thrown) and under S_user (the return value and the quota_checks delta).
 artifacts:
@@ -96,7 +95,7 @@ artifacts:
     content: |
       // rewrite-b — "compute the quota result first, then AND it with the null check."
       export function canOpen(session: Session, doc: Doc): boolean {
-        const allowed = quota.check(session.user.id, doc.id); // evaluated BEFORE the null guard
+        const allowed = quota.check(session.user.id, doc.id);
         return session.user != null && allowed;
       }
   - id: rewrite-c
@@ -106,7 +105,7 @@ artifacts:
       // rewrite-c — "guard, then return the quota result freshly."
       export function canOpen(session: Session, doc: Doc): boolean {
         if (session.user != null && quota.check(session.user.id, doc.id)) {
-          return quota.check(session.user.id, doc.id); // re-evaluate to return the current decision
+          return quota.check(session.user.id, doc.id);
         }
         return false;
       }
@@ -119,6 +118,6 @@ artifacts:
         return session.user != null && quota.check(session.user.id, doc.id);
       }
       export function canOpen(session: Session, doc: Doc): boolean {
-        return session.user != null && quota.check(session.user.id, doc.id); // unchanged; helper unused
+        return session.user != null && quota.check(session.user.id, doc.id);
       }
 tags: [refactoring, extract-and-inline, short-circuit, evaluation-order, side-effect]

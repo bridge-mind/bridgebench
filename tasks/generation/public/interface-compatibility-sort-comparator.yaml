@@ -1,10 +1,10 @@
 id: interface-compatibility-sort-comparator
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: interface-compatibility
 difficulty: expert
 title: Which Sort Comparator Is a Drop-In for the Declared Task Ordering
-summary: A frozen consumer sorts a fixed record set with Array.prototype.sort(cmp), requiring a total order — ascending priority, then createdAt, then id. Five comparators are proposed as drop-ins; one returns a boolean not a signed number, one sorts by priority alone dropping the tie-break, one compares the numeric priority as a string, and two conform. Classify each conforms/violates and give the concrete divergence from the expected order.
+summary: A frozen consumer sorts a fixed record set with Array.prototype.sort(cmp), requiring a total order — ascending priority, then createdAt, then id. Five comparators are proposed as drop-ins. Classify each as conforms or violates and give the concrete divergence from the expected order for any violator.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (interface-contract, dataset,
   comparator-a, comparator-b, comparator-c, comparator-d, comparator-e, judging-notes). Cite the
@@ -107,7 +107,7 @@ artifacts:
       // comparator-d
       const cmp = (a, b) => {
         const pa = String(a.priority), pb = String(b.priority);
-        if (pa !== pb) return pa < pb ? -1 : 1;              // compares priority as strings
+        if (pa !== pb) return pa < pb ? -1 : 1;
         if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       };

@@ -1,0 +1,109 @@
+id: api-contract-adherence-grpc-lease-stream
+version: 1.0.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: Serve an Ordered gRPC Lease Stream With Auth, Backpressure, and Resume Semantics
+summary: >-
+  Four bidirectional-stream handlers coordinate authenticated lease events and client acknowledgments.
+  Their differences in first-message handling, ownership, sequence persistence, send backpressure,
+  and cancellation create exact protocol-level outcomes under the supplied schedules.
+prompt: |
+  Use only rpc-contract, stream-api, schedules, handlers, and manifest. Cite artifact ids. Verdicts
+  are conforms / violates.
+
+  1. Classify handler-a through handler-d against R1..R9.
+  2. For every violation, give the first S1..S6 schedule and exact status/message/store side effect.
+  3. Identify the unique conforming handler and trace S4 including awaited sends and ack commits.
+  4. State which sequence is resumed after reconnect and why receipt alone is insufficient.
+  5. Explain how awaiting send enforces the declared backpressure bound.
+  6. Evaluate reviewer Dev's proposal to trust tenant_id from the Open message after JWT validation.
+artifacts:
+  - id: rpc-contract
+    type: spec
+    label: Complete LeaseService.Watch contract
+    content: |
+      Client messages: first must be Open{tenant_id,last_acked}; later only Ack{seq}. Server messages
+      are Event{seq,payload} and Ready{resumed_from}. Statuses use gRPC codes.
+
+      R1 authenticate stream metadata before receiving a message. Failure UNAUTHENTICATED and no recv/store.
+      R2 first message must be Open; its tenant_id must exactly equal authenticated tenant. Otherwise
+         INVALID_ARGUMENT for shape or PERMISSION_DENIED for mismatch, with no subscription.
+      R3 last_acked must equal durable store.lastAck(tenant,consumer); otherwise FAILED_PRECONDITION.
+      R4 send and await Ready{resumed_from:last_acked+1}, then subscribe from that sequence inclusive.
+      R5 events have contiguous increasing seq. Await each stream.send before fetching the next event;
+         at most one fetched-unacknowledged-to-transport event is retained by handler.
+      R6 Ack must be monotonic, <= highest successfully sent seq, and may repeat current durable ack.
+         Invalid ack is INVALID_ARGUMENT and no store update.
+      R7 persistAck is ownership-scoped and atomic; resume is from durable ack, not last received message.
+      R8 EOF/cancellation closes subscription, awaits cleanup, and returns original cancellation status.
+      R9 send failure closes subscription and stops recv/fetch; no ack is inferred from successful send.
+  - id: stream-api
+    type: spec
+    label: Frozen async stream and store primitives
+    content: |
+      authenticate(metadata)->{tenantId,consumerId} throws before any body access.
+      recv()->message|EOF; send(message)->Promise<void> resolves only after transport accepts message.
+      events.subscribe(tenant,from)->subscription; subscription.next fetches one; close()->Promise<void>.
+      store.lastAck and persistAck always require tenantId+consumerId. persistAck accepts same value
+      idempotently and rejects regression. select/subscribe APIs perform no implicit auth.
+
+      Handler may run one recv loop for acks concurrently with one send loop after Open. Exact helper
+      validateAck enforces R6 using shared highestSent updated only after send resolves.
+  - id: schedules
+    type: table
+    label: Authoritative RPC schedules
+    content: |
+      S1 bad JWT then any body -> UNAUTHENTICATED; recv count 0.
+      S2 auth {tenant:A,consumer:C}, durable lastAck(A,C)=4, Open{tenant_id:B,last_acked:4},
+         and tenant B has Event5 payload "B-secret" -> required PERMISSION_DENIED with no lastAck,
+         Ready, subscribe, event, or store write. Handler c instead reads lastAck(A,C)=4, sends
+         Ready{5}, subscribes to (B,5), and sends Event{5,"B-secret"}; it does not write an ack and
+         remains open with no terminal status at the end of this schedule.
+      S3 durable ack 4, Open last_acked 3 -> FAILED_PRECONDITION; no Ready.
+      S4 durable 4, valid Open -> await Ready{5}; fetch/send Event5; Ack5 persists 5; Event6 send
+         resolves; disconnect before Ack6 -> close awaited; reconnect resumes Event6.
+      S5 while Event7 send is pending, subscription.next for Event8 is not called.
+      S6 highest successfully sent 9, durable ack 8: Ack10 -> INVALID_ARGUMENT, durable remains 8.
+  - id: handlers
+    type: code
+    label: Four complete Watch implementations
+    content: |
+      handler-a:
+        authenticate; recv/validate Open ownership and exact durable ack; await send Ready
+        start ack loop with validateAck and tenant-scoped persistAck
+        send loop awaits each send before next fetch; on any exit await close exactly once
+
+      handler-b:
+        recv Open first, then authenticate metadata; if auth fails map UNAUTHENTICATED
+        all post-auth ownership, ack, send, and cleanup behavior matches handler-a
+
+      handler-c:
+        authenticate; validate Open shape but only require tenant_id nonempty; read durable lastAck
+        under authenticated tenant/consumer; await Ready; subscribe using Open.tenant_id
+        store acks under authenticated tenant; all later ordering/cleanup matches handler-a
+
+      handler-d:
+        authenticate and validate Open exactly
+        fetch up to 32 events, start all stream.send promises, await Promise.all
+        update highestSent when each send is started; ack loop/cleanup otherwise matches handler-a
+  - id: trace-ledger
+    type: table
+    label: Frozen observable ordering rules
+    content: |
+      R1 order is authenticate -> first recv.
+      Open validation order is shape -> tenant equality -> durable lastAck equality -> Ready -> subscribe.
+      Per event order is subscription.next -> await send -> highestSent update -> next fetch.
+      Ack receipt does not change resume until persistAck commits.
+      Every terminal path orders subscription.close completion before handler completion.
+  - id: manifest
+    type: note
+    label: Complete concurrency and identity assumptions
+    content: |
+      handler-a through handler-d are complete. The transport preserves awaited send order but does
+      not add a memory bound for unawaited sends. Helpers map exact statuses and closeOnce prevents
+      double cleanup.
+
+      Dev's claim confuses authentication with authorization. JWT identity is authoritative; an
+      untrusted message tenant cannot choose another subscription.
+tags: [generation, api-contract-adherence, grpc, streaming, authorization]

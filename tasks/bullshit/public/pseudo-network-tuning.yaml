@@ -1,5 +1,5 @@
 id: pseudo-network-tuning
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: plausible-pseudoscience
 difficulty: expert
@@ -55,12 +55,7 @@ artifacts:
       - P2. Propagation delay is route length times the signal's travel time in fiber:
         one-way propagation (ms) = fiber_route_km x 0.005 ms/km (signal speed in Skein
         fiber is 200,000 km/s, a physical constant of the glass). Its only inputs are the
-        route length and that constant. No configuration parameter - not MTU, not frame
-        size, not DNS TTL, not congestion window - appears in this formula. Frames of
-        every size travel the fiber at the same speed; a 9000-byte frame and a 64-byte
-        frame cover a kilometer of glass in exactly the same time. The primer defines no
-        quantity named "speed-of-light budget"; the signal speed above is fixed and is
-        not a budget that any setting can expand.
+        route length and that constant.
       - P3. Queuing delay comes from buffer occupancy at each hop; processing delay from
         per-hop forwarding work. Both are measured, not configured, and are reported per
         path in the network team's tables.
@@ -68,22 +63,16 @@ artifacts:
         (a) per-packet header overhead - every packet carries 90 bytes of combined
         header and framing overhead, so goodput = line_rate x (MTU - 90) / MTU;
         (b) fragmentation - a packet larger than the path MTU is split, adding one
-        90-byte overhead per extra fragment. There are no other MTU mechanisms. MTU does
-        not appear in any delay formula in P1-P3 and cannot change propagation, queuing,
-        or processing delay on an uncongested path.
+        90-byte overhead per extra fragment. There are no other MTU mechanisms.
       - P5. DNS TTL is a cache lifetime in seconds, set exclusively by the authoritative
         zone operator and copied into resolver caches at lookup time. Resolvers count a
         cached record's TTL down in wall-clock time - one second of TTL per second of
         clock - and re-query when it reaches zero. Complete list of events that change a
-        record's TTL: the authority operator editing the zone file. Transport-layer
-        events (packet loss, retransmission, congestion, MTU changes) cannot read or
-        write DNS caches; the DNS layer and the transport layer share no state, and no
-        transport event is capable of decrementing, decaying, or expiring a TTL.
+        record's TTL: the authority operator editing the zone file.
       - P6. Retransmissions are triggered by exactly two events: packet loss detected via
         duplicate ACKs, and retransmission timeout. Their complete list of effects:
         added delivery latency for the affected flow and reduced goodput on the affected
-        link while they last. This list is exhaustive; retransmissions have no effect on
-        any other layer.
+        link while they last. This list is exhaustive.
   - id: pop-latency-table
     type: table
     label: Inter-POP RTT, loss, and SLO measurements, week of 2026-07-06
@@ -100,12 +89,10 @@ artifacts:
 
       Loss window: the AMS-JFK loss of 2.1% is dominated by a single window,
       2026-07-08 13:02-13:16 UTC (14 min), during which loss peaked at 2.1% and 1.9% of
-      TCP segments were retransmitted. Throughout that window, resolver caches at every
-      POP continued counting cached TTLs down at exactly one second per wall-clock
-      second, and the authoritative TTL for edge.skein.example remained 300 s all week
-      (its only pending change is the zone edit in transport-config-diff). RTT
-      measurements in this table use 64-byte probes; 1400-byte control probes on every
-      path agreed within 0.1 ms.
+      TCP segments were retransmitted. The authoritative TTL for edge.skein.example
+      remained 300 s all week (its only pending change is the zone edit in
+      transport-config-diff). RTT measurements in this table use 64-byte probes;
+      1400-byte control probes on every path agreed within 0.1 ms.
   - id: transport-config-diff
     type: diff
     label: Proposed backbone MTU raise and DNS TTL change (from the capacity note)
@@ -139,9 +126,7 @@ artifacts:
       Path MTU discovered: 1500 bytes end to end (pre-change). All six hops report
       jumbo-capable hardware (mtu_max=9000).
       Probe-size check: hops 4-6 were re-probed with 64-byte and 1400-byte probes;
-      per-hop medians agreed within 0.1 ms. Probe size does not change hop RTT,
-      consistent with primer P2 (frames of every size travel the fiber at the same
-      speed).
+      per-hop medians agreed within 0.1 ms.
 
       skein-trace ams-edge-03 -> sin-edge-04, 2026-07-09 14:35 UTC, 3 probes per hop
       (median shown). Cumulative RTT per hop.
@@ -196,9 +181,4 @@ artifacts:
 
       Also lowering the edge TTL 300 -> 60 so failover converges faster; that part is a
       plain zone edit.
-
-      Reviewer comment (m.deleon, backbone team, 2026-07-10): N1 and the TTL edit look
-      fine. Before anyone acts on N2, N3, or N4, check each mechanism against
-      skein-transport-primer - the primer is explicit that its mechanism lists are
-      exhaustive, and I do not recognize these effects.
 tags: [plausible-pseudoscience, cdn, mtu, dns-ttl, latency, network-tuning]

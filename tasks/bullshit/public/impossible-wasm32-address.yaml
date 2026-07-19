@@ -1,0 +1,57 @@
+id: impossible-wasm32-address
+version: 1.0.0
+category: bullshit
+cluster: impossible-quantities
+difficulty: expert
+title: The Five-Gibibyte wasm32 Byte Offset
+summary: A WebAssembly memory review mixes valid page arithmetic with an address that cannot exist under the module's exhaustive wasm32 limits.
+prompt: |
+  Solve the six requests from the exact wasm contract. For an impossible quantity, show
+  the limiting arithmetic, identify the nearest representable value, and redirect to a
+  legitimate design question. Do not confuse allocated memory with address-space capacity.
+
+  1. Compute initial and maximum linear-memory bytes.
+  2. Report the wasm32 pointer encoding for byte offset 5 GiB.
+  3. Determine whether `writeLastByte` succeeds at maximum grown memory.
+  4. Compute the unsigned address of the last representable byte.
+  5. State whether memory64 is available to this module and why.
+  6. Identify which candidate redesign can address a 5 GiB logical dataset without an
+     in-memory 5 GiB wasm32 pointer.
+artifacts:
+  - id: wasm-contract
+    type: spec
+    label: Complete module and runtime memory contract
+    content: |
+      Module target is wasm32. Linear-memory addresses are unsigned 32-bit byte offsets.
+      One page is 65,536 bytes. The declared memory is `(memory 256 65536)`: initial 256
+      pages, maximum 65,536 pages. Valid byte addresses at maximum are 0 through
+      2^32-1. memory.grow cannot exceed the declared maximum and returns -1 on failure.
+      This runtime has memory64 disabled; modules cannot opt into it dynamically.
+  - id: module-code
+    type: code
+    label: Boundary write helper
+    content: |
+      (module
+        (memory (export "memory") 256 65536)
+        (func (export "writeLastByte") (param $value i32)
+          i32.const -1
+          local.get $value
+          i32.store8))
+  - id: growth-trace
+    type: log
+    label: Maximum-memory test
+    content: |
+      initial pages=256
+      memory.grow(65280) returned 256
+      current pages=65536
+      writeLastByte(127) completed; memory[0xffffffff]=0x7f
+      memory.grow(1) returned -1; current pages=65536
+  - id: design-options
+    type: note
+    label: Candidate dataset designs
+    content: |
+      A. Store all 5 GiB in one wasm32 linear memory and pass offset 0x140000000.
+      B. Keep chunk data in host storage, pass chunk IDs plus <=4 GiB window offsets, and
+         stream bounded windows through the existing memory.
+      C. Set a JavaScript property `memory64=true` after instantiation.
+tags: [impossible-quantities, webassembly, wasm32, memory, addressing]

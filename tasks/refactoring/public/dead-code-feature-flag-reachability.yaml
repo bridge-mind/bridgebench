@@ -1,5 +1,5 @@
 id: dead-code-feature-flag-reachability
-version: 1.1.0
+version: 1.2.0
 category: refactoring
 cluster: dead-code-elimination
 difficulty: expert
@@ -109,7 +109,7 @@ artifacts:
       // notify/index.ts
 
       export function notifyUser(user: User): void {
-        const amountDue = computeTax(user.subtotal);              // live, unconditional call
+        const amountDue = computeTax(user.subtotal);
         if (flags.isEnabled('promo.banner')) attachBanner(user);  // promo.banner is ON
         if (flags.isEnabled('checkout.v2')) checkoutV2Path(user.cart);       // checkout.v2 is ON
         if (flags.isEnabled('legacy-export')) legacyExportPath(user.order);  // legacy-export REMOVED
@@ -128,8 +128,8 @@ artifacts:
         finalizeCheckout(cart, tax);
       }
 
-      // Called from notifyUser, guarded at the call site by legacy-export, which is REMOVED
-      // (permanently false), so this call never fires and this function is never reached.
+      // Called from notifyUser, guarded at the call site by legacy-export (flag-registry: REMOVED).
+      // No internal flag check.
       function legacyExportPath(order: Order): void {
         emit(formatLegacyReceipt(order));
       }
@@ -140,9 +140,9 @@ artifacts:
 
       function sendEmail(u: User): void { mail.queue(u.email); }   // registered channel 'email'
       function sendSms(u: User): void { sms.queue(u.phone); }      // registered channel 'sms'
-      function sendPush(u: User): void { push.queue(u.deviceId); } // NOT registered, no callers
+      function sendPush(u: User): void { push.queue(u.deviceId); }
 
-      // Defined long ago; no caller anywhere, not a channel handler, not touched by any flag.
+      // Defined long ago.
       function oldRetryHelper(fn: () => void): void { try { fn(); } catch { fn(); } }
   - id: removal-pr
     type: diff

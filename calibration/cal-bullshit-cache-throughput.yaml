@@ -1,0 +1,62 @@
+id: cal-bullshit-cache-throughput
+task:
+  public:
+    id: cal-bullshit-cache-throughput
+    version: 1.0.0
+    category: bullshit
+    cluster: impossible-quantities
+    difficulty: hard
+    title: Audit a vendor's cache performance claims
+    summary: Check each quantitative claim in a vendor pitch against arithmetic and the cited configuration.
+    prompt: |
+      Audit the vendor pitch against the deployment config. For each numbered claim, give a verdict —
+      SOUND or NONSENSE — with the arithmetic or config line that decides it:
+      1. "At 50k requests/sec with a 99% hit rate, only about 500 requests/sec reach the database."
+      2. "Our 64 GB cluster stores 100 million cached objects at an average of 2 KB each."
+      3. "Halving p99 latency from 80ms to 40ms doubles your throughput."
+    artifacts:
+      - id: deploy-config
+        type: config
+        label: Cluster deployment config
+        content: |
+          cache_cluster:
+            total_memory_gb: 64
+            avg_object_size_kb: 2
+            request_rate_per_sec: 50000
+            hit_rate: 0.99
+  private:
+    id: cal-bullshit-cache-throughput
+    version: 1.0.0
+    expectedResolution: |
+      1. SOUND. Misses = 50,000 × (1 − 0.99) = 500/sec, matching the claim.
+      2. NONSENSE. 100M objects × 2 KB = 200 GB, but the cluster has 64 GB — the claim needs ~3× the
+         configured memory.
+      3. NONSENSE. Latency percentiles and throughput are not reciprocal: p99 halving says nothing
+         about request capacity, which is bounded by concurrency and service rate, not tail latency.
+    requiredEvidence:
+      - deploy-config
+    disqualifyingErrors:
+      - Endorsing claim 2 (200 GB into 64 GB).
+      - Endorsing claim 3's latency-throughput equivalence.
+    rubric:
+      correctness: Each verdict must match the reference arithmetic.
+      evidenceGrounding: Verdicts must show the computation against config values.
+      constraintHandling: Claims judged only against the supplied config, not vendor goodwill.
+      completeness: All three claims audited.
+strongResponse: |
+  1. SOUND: misses = 50,000 × (1 − 0.99) = 500 requests/sec to the database, exactly as claimed.
+  2. NONSENSE: 100,000,000 × 2 KB = 200,000,000 KB ≈ 200 GB, but deploy-config caps the cluster at
+     64 GB. The claim overstates capacity by roughly 3×.
+  3. NONSENSE: p99 latency is a tail percentile, not a throughput bound. Halving it does not double
+     request capacity — throughput depends on concurrency and per-request service cost, neither of
+     which the claim addresses.
+weakResponse: |
+  1. SOUND — with a 99% hit rate almost everything is served from cache, so database load is tiny.
+  2. SOUND — 2 KB objects are extremely small, and modern caches compress aggressively, so
+     100 million of them fit comfortably inside a 64 GB cluster.
+  3. SOUND — latency and throughput are two sides of the same coin: if each request takes half the
+     time, the system naturally serves twice as many per second.
+knownDifference: >
+  The weak response never does the arithmetic: claim 2 requires 200 GB in a 64 GB cluster, and claim
+  3's latency-throughput reciprocity is a classic pseudo-technical equivalence. The strong response
+  computes both against the config.

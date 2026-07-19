@@ -1,0 +1,163 @@
+id: algorithmic-correctness-critical-path
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: Compute Earliest DAG Completion Times Across Joins and Disconnected Components
+summary: >-
+  A build scheduler needs earliest finish times, critical-path makespan, deterministic map contents,
+  and cycle detection for a complete directed task graph. Four linear-time algorithms differ at
+  joins, queue seeding, or cycle handling; only one computes the declared function for all inputs.
+prompt: |
+  Use only graph-spec, witness-graphs, candidates, complexity-note, and candidate-manifest. Cite
+  artifact ids. The only verdicts are conforms / violates.
+
+  1. Classify candidate-a through candidate-d.
+  2. For each violation, identify the algorithmic rule G1..G6 and a smallest listed graph W1..W5
+     that distinguishes the candidate, with its returned and required value.
+  3. Identify the unique conforming candidate and trace indegree, maxPred, and finish updates for W2.
+  4. Give the complete finish map and makespan for W3.
+  5. State the required result for W4 and why processing some acyclic vertices does not make a
+     partially cyclic graph valid.
+  6. Evaluate the claim that finish times at a join should sum all predecessor finish times.
+artifacts:
+  - id: graph-spec
+    type: spec
+    label: Complete earliestCompletion function contract
+    content: |
+      earliestCompletion(tasks, edges) returns null for a cyclic graph, otherwise:
+        { finish: Map<string, number>, makespan: number }
+
+      tasks is a non-empty array of {id:string,duration:number}; ids are unique and durations are
+      positive safe integers. edges contains unique [prerequisiteId, dependentId] pairs and all ids
+      exist. Self-edges are allowed and therefore form cycles. These are the complete rules:
+
+      G1 Unlimited workers are available. A task starts as soon as every predecessor has finished.
+      G2 A source starts at 0, so finish[source] = duration[source].
+      G3 For a non-source v, start[v] is MAX(finish[p]) over its direct predecessors, not a sum;
+         finish[v] = start[v] + duration[v].
+      G4 Disconnected DAG components are scheduled independently and all ids occur in the result map.
+      G5 makespan is MAX finish over all tasks.
+      G6 If any directed cycle exists, return null and expose no partial map. Runtime must be
+         O(tasks+edges); any queue order is acceptable because map insertion order is not observed.
+  - id: witness-graphs
+    type: table
+    label: Authoritative graph witnesses
+    content: |
+      W1 tasks A:2; no edges
+         finish {A:2}, makespan 2.
+
+      W2 tasks A:2, B:5, C:3; edges A->C, B->C
+         A and B start together. finish A=2, B=5, C=max(2,5)+3=8; makespan 8.
+
+      W3 tasks A:2, B:4, C:3, D:7, E:1;
+         edges A->B, A->C, B->E, C->E; D disconnected.
+         finish A=2, B=6, C=5, D=7, E=max(6,5)+1=7; makespan 7.
+
+      W4 tasks A:1, B:1, C:1, D:2; edges A->B, B->A, C->D
+         null. The separate C->D component does not excuse the A<->B cycle.
+
+      W5 tasks A:1, B:2, C:4; edges A->B, B->C
+         finish A=1, B=3, C=7; makespan 7.
+  - id: complexity-note
+    type: note
+    label: Frozen data-structure semantics
+    content: |
+      Map iteration and array shift are treated as O(1) for this benchmark pseudocode. Every
+      candidate builds adjacency and indegree in O(V+E). duration, indegree, maxPred, and finish are
+      Maps initially populated for every task id: indegree and maxPred start at zero. adjacency has
+      one array per id. The helper initialize(tasks, edges) returns those structures.
+
+      setMax(map, id, value) assigns max(map.get(id), value). maxValue(map) returns the maximum stored
+      number. result map ordering is unobservable. No integer overflow occurs.
+  - id: candidates
+    type: code
+    label: Four candidate implementations
+    content: |
+      // candidate-a
+      function candidateA(tasks, edges) {
+        const { duration, adjacency, indegree, maxPred } = initialize(tasks, edges);
+        const queue = tasks.filter((t) => indegree.get(t.id) === 0).map((t) => t.id);
+        const finish = new Map();
+        let processed = 0;
+        while (queue.length) {
+          const id = queue.shift();
+          const done = maxPred.get(id) + duration.get(id);
+          finish.set(id, done);
+          processed++;
+          for (const next of adjacency.get(id)) {
+            setMax(maxPred, next, done);
+            indegree.set(next, indegree.get(next) - 1);
+            if (indegree.get(next) === 0) queue.push(next);
+          }
+        }
+        return processed === tasks.length ? { finish, makespan: maxValue(finish) } : null;
+      }
+
+      // candidate-b: combines predecessor completion by addition.
+      function candidateB(tasks, edges) {
+        const { duration, adjacency, indegree, maxPred } = initialize(tasks, edges);
+        const queue = tasks.filter((t) => indegree.get(t.id) === 0).map((t) => t.id);
+        const finish = new Map();
+        while (queue.length) {
+          const id = queue.shift();
+          const done = maxPred.get(id) + duration.get(id);
+          finish.set(id, done);
+          for (const next of adjacency.get(id)) {
+            maxPred.set(next, maxPred.get(next) + done);
+            indegree.set(next, indegree.get(next) - 1);
+            if (indegree.get(next) === 0) queue.push(next);
+          }
+        }
+        return finish.size === tasks.length ? { finish, makespan: maxValue(finish) } : null;
+      }
+
+      // candidate-c: seeds only one source.
+      function candidateC(tasks, edges) {
+        const { duration, adjacency, indegree, maxPred } = initialize(tasks, edges);
+        const first = tasks.find((t) => indegree.get(t.id) === 0);
+        const queue = first ? [first.id] : [];
+        const finish = new Map();
+        while (queue.length) {
+          const id = queue.shift();
+          const done = maxPred.get(id) + duration.get(id);
+          finish.set(id, done);
+          for (const next of adjacency.get(id)) {
+            setMax(maxPred, next, done);
+            indegree.set(next, indegree.get(next) - 1);
+            if (indegree.get(next) === 0) queue.push(next);
+          }
+        }
+        return finish.size === tasks.length ? { finish, makespan: maxValue(finish) } : null;
+      }
+
+      // candidate-d: returns the acyclic portion even when vertices remain.
+      function candidateD(tasks, edges) {
+        const { duration, adjacency, indegree, maxPred } = initialize(tasks, edges);
+        const queue = tasks.filter((t) => indegree.get(t.id) === 0).map((t) => t.id);
+        const finish = new Map();
+        while (queue.length) {
+          const id = queue.shift();
+          const done = maxPred.get(id) + duration.get(id);
+          finish.set(id, done);
+          for (const next of adjacency.get(id)) {
+            setMax(maxPred, next, done);
+            indegree.set(next, indegree.get(next) - 1);
+            if (indegree.get(next) === 0) queue.push(next);
+          }
+        }
+        return { finish, makespan: maxValue(finish) };
+      }
+  - id: candidate-manifest
+    type: note
+    label: Exhaustive candidate inventory and disputed review
+    content: |
+      candidate-a through candidate-d are the complete submissions. initialize and the helpers have
+      exactly the semantics in complexity-note.
+
+      Build reviewer Anya argues a join consumes the work of every predecessor and should therefore
+      add predecessor finish times. Scheduler owner Luis replies that durations are elapsed time
+      under unlimited parallel workers: a join waits for the last predecessor, so G3 uses max.
+
+      No candidate has a post-processing pass, and no caller accepts a partial map.
+tags: [generation, algorithmic-correctness, dag, critical-path, topological-sort]

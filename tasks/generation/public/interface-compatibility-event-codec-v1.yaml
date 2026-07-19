@@ -1,0 +1,151 @@
+id: interface-compatibility-event-codec-v1
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Replace an Event Codec Without Breaking BigInt or Wire Compatibility
+summary: >-
+  A synchronous codec interface freezes canonical UTF-8 bytes, decimal BigInt handling, strict
+  version errors, payload cloning, and caller immutability. Four replacement classes share trusted
+  helpers but diverge subtly; exactly one is a drop-in for every declared caller and stored record.
+prompt: |
+  Use only codec-interface, wire-contract, compatibility-vectors, candidates, and manifest. The
+  interface and wire contract are exhaustive. Cite artifact ids. Use compatible / incompatible as
+  the verdict vocabulary.
+
+  1. Classify codec-a through codec-d as drop-in compatible or incompatible.
+  2. For each incompatibility, identify I1..I7 and an exact vector that exposes it, including the
+     differing bytes, value, error, or return shape.
+  3. Identify the unique compatible codec and trace E3 through encode and decode.
+  4. State the exact UTF-8 JSON text required for E1 and E3.
+  5. Explain why a numerically plausible Number round-trip is not compatible for E3.
+  6. Evaluate whether returning Promise<Uint8Array> can be hidden behind the same method name.
+artifacts:
+  - id: codec-interface
+    type: spec
+    label: Exhaustive TypeScript interface and caller assumptions
+    content: |
+      type Json = null | boolean | number | string | Json[] | { [key:string]: Json };
+      type Event = { seq: bigint; type: string; payload: Json };
+      interface EventCodec {
+        encode(event: Event): Uint8Array;
+        decode(bytes: Uint8Array): Event;
+      }
+      class CodecError extends Error {}
+
+      I1 Both methods are synchronous. Existing callers immediately access encoded.byteLength and
+         decoded.seq; Promise returns are incompatible.
+      I2 encode and decode do not mutate arguments. decode returns a fresh payload tree not aliased
+         to internal parser state or bytes.
+      I3 encode returns a Uint8Array in every supported JS runtime; Buffer is not part of the public
+         type even on Node.
+      No callers use methods beyond encode and decode. Structural TypeScript compatibility and the
+      runtime rules above are the complete interface.
+  - id: wire-contract
+    type: spec
+    label: Complete v1 wire format
+    content: |
+      I4 Encoded UTF-8 is canonical JSON with object keys recursively sorted lexicographically.
+         The envelope keys therefore appear payload, seq, type, v. No insignificant whitespace.
+      I5 Envelope is exactly {payload:Json,seq:string,type:string,v:1}. seq is canonical unsigned
+         decimal ('0' or [1-9][0-9]*) representing 0..2^64-1. encode rejects an out-of-range seq.
+      I6 decode strictly validates UTF-8, JSON shape, v===1, seq grammar/range, string type, and JSON
+         payload. Any failure throws CodecError, never SyntaxError, RangeError, or TypeError.
+         Extra envelope keys are invalid.
+      I7 Decimal conversion never passes through Number. Valid stored v1 records must round-trip
+         byte-for-byte after canonicalization, including seq above Number.MAX_SAFE_INTEGER.
+
+      Frozen helpers available to candidates:
+        canonicalJson(value) recursively sorts object keys and emits compact JSON.
+        utf8Encode(text) returns a fresh Uint8Array.
+        utf8DecodeStrict(bytes) returns text or throws CodecError for malformed UTF-8.
+        parseAndValidate(bytes) enforces I5/I6 and returns a fresh plain envelope whose seq is still
+        the validated decimal string.
+        validateEvent(event) enforces encode-side Event shape/range and throws CodecError.
+      Helpers do not mutate arguments and have no environment-specific behavior.
+  - id: compatibility-vectors
+    type: table
+    label: Exact interface and wire witnesses
+    content: |
+      E1 event {seq:7n,type:'opened',payload:{z:1,a:true}}
+         encoded text exactly {"payload":{"a":true,"z":1},"seq":"7","type":"opened","v":1}
+      E2 decoding UTF-8 for {"payload":null,"seq":"01","type":"x","v":1}
+         throws CodecError (non-canonical decimal).
+      E3 event {seq:9007199254740993n,type:'tick',payload:{"nested":{"b":2,"a":1}}}
+         encoded text exactly
+         {"payload":{"nested":{"a":1,"b":2}},"seq":"9007199254740993","type":"tick","v":1}
+         decode returns seq exactly 9007199254740993n.
+      E4 decoding {"payload":{},"seq":"1","type":"x","v":2} throws CodecError.
+      E5 decoding {"extra":0,"payload":{},"seq":"1","type":"x","v":1} throws CodecError.
+      E6 caller executes codec.encode(event).byteLength without await and receives a number.
+      E7 after encode(event), mutating event.payload cannot alter already returned bytes.
+  - id: candidates
+    type: code
+    label: Four replacement codec classes
+    content: |
+      // codec-a
+      class CodecA {
+        encode(event) {
+          validateEvent(event);
+          return utf8Encode(canonicalJson({
+            payload: event.payload, seq: event.seq.toString(), type: event.type, v: 1,
+          }));
+        }
+        decode(bytes) {
+          const raw = parseAndValidate(bytes);
+          return { seq: BigInt(raw.seq), type: raw.type, payload: raw.payload };
+        }
+      }
+
+      // codec-b: decimal goes through Number on decode.
+      class CodecB {
+        encode(event) {
+          validateEvent(event);
+          return utf8Encode(canonicalJson({
+            payload: event.payload, seq: event.seq.toString(), type: event.type, v: 1,
+          }));
+        }
+        decode(bytes) {
+          const raw = parseAndValidate(bytes);
+          return { seq: BigInt(Number(raw.seq)), type: raw.type, payload: raw.payload };
+        }
+      }
+
+      // codec-c: preserves values but uses insertion-order JSON.
+      class CodecC {
+        encode(event) {
+          validateEvent(event);
+          return utf8Encode(JSON.stringify({
+            v: 1, seq: event.seq.toString(), type: event.type, payload: event.payload,
+          }));
+        }
+        decode(bytes) {
+          const raw = parseAndValidate(bytes);
+          return { seq: BigInt(raw.seq), type: raw.type, payload: raw.payload };
+        }
+      }
+
+      // codec-d: correct bytes behind an asynchronous surface.
+      class CodecD {
+        async encode(event) {
+          validateEvent(event);
+          return utf8Encode(canonicalJson({
+            payload: event.payload, seq: event.seq.toString(), type: event.type, v: 1,
+          }));
+        }
+        async decode(bytes) {
+          const raw = parseAndValidate(bytes);
+          return { seq: BigInt(raw.seq), type: raw.type, payload: raw.payload };
+        }
+      }
+  - id: candidate-manifest
+    type: note
+    label: Complete candidate and runtime declaration
+    content: |
+      codec-a through codec-d are the complete candidates. Every helper has exactly the frozen
+      semantics in wire-contract. The runtime set includes browsers, workers, and Node; Uint8Array
+      exists in all, while Buffer is not assumed.
+
+      Review says codec-b passed small test fixtures and codec-d can be awaited by new code. Drop-in
+      acceptance covers E1..E7 and existing synchronous callers, not only new call sites.
+tags: [generation, interface-compatibility, codec, bigint, serialization]

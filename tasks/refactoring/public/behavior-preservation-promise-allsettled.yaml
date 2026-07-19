@@ -1,0 +1,185 @@
+id: behavior-preservation-promise-allsettled
+version: 1.1.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: probeAll Rewrite Equivalence — allSettled Fan-Out, Fail-Fast, and Sequential Starts
+summary: >-
+  Four candidate rewrites of a multi-probe aggregator are proposed. Classify each as
+  behavior-preserving, behavior-changing, or goal-missing against the observable contract —
+  probe start counts and overlap, whether the aggregator rejects, metric increments, and audit
+  lines — tracing the given scenarios.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (probe-original, probe-contract,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to restructure probeAll for readability WITHOUT changing any observable
+  behavior: which fetchProbe calls start (and that they start concurrently/eagerly), whether the
+  aggregator rejects or always returns a summary, the ok/failed counts, the probe_ok / probe_fail
+  metric increments, and the audit.log lines (content and order).
+
+  1. Classify rewrite-a relative to probe-original. Justify by tracing settlement handling and start
+     concurrency against probe-contract.
+
+  2. Classify rewrite-b. Use scenario S1 in probe-contract (three URLs; the middle fetchProbe rejects;
+     the others fulfill). State whether the aggregator rejects or returns, the ok/failed counts if it
+     returns, and how many fetchProbe calls start — for BOTH probe-original and rewrite-b.
+
+  3. Classify rewrite-c under S1. Give the audit.log sequence for probe-original vs rewrite-c and name
+     the observable difference.
+
+  4. Classify rewrite-d under scenario S2 in probe-contract (two URLs that both eventually fulfill).
+     State whether fetchProbe starts overlap, and name the observable difference from probe-original.
+
+  5. State which rewrites, if any, are behavior-preserving merges. Then, for probe-original
+     under S1, state the ground-truth return value, metric increments, audit lines, and whether the
+     returned promise rejects.
+artifacts:
+  - id: probe-original
+    type: code
+    label: lighthouse/probe.ts — shipped probeAll (the reference behavior)
+    content: |
+      // lighthouse/probe.ts — the shipped aggregator. This file is the ONLY definition of probeAll.
+      import { fetchProbe } from './fetch';
+      import { metrics } from './metrics';
+      import { audit } from './audit';
+
+      export async function probeAll(
+        urls: string[],
+      ): Promise<{ ok: number; failed: number }> {
+        // allSettled: every mapped fetchProbe(...) starts EAGERLY/concurrently; the aggregator
+        // NEVER rejects from a probe failure — it always returns counts.
+        const results = await Promise.allSettled(urls.map((u) => fetchProbe(u)));
+        let ok = 0;
+        let failed = 0;
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            ok += 1;
+            metrics.inc('probe_ok');
+          } else {
+            failed += 1;
+            metrics.inc('probe_fail');
+            audit.log(String(r.reason)); // one line per rejection, in INPUT order
+          }
+        }
+        return { ok, failed };
+      }
+  - id: probe-contract
+    type: note
+    label: lighthouse probe — observability and canonical semantics (complete)
+    content: |
+      lighthouse probe — observability and canonical semantics (complete for the 3.x helper).
+
+      fetchProbe(url): starts a METERED network probe IMMEDIATELY when the call expression runs.
+      The NUMBER of starts and whether starts OVERLAP in time are OBSERVABLE (quota + start
+      timestamps). fetchProbe may fulfill or reject.
+
+      metrics.inc('probe_ok') / metrics.inc('probe_fail'): OBSERVABLE counters.
+      audit.log(line): append-only; order of lines is OBSERVABLE.
+      Whether probeAll's returned promise REJECTS is OBSERVABLE to callers.
+
+      Canonical semantics of probe-original (authoritative):
+        - urls.map((u) => fetchProbe(u)) evaluates every call expression before awaiting, so all
+          probes start concurrently (eager fan-out).
+        - Promise.allSettled NEVER rejects; probeAll always resolves to { ok, failed }.
+        - results are processed in INPUT order (allSettled preserves input order).
+        - Each fulfilled result increments probe_ok once; each rejected result increments
+          probe_fail once and appends String(reason) to the audit log.
+        - A rejection of one probe does NOT prevent other probes from starting or being counted.
+
+      Scenarios:
+        S1: urls = ['a', 'b', 'c']; fetchProbe('a') fulfills; fetchProbe('b') rejects with Error('B');
+            fetchProbe('c') fulfills. All three call expressions run during the map.
+        S2: urls = ['x', 'y']; both eventually fulfill. Observable question: do the two fetchProbe
+            starts overlap (concurrent) or is the second start delayed until the first settles?
+
+      This note plus probe-original are the complete behavioral contract. There is no retry layer and
+      no other aggregator entry point.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — "same allSettled, reduce instead of a mutable loop"
+    content: |
+      // rewrite-a — proposed by engineer A. "Same allSettled fan-out; tidier accumulation."
+      export async function probeAll(
+        urls: string[],
+      ): Promise<{ ok: number; failed: number }> {
+        const results = await Promise.allSettled(urls.map((u) => fetchProbe(u)));
+        return results.reduce(
+          (acc, r) => {
+            if (r.status === 'fulfilled') {
+              metrics.inc('probe_ok');
+              return { ok: acc.ok + 1, failed: acc.failed };
+            }
+            metrics.inc('probe_fail');
+            audit.log(String(r.reason));
+            return { ok: acc.ok, failed: acc.failed + 1 };
+          },
+          { ok: 0, failed: 0 },
+        );
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — "Promise.all is simpler when we just need counts"
+    content: |
+      // rewrite-b — proposed by engineer B. "Promise.all is simpler when we just need counts."
+      export async function probeAll(
+        urls: string[],
+      ): Promise<{ ok: number; failed: number }> {
+        try {
+          const values = await Promise.all(urls.map((u) => fetchProbe(u)));
+          for (const _ of values) metrics.inc('probe_ok');
+          return { ok: values.length, failed: 0 };
+        } catch (err) {
+          metrics.inc('probe_fail');
+          audit.log(String(err));
+          throw err;
+        }
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — "count failures without auditing the reason string"
+    content: |
+      // rewrite-c — proposed by engineer C. "We only need counts; skip noisy audit lines."
+      export async function probeAll(
+        urls: string[],
+      ): Promise<{ ok: number; failed: number }> {
+        const results = await Promise.allSettled(urls.map((u) => fetchProbe(u)));
+        let ok = 0;
+        let failed = 0;
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            ok += 1;
+            metrics.inc('probe_ok');
+          } else {
+            failed += 1;
+            metrics.inc('probe_fail');
+            // audit.log omitted — "counts are enough"
+          }
+        }
+        return { ok, failed };
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — "sequential try/catch is easier to read"
+    content: |
+      // rewrite-d — proposed by engineer D. "A plain loop is easier to read than allSettled."
+      export async function probeAll(
+        urls: string[],
+      ): Promise<{ ok: number; failed: number }> {
+        let ok = 0;
+        let failed = 0;
+        for (const u of urls) {
+          try {
+            await fetchProbe(u);
+            ok += 1;
+            metrics.inc('probe_ok');
+          } catch (err) {
+            failed += 1;
+            metrics.inc('probe_fail');
+            audit.log(String(err));
+          }
+        }
+        return { ok, failed };
+      }
+tags: [refactoring, behavior-preservation, promise, allSettled, concurrency]

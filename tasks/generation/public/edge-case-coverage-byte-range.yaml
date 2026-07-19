@@ -1,0 +1,169 @@
+id: edge-case-coverage-byte-range
+version: 1.0.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: Parse a Single HTTP Byte Range Across Every Declared Boundary Case
+summary: >-
+  A service accepts a deliberately narrow single-range grammar with strict decimal parsing,
+  suffix and open-ended semantics, zero-length resources, overflow rejection, and a three-way
+  result. Five parsers differ by one edge each; exactly one handles the complete matrix.
+prompt: |
+  Judge only against range-contract and integer-semantics. The edge list R1..R8 is exhaustive.
+  candidate-manifest is the complete submission set. Cite artifact ids and use conforms / violates.
+
+  1. Classify candidate-a through candidate-e.
+  2. For each violation, name the missed edge R1..R8 and the first range-vector that exposes it.
+  3. Identify the unique conforming candidate.
+  4. Compute the exact result for V4, V5, V8, V10, and V12 under the contract.
+  5. Explain why suffix length zero is malformed while a positive suffix on an empty resource is
+     unsatisfiable. Do not merge the invalid and unsatisfiable result variants.
+  6. Evaluate reviewer claims about accepting the first member of a multi-range and clamping an
+     overflowing decimal.
+artifacts:
+  - id: range-contract
+    type: spec
+    label: Complete parseByteRange contract
+    content: |
+      parseByteRange(header: string, size: number): RangeResult
+      RangeResult =
+        | { kind: 'range'; start: number; end: number }
+        | { kind: 'invalid' }
+        | { kind: 'unsatisfiable' }
+
+      Preconditions: size is a non-negative safe integer. The following edges are complete.
+
+      R1 Grammar is exactly bytes=FIRST-LAST, bytes=FIRST-, or bytes=-SUFFIX. The unit is lowercase,
+         no whitespace is accepted anywhere, and exactly one range member is allowed.
+      R2 Every present decimal is canonical ASCII digits: '0' or [1-9][0-9]*. Empty fields are
+         allowed only where the three grammar forms show them.
+      R3 Parse decimals without accepting values greater than Number.MAX_SAFE_INTEGER. Overflow is
+         invalid, never rounded or clamped.
+      R4 Closed FIRST-LAST requires FIRST <= LAST. If FIRST >= size the result is unsatisfiable.
+         Otherwise end is min(LAST, size - 1).
+      R5 Open FIRST- is unsatisfiable when FIRST >= size; otherwise it selects FIRST..size-1.
+      R6 Suffix -SUFFIX requires SUFFIX > 0. SUFFIX zero is invalid. On a non-empty resource it
+         selects max(size-SUFFIX, 0)..size-1.
+      R7 No range can be satisfied for size zero. A grammatically valid, positive request against
+         size zero is unsatisfiable; grammar or numeric failures remain invalid.
+      R8 Return exactly one declared variant and never throw for a string header.
+  - id: integer-semantics
+    type: code
+    label: Shared strict decimal helper
+    content: |
+      function decimal(text: string): number | null {
+        if (!/^(0|[1-9][0-9]*)$/.test(text)) return null;
+        let n = 0;
+        for (const ch of text) {
+          n = n * 10 + (ch.charCodeAt(0) - 48);
+          if (!Number.isSafeInteger(n)) return null;
+        }
+        return n;
+      }
+
+      decimal('0') === 0
+      decimal('01') === null
+      decimal('9007199254740991') === 9007199254740991
+      decimal('9007199254740992') === null
+      This helper has no side effects and is available unchanged to every candidate.
+  - id: range-vectors
+    type: table
+    label: Authoritative edge matrix
+    content: |
+      id   size  header                          required
+      V1   10    bytes=0-0                       range 0..0
+      V2   10    bytes=2-5                       range 2..5
+      V3   10    bytes=8-99                      range 8..9
+      V4   10    bytes=10-20                     unsatisfiable
+      V5   10    bytes=7-                        range 7..9
+      V6   10    bytes=10-                       unsatisfiable
+      V7   10    bytes=-3                        range 7..9
+      V8   10    bytes=-30                       range 0..9
+      V9   10    bytes=-0                        invalid
+      V10   0    bytes=-3                        unsatisfiable
+      V11   0    bytes=0-0                       unsatisfiable
+      V12  10    bytes=0-1,4-5                   invalid
+      V13  10    bytes=01-2                      invalid
+      V14  10    bytes=5-4                       invalid
+      V15  10    bytes=9007199254740992-          invalid
+      V16  10    Bytes=0-1                       invalid
+      V17  10    bytes=0 -1                      invalid
+  - id: candidates
+    type: code
+    label: Five candidate parsers
+    content: |
+      const invalid = () => ({ kind: 'invalid' });
+      const noRange = () => ({ kind: 'unsatisfiable' });
+      const range = (start, end) => ({ kind: 'range', start, end });
+
+      // candidate-a
+      function candidateA(header, size) {
+        const m = /^bytes=([^,]*)-([^,]*)$/.exec(header);
+        if (!m || (m[1] === '' && m[2] === '')) return invalid();
+        const first = m[1] === '' ? null : decimal(m[1]);
+        const last = m[2] === '' ? null : decimal(m[2]);
+        if ((m[1] !== '' && first === null) || (m[2] !== '' && last === null)) return invalid();
+        if (first === null) {
+          if (last === 0) return invalid();
+          if (size === 0) return noRange();
+          return range(Math.max(size - last, 0), size - 1);
+        }
+        if (last !== null && first > last) return invalid();
+        if (first >= size) return noRange();
+        return range(first, last === null ? size - 1 : Math.min(last, size - 1));
+      }
+
+      // candidate-b: suffix start is not clamped.
+      function candidateB(header, size) {
+        const result = candidateA(header, size);
+        if (/^bytes=-[1-9][0-9]*$/.test(header) && size > 0) {
+          const suffix = decimal(header.slice(7));
+          return range(size - suffix, size - 1);
+        }
+        return result;
+      }
+
+      // candidate-c: open range uses size as an inclusive end.
+      function candidateC(header, size) {
+        const result = candidateA(header, size);
+        const m = /^bytes=((?:0|[1-9][0-9]*))-$/.exec(header);
+        if (m && decimal(m[1]) < size) return range(decimal(m[1]), size);
+        return result;
+      }
+
+      // candidate-d: silently selects the first member.
+      function candidateD(header, size) {
+        if (header.includes(',')) return candidateA(header.slice(0, header.indexOf(',')), size);
+        return candidateA(header, size);
+      }
+
+      // candidate-e: numeric conversion rounds overflow before the normal logic.
+      function candidateE(header, size) {
+        const m = /^bytes=([0-9]*)-([0-9]*)$/.exec(header);
+        if (!m || (m[1] === '' && m[2] === '')) return invalid();
+        const first = m[1] === '' ? null : Number(m[1]);
+        const last = m[2] === '' ? null : Number(m[2]);
+        if (first === null) {
+          if (last === 0) return invalid();
+          if (size === 0) return noRange();
+          return range(Math.max(size - last, 0), size - 1);
+        }
+        if (last !== null && first > last) return invalid();
+        if (first >= size) return noRange();
+        return range(first, last === null ? size - 1 : Math.min(last, size - 1));
+      }
+  - id: candidate-manifest
+    type: note
+    label: Exhaustive candidate inventory and review thread
+    content: |
+      candidate-a through candidate-e are complete and are the only submissions. candidateA is the
+      exact function shown; the other candidates intentionally delegate to it only where shown.
+
+      Reviewer Jo says a multi-range can be made useful by accepting its first member. The contract
+      owner replies that R1 deliberately rejects negotiation ambiguity.
+
+      Reviewer Dev says numbers beyond the safe-integer limit can be clamped because every such
+      start is unsatisfiable anyway. The contract owner replies that R3 classifies overflow as
+      invalid before resource-bound checks, and callers expose invalid versus unsatisfiable
+      differently.
+tags: [generation, edge-case-coverage, http, byte-range, parser]

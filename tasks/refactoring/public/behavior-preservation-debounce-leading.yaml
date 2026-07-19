@@ -1,0 +1,185 @@
+id: behavior-preservation-debounce-leading
+version: 1.1.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: Refactoring a Leading Debounce Without Losing Its Trailing Call
+summary: >-
+  Four rewrites restructure a leading-edge debounce whose timer callback captures whether the call
+  ran on the leading edge. Classify each rewrite as behavior-preserving, behavior-changing, or
+  goal-missing, tracing invocation values and scheduler times in the given scenarios.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (debounce-original, scheduler-contract,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to restructure debounceLeading for readability without changing any
+  observable behavior: the values passed to fn, their order, and their scheduler times. The returned
+  wrapper's return value is not observable.
+
+  1. Classify rewrite-a. Trace scenarios S1, S2, and S3 from scheduler-contract.
+  2. Classify rewrite-b. For S1, state whether fn runs at t=0 or t=10 and with which value.
+  3. Classify rewrite-c. For S2, give the complete fn invocation sequence and explain how both the
+     timer deadline and the callback's captured runLeading value differ from debounce-original.
+  4. Classify rewrite-d. For S1, give every fn invocation and scheduler time.
+  5. State which rewrites, if any, are behavior-preserving and therefore meet the restructuring
+     goal. Then state the ground-truth fn invocations for debounce-original in all three scenarios.
+artifacts:
+  - id: debounce-original
+    type: code
+    label: pulse/debounce.ts — shipped leading debounce
+    content: |
+      type Timer = { readonly token: number };
+      type Scheduler = {
+        set(delayMs: number, cb: () => void): Timer;
+        clear(timer: Timer): void;
+      };
+
+      export function debounceLeading<T>(
+        fn: (value: T) => void,
+        waitMs: number,
+        leading: boolean,
+        scheduler: Scheduler,
+      ): (value: T) => void {
+        let timer: Timer | undefined;
+        let latestValue: T | undefined;
+
+        return (value: T): void => {
+          const runLeading = leading && timer === undefined;
+          latestValue = value;
+
+          if (timer !== undefined) scheduler.clear(timer);
+          timer = scheduler.set(waitMs, () => {
+            timer = undefined;
+            const trailingValue = latestValue;
+            latestValue = undefined;
+            if (!runLeading && trailingValue !== undefined) fn(trailingValue);
+          });
+
+          if (runLeading) fn(value);
+        };
+      }
+  - id: scheduler-contract
+    type: spec
+    label: complete timing and observability contract
+    content: |
+      Scheduler semantics for this task are complete:
+        - scheduler.set(d, cb) returns a defined timer token and schedules cb exactly d milliseconds
+          after that set call.
+        - scheduler.clear(token) prevents that token's callback permanently. It does not mutate the
+          caller's timer variable.
+        - Calls at a timestamp run before callbacks scheduled for that same timestamp.
+        - fn and scheduler operations do not throw. Values in the scenarios are never undefined.
+        - There are no callers, timers, or observable effects beyond those shown here.
+
+      A debounce quiet period is measured from the MOST RECENT wrapper call. With leading=true, the
+      first call in an idle period invokes fn immediately. A later call before the timer fires
+      cancels and replaces that timer; the last such value is invoked once at the end of the new
+      quiet period. A single leading call has no duplicate trailing invocation. With leading=false,
+      only the latest value is invoked after a full quiet period.
+
+      Scenarios (waitMs = 10):
+        S1: leading=true; wrapper('A') at t=0; no other calls.
+            Reference: fn('A') at t=0 only. The t=10 callback clears state but skips fn.
+        S2: leading=true; wrapper('A') at t=0, wrapper('B') at t=4, wrapper('C') at t=7.
+            Reference: fn('A') at t=0, then fn('C') at t=17. Cleared callbacks never run.
+        S3: leading=false; wrapper('A') at t=0, wrapper('B') at t=4.
+            Reference: fn('B') at t=14 only.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — extract exact timer replacement into a nested helper
+    content: |
+      export function debounceLeading<T>(
+        fn: (value: T) => void, waitMs: number, leading: boolean, scheduler: Scheduler,
+      ): (value: T) => void {
+        let timer: Timer | undefined;
+        let latestValue: T | undefined;
+
+        const schedule = (skipTrailing: boolean): void => {
+          if (timer !== undefined) scheduler.clear(timer);
+          timer = scheduler.set(waitMs, () => {
+            timer = undefined;
+            const trailingValue = latestValue;
+            latestValue = undefined;
+            if (!skipTrailing && trailingValue !== undefined) fn(trailingValue);
+          });
+        };
+
+        return (value: T): void => {
+          const runLeading = leading && timer === undefined;
+          latestValue = value;
+          schedule(runLeading);
+          if (runLeading) fn(value);
+        };
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — schedule first, then decide whether this is the leading call
+    content: |
+      export function debounceLeading<T>(
+        fn: (value: T) => void, waitMs: number, leading: boolean, scheduler: Scheduler,
+      ): (value: T) => void {
+        let timer: Timer | undefined;
+        let latestValue: T | undefined;
+
+        return (value: T): void => {
+          latestValue = value;
+          if (timer !== undefined) scheduler.clear(timer);
+          timer = scheduler.set(waitMs, () => {
+            timer = undefined;
+            const trailingValue = latestValue;
+            latestValue = undefined;
+            if (trailingValue !== undefined) fn(trailingValue);
+          });
+          const runLeading = leading && timer === undefined;
+          if (runLeading) fn(value);
+        };
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — keep one timer for the whole burst
+    content: |
+      export function debounceLeading<T>(
+        fn: (value: T) => void, waitMs: number, leading: boolean, scheduler: Scheduler,
+      ): (value: T) => void {
+        let timer: Timer | undefined;
+        let latestValue: T | undefined;
+
+        return (value: T): void => {
+          const runLeading = leading && timer === undefined;
+          latestValue = value;
+          if (timer === undefined) {
+            timer = scheduler.set(waitMs, () => {
+              timer = undefined;
+              const trailingValue = latestValue;
+              latestValue = undefined;
+              if (!runLeading && trailingValue !== undefined) fn(trailingValue);
+            });
+          }
+          if (runLeading) fn(value);
+        };
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — always flush the latest value when the timer fires
+    content: |
+      export function debounceLeading<T>(
+        fn: (value: T) => void, waitMs: number, leading: boolean, scheduler: Scheduler,
+      ): (value: T) => void {
+        let timer: Timer | undefined;
+        let latestValue: T | undefined;
+
+        return (value: T): void => {
+          const runLeading = leading && timer === undefined;
+          latestValue = value;
+          if (timer !== undefined) scheduler.clear(timer);
+          timer = scheduler.set(waitMs, () => {
+            timer = undefined;
+            const trailingValue = latestValue;
+            latestValue = undefined;
+            if (trailingValue !== undefined) fn(trailingValue);
+          });
+          if (runLeading) fn(value);
+        };
+      }
+tags: [refactoring, behavior-preservation, debounce, timers, leading-edge]

@@ -1,0 +1,129 @@
+id: authz-grpc-stream-rebind
+version: 1.0.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Authorized gRPC Stream Can Rebind to a Foreign Workspace
+summary: >-
+  A Go telemetry service authenticates a bidirectional stream once and authorizes its initial workspace,
+  but later subscribe frames can replace the workspace id without repeating ownership checks. Reconstruct
+  the stream state machine, distinguish intended device sharing from cross-tenant leakage, and design an
+  authorization invariant that survives every rebind.
+prompt: |
+  Review the fictional PulseDeck service using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use vulnerable and not-a-vulnerability. Do not provide exploit code or operational abuse
+  instructions.
+
+  1. Reconstruct authentication, workspace membership, device visibility, and stream-state transitions
+     from handshake through every Subscribe frame.
+  2. Identify the single reachable cross-workspace disclosure. Give the minimum message sequence and
+     trace the exact source, stale authorization decision, repository predicate, and outbound sink.
+  3. Classify cases A through F in stream-matrix as vulnerable or not-a-vulnerability and state exactly
+     which samples may be emitted.
+  4. Explain why a valid JWT, membership in W-A, device D-7's shared flag, and server-side protobuf
+     decoding do not authorize W-B device D-9. Explain why case F is intended.
+  5. Classify P1 through P4 in patch-candidates. State the per-message authorization and fail-closed
+     invariants that the adequate patch enforces, including membership revocation during a long stream.
+  6. Specify deterministic tests for initial subscribe, authorized rebind, foreign rebind, revoked
+     membership, duplicate frames, and cancellation without leaking foreign object existence.
+
+  The RPC and repository inventories are exhaustive; no interceptor or row-level policy is omitted.
+artifacts:
+  - id: rpc-contract
+    type: spec
+    label: telemetry.proto and authoritative visibility contract
+    content: |
+      rpc Watch(stream WatchRequest) returns (stream Sample);
+      message WatchRequest { string workspace_id = 1; repeated string device_ids = 2; }
+
+      - The first frame selects a workspace. Later frames replace the subscription and may select a
+        different workspace, but each frame must independently authorize the caller for that workspace.
+      - private devices are visible to active members of their owning workspace.
+      - shared devices are shared only among active members of their owning workspace.
+      - A missing, foreign, or unauthorized workspace/device set terminates the stream with NOT_FOUND;
+        no partial samples or existence details are emitted.
+      Membership may be revoked while a stream is open; every Subscribe frame must use current state.
+  - id: interceptor-and-handler
+    type: code
+    label: Go interceptor and Watch handler
+    content: |
+      func JWTStreamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo,
+        handler grpc.StreamHandler) error {
+        claims, err := verifyBearer(metadata.ValueFromIncomingContext(ss.Context(), "authorization"))
+        if err != nil { return status.Error(codes.Unauthenticated, "invalid token") }
+        return handler(srv, &claimsStream{ServerStream:ss, ctx:withUser(ss.Context(), claims.Subject)})
+      }
+
+      func (s *Server) Watch(stream Telemetry_WatchServer) error {
+        first, err := stream.Recv()
+        if err != nil { return err }
+        if !s.members.Active(stream.Context(), userID(stream.Context()), first.WorkspaceId) {
+          return status.Error(codes.NotFound, "not found")
+        }
+        req := first
+        for {
+          currentWorkspace := req.WorkspaceId
+          devices := s.devices.ByWorkspaceAndIDs(currentWorkspace, req.DeviceIds)
+          for sample := range s.samples.Subscribe(devices) {
+            if err := stream.Send(sample); err != nil { return err }
+          }
+          req, err = stream.Recv()
+          if err == io.EOF { return nil }
+          if err != nil { return err }
+        }
+      }
+      JWTStreamInterceptor runs once. The shown Active call is the only membership check.
+  - id: repository-semantics
+    type: code
+    label: complete device repository and sample sink
+    content: |
+      ByWorkspaceAndIDs(workspaceID, ids):
+        SELECT * FROM devices
+        WHERE workspace_id=$1 AND id = ANY($2)
+          AND visibility IN ('private','shared')
+
+      The query is parameterized and correctly scopes devices to the workspace supplied by the handler,
+      but it does not receive a user id. samples.Subscribe publishes full measurement values for every
+      returned device. Despite its legacy name, Subscribe is a finite snapshot operation: it emits exactly
+      one current Sample per returned device in request-id order, then closes its channel before the handler's
+      next Recv. It does not spawn a background subscription. stream.Send awaits each write and is the only
+      external disclosure sink. Therefore every listed frame is processed completely before the next frame.
+  - id: fixture
+    type: table
+    label: exhaustive users, memberships, and devices
+    content: |
+      Memberships: U-1/W-A active; U-1/W-B absent; U-2/W-B active.
+      Devices:
+        D-7 W-A shared  sample=temperature:21
+        D-8 W-A private sample=pressure:1008
+        D-9 W-B private sample=door:open
+        D-10 W-B shared sample=humidity:61
+      No global admins, cross-workspace grants, public devices, or database RLS exist.
+  - id: stream-matrix
+    type: table
+    label: deterministic traces for authenticated U-1
+    content: |
+      A frames=[(W-A,[D-8])]                         -> Sample(D-8)
+      B frames=[(W-B,[D-9])]                         -> NOT_FOUND, no samples
+      C frames=[(W-A,[D-7]),(W-B,[D-9])]             -> Sample(D-7), then Sample(D-9)
+      D frames=[(W-A,[D-8]),(W-B,[D-10,D-9])]        -> Sample(D-8), then D-10 and D-9
+      E frames=[(W-A,[D-9])]                         -> no samples for D-9
+      F authenticated U-2 frames=[(W-B,[D-10])]      -> Sample(D-10)
+      Between frames in C, U-1 remains active only in W-A. Results are reproduced from the shown code.
+      The client sends the listed frames in order and half-closes after the final frame; gRPC may buffer the
+      next frame while the finite snapshot for the prior frame is sent.
+  - id: patch-candidates
+    type: diff
+    label: proposed authorization patches
+    content: |
+      P1: Reject any second frame. This blocks the leak but violates the documented rebind contract.
+      P2: Keep a process-local set of workspace ids authorized earlier in the stream and reuse it.
+          Revocation is never observed and a foreign id can still be added before lookup.
+      P3: On every frame, one repository operation must independently return a current active membership
+          row for (context user, request workspace) and the requested devices scoped through that
+          membership. Require the membership row even when the de-duplicated requested set is empty;
+          also require the authorized device count to equal the de-duplicated requested count. Terminate
+          with generic NOT_FOUND before Subscribe if either check fails.
+      P4: Filter unauthorized devices from each frame and stream the authorized subset.
+          This prevents some bytes but violates all-or-nothing behavior and reveals object existence.
+tags: [security, authz-boundary, grpc, streaming, tenant-isolation]

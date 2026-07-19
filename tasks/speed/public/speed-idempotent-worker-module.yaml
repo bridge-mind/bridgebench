@@ -1,0 +1,46 @@
+id: speed-idempotent-worker-module
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: expert
+title: Generate an Idempotent Lease-Based Queue Worker
+summary: Produce a full TypeScript queue worker with ownership-checked leases, idempotent completion, retry classification, and injectable time.
+prompt: |
+  Write a complete TypeScript module `worker.ts` implementing [interfaces] and every rule in
+  [worker-contract]. Emit the full file only. Do not add dependencies.
+artifacts:
+  - id: interfaces
+    type: spec
+    label: Required public interfaces
+    content: |
+      export type Job = { id: string; payload: unknown; attempts: number };
+      export type Lease = { job: Job; token: string; expiresAtMs: number };
+      export interface Queue {
+        acquire(workerId: string, leaseMs: number): Promise<Lease | null>;
+        renew(jobId: string, token: string, leaseMs: number): Promise<boolean>;
+        complete(jobId: string, token: string, result: unknown): Promise<"completed" | "already-completed" | "lost-lease">;
+        retry(jobId: string, token: string, delayMs: number, reason: string): Promise<"scheduled" | "lost-lease">;
+        fail(jobId: string, token: string, reason: string): Promise<"failed" | "lost-lease">;
+      }
+      export interface Handler { run(payload: unknown, signal: AbortSignal): Promise<unknown>; }
+      export interface Clock { now(): number; sleep(ms: number): Promise<void>; }
+      export interface Logger { info(event: string, fields: Record<string, unknown>): void; error(event: string, fields: Record<string, unknown>): void; }
+  - id: worker-contract
+    type: spec
+    label: Exhaustive worker behavior
+    content: |
+      Export class Worker with constructor(queue, handler, clock, logger, workerId, options).
+      options = { leaseMs: number; maxAttempts: number; idleMs: number } and must reject
+      non-positive values. `run(signal)` loops until signal is aborted. On no job, sleep
+      idleMs using Clock. For a lease, start renewal after floor(leaseMs/2); renewal repeats
+      at that interval and aborts the per-job controller if ownership is lost. Compose the
+      outer signal with the per-job controller without AbortSignal.any.
+
+      On handler success call complete exactly once. Treat completed and already-completed
+      as success; log lost-lease without a second terminal action. On handler error: if
+      ownership was lost, log only; otherwise sanitize the reason to the Error message or
+      "unknown error". If job.attempts >= maxAttempts call fail once. Otherwise call retry
+      once with delay min(30_000, 250 * 2 ** max(0, attempts - 1)). Always stop renewal and
+      remove abort listeners in finally. Do not hold an unawaited renewal rejection. Never
+      log payloads, lease tokens, or handler results.
+tags: [typescript, queue, idempotency, leases, cancellation]

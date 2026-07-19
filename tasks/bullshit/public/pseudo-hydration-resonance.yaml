@@ -1,0 +1,55 @@
+id: pseudo-hydration-resonance
+version: 1.0.0
+category: bullshit
+cluster: plausible-pseudoscience
+difficulty: expert
+title: The Hydration Resonance Frequency of a Server Component
+summary: A web-performance proposal blends stream chunks, event-loop timing, and physical resonance despite an exhaustive hydration pipeline with no oscillatory mechanism.
+prompt: |
+  Separate real hydration mechanics from confident pseudo-physics. For each bogus mechanism,
+  name the legitimate concepts it combines, cite the pipeline boundary, restate a valid
+  performance question, and answer it from the trace.
+
+  1. Compute time to first byte and time from first byte to interactive.
+  2. Report the component tree's hydration resonance frequency in hertz.
+  3. Identify the actual 240 ms blocking interval and its code owner.
+  4. Compute the proposed chunk wavelength from the 18 KiB payload and DOM depth.
+  5. Determine which candidate reduces the blocking interval without changing HTML.
+  6. State whether streaming earlier can improve TTFB even though resonance is nonexistent.
+artifacts:
+  - id: hydration-contract
+    type: spec
+    label: Complete application hydration pipeline
+    content: |
+      Server renders HTML and RSC payload chunks over HTTP. The browser parses HTML,
+      downloads JavaScript, executes modules, and attaches handlers during hydration.
+      Performance quantities are bytes, timestamps, tasks, network timing, parse/compile
+      duration, and DOM work. The pipeline defines no resonance, frequency, wavelength,
+      phase lock, component vibration, or conversion from DOM depth to physical distance.
+  - id: browser-trace
+    type: log
+    label: Complete navigation trace
+    content: |
+      navigationStart=0ms
+      responseStart(first byte)=80ms
+      HTML complete=130ms; RSC payload=18KiB
+      app.js download complete=180ms
+      main-thread task parseChartLibrary start=190ms end=430ms owner=Chart.client.tsx
+      hydration handlers attached=455ms
+      first input accepted=460ms
+      DOM maximum depth=24 nodes
+  - id: bundle-profile
+    type: table
+    label: Candidate measurements
+    content: |
+      candidate A | current eager chart import | blocking task=240ms | interactive=460ms
+      candidate B | dynamic import chart after idle | blocking task=38ms | interactive=258ms
+      candidate C | same eager import, split RSC into 3KiB chunks | blocking task=240ms | interactive=448ms
+      All candidates render byte-identical initial HTML.
+  - id: proposal
+    type: note
+    label: Unverified resonance proposal
+    content: |
+      The author divides RSC bytes by DOM depth to derive a chunk wavelength and asks the
+      team to tune stream cadence to the server component tree's hydration resonance.
+tags: [plausible-pseudoscience, react, hydration, streaming, web-performance]

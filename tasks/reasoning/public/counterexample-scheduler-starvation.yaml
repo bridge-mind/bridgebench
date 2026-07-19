@@ -1,9 +1,9 @@
 id: counterexample-scheduler-starvation
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: formal-counterexample
 difficulty: expert
-title: FairShare Scheduler Aging Invariant and the Reindex Wait-Clock Reset
+title: Auditing the FairShare Scheduler Starvation-Freedom Claim
 summary: A scheduler team claims its priority-aging design is starvation-free with a concrete wait bound. The aging code is present, the unit suite is green, yet a low-priority job never runs in production. Decide whether the shipped scheduler satisfies the claimed invariant, and if not produce the shortest concrete starvation trace, isolate the diverging spec clause and code line, and judge whether a proposed force-run patch fixes it.
 prompt: |
   FairShare Scheduler v2 is a single-core tick scheduler. Its design uses priority aging so that a
@@ -175,8 +175,6 @@ artifacts:
 
       // NOTE: no test sustains arrivals across ticks. Every case above drains to an empty queue,
       // so a carried-over job never competes with a fresh arrival for more than the tick it runs.
-      // The aging path is never actually exercised under sustained contention, and reindex is only
-      // ever called on queues that are about to empty, where resetting enqueuedAt is harmless.
   - id: observed-run
     type: table
     label: Recorded production run under a saturating stream (AGE_STEP = 4)
@@ -198,9 +196,7 @@ artifacts:
       9    | H9      | H9  | 9            | 1      | 2       | {L}
       10   | H10     | H10 | 10           | 1      | 2       | {L}
 
-      L is still queued after tick 10 with effective priority 1. It has run zero times. Note that
-      L.enqueuedAt tracks the tick number exactly, never the constant 0 it was enqueued with; its
-      recorded wait is 0 every tick.
+      L is still queued after tick 10 with effective priority 1. It has run zero times.
   - id: scheduler-debug
     type: log
     label: Shipped scheduler debug log (first ticks of the production run)
@@ -213,20 +209,20 @@ artifacts:
       [t=0] effective: L=1, H0=2
       [t=0] select -> H0 ; queue={L}
       [t=1] arrivals: H1(base=2)
-      [t=1] reindex: L 0->1, H1 1->1        # L wait clock moved from 0 to 1
+      [t=1] reindex: L 0->1, H1 1->1
       [t=1] effective: L=1, H1=2
       [t=1] select -> H1 ; queue={L}
       [t=2] arrivals: H2(base=2)
-      [t=2] reindex: L 1->2, H2 2->2        # L wait clock moved from 1 to 2
+      [t=2] reindex: L 1->2, H2 2->2
       [t=2] effective: L=1, H2=2
       [t=2] select -> H2 ; queue={L}
       [t=3] arrivals: H3(base=2)
-      [t=3] reindex: L 2->3, H3 3->3        # L wait clock moved from 2 to 3
+      [t=3] reindex: L 2->3, H3 3->3
       [t=3] effective: L=1, H3=2
       [t=3] select -> H3 ; queue={L}
       [t=4] arrivals: H4(base=2)
-      [t=4] reindex: L 3->4, H4 4->4        # L wait clock moved from 3 to 4
-      [t=4] effective: L=1, H4=2            # under monotonic wait, eff(L) would be 2 here
+      [t=4] reindex: L 3->4, H4 4->4
+      [t=4] effective: L=1, H4=2
       [t=4] select -> H4 ; queue={L}
   - id: claim
     type: note

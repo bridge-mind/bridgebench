@@ -1,5 +1,5 @@
 id: reversed-dependency-failure
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: reversed-causality
 difficulty: expert
@@ -227,22 +227,12 @@ artifacts:
       11:05:05 pagerbot: CRIT checkout-api 5xx 26.2% (minute 11:04) - jumped when the retry
                breaker opened at 11:03:58
       11:05:30 n.abara: checkout is blowing up - are its 500s taking ledger down?
-      11:06:00 s.demir: no. errors flow up the call graph, not down. vault-store started
-               rejecting writes at 10:58:41 when disk hit the 90% throttle watermark.
-               ledger's first 5xx was 11:00:19, checkout's first 500 was 11:01:44. checkout
-               is the last symptom, not the cause. disk has been climbing since 10:48 -
-               right after v4.7.2 went HEALTHY at 10:47:30. the WAL reclaim change; segments
-               piled up from 218 to 390+
       11:06:15 s.demir: forcing a reclaim now - vaultctl wal reclaim --force
       11:07:40 pagerbot: vault-store disk 71% - WRITE_THROTTLE exited 11:07:22
       11:09:05 pagerbot: ledger-core 5xx 0.1% / checkout-api 5xx 0.1% - recovered. retry
                breaker closed 11:08:31
       11:09:30 n.abara: so the 11:04 checkout spike is what pushed vault's disk over the
                edge?
-      11:10:05 s.demir: backwards again. disk crossed 90% at 10:58, six minutes before the
-               11:04 spike - and checkout never talks to vault-store at all. the 11:04 jump
-               is the breaker opening, which STOPPED our retries. read the
-               failure-propagation model before writing the postmortem, please
       11:12:00 s.demir: hotfix v4.7.3 restoring size-based reclaim goes out at 11:52
       11:20:15 IC: INC-3187 resolved as of 11:15; n.abara owns the postmortem draft
   - id: draft-postmortem

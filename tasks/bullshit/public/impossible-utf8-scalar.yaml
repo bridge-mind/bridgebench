@@ -1,0 +1,65 @@
+id: impossible-utf8-scalar
+version: 1.0.0
+category: bullshit
+cluster: impossible-quantities
+difficulty: expert
+title: The Five-Byte UTF-8 Unicode Scalar
+summary: A parser review combines valid byte-offset calculations with requests for Unicode scalars and fixed-width encodings that the declared standards make impossible.
+prompt: |
+  Use the exhaustive encoding rules and the byte dump to answer every deliverable. When a
+  requested value is impossible, show the exact violated bound or definition, redirect to
+  the nearest valid quantity, and compute it. Do not reject valid edge cases merely because
+  they are unusual.
+
+  1. Decode the three Unicode scalar values in the input and give each UTF-8 byte length.
+  2. Report the five-byte UTF-8 scalar beginning at byte offset 1 and its code point.
+  3. Determine whether `sliceFirstTwoScalars` returns valid UTF-8 and give its hexadecimal
+     bytes.
+  4. Compute the smallest unsigned fixed-width integer capable of storing every Unicode
+     scalar value, and contrast that bit width with UTF-8's variable encoded length.
+  5. The ticket requests a `U+110000` sentinel. State why it cannot be a Unicode scalar
+     and identify the representable sentinel already used by the parser.
+artifacts:
+  - id: encoding-contract
+    type: spec
+    label: Complete Unicode scalar and UTF-8 contract
+    content: |
+      Unicode scalar values are exactly U+0000..U+D7FF and U+E000..U+10FFFF. Surrogates
+      U+D800..U+DFFF and values above U+10FFFF are not scalar values.
+
+      Standard UTF-8 encodes one scalar in 1 to 4 bytes:
+      U+0000..U+007F => 1 byte; U+0080..U+07FF => 2 bytes;
+      U+0800..U+FFFF (excluding surrogates) => 3 bytes;
+      U+10000..U+10FFFF => 4 bytes. Five- and six-byte forms are invalid and forbidden.
+      A fixed-width unsigned integer needs 21 value bits to represent 0x10FFFF; the
+      common storage type used here is uint32.
+  - id: parser-code
+    type: code
+    label: UTF-8 scalar slicing helper
+    content: |
+      const EOF_SENTINEL: number | null = null;
+
+      export function sliceFirstTwoScalars(input: Uint8Array): Uint8Array {
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(input);
+        return new TextEncoder().encode([...text].slice(0, 2).join(""));
+      }
+  - id: input-dump
+    type: table
+    label: Exact input bytes and audited decoder output
+    content: |
+      byte offsets:  0    1    2    3    4    5    6    7
+      hex bytes:     41   E2   82   AC   F0   90   8D   88
+
+      Audited decoder segmentation (complete):
+      offset 0, bytes 41             => U+0041 LATIN CAPITAL LETTER A
+      offset 1, bytes E2 82 AC       => U+20AC EURO SIGN
+      offset 4, bytes F0 90 8D 88    => U+10348 GOTHIC LETTER HWAIR
+  - id: parser-ticket
+    type: note
+    label: Unverified parser change request
+    content: |
+      The requester assumes the byte sequence at offset 1 is a single five-byte UTF-8
+      scalar because five bytes remain before the final three continuation bytes. They
+      also propose U+110000 as an EOF scalar so the parser can avoid its current null
+      sentinel. Both assumptions must be checked against the encoding contract.
+tags: [impossible-quantities, unicode, utf8, parsing, byte-offsets]

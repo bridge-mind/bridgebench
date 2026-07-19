@@ -1,10 +1,10 @@
 id: kadane-linear-constant-space
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: constraint-satisfaction
 difficulty: expert
 title: Which maxSubarray Candidate Meets the O(n) Time, O(1) Space, and Purity Constraints
-summary: A spec requires maxSubarray(nums) to compute the maximum contiguous-subarray sum under four declared NON-functional constraints — single linear O(n) scan, O(1) auxiliary space, purity/no-input-mutation, and the correctness contract. All five candidates compute the correct maximum on the vector, so the only axis is the constraints. One decoy allocates an O(n) prefix array, one uses a nested O(n^2) loop, one mutates the input. Classify each conforms/violates and cite the exact violating construct.
+summary: A spec requires maxSubarray(nums) to compute the maximum contiguous-subarray sum under four declared NON-functional constraints — single linear O(n) scan, O(1) auxiliary space, purity/no-input-mutation, and the correctness contract. All five candidates compute the correct maximum on the vector, so the only axis is the constraints. Classify each as conforms or violates and cite the exact violating construct.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, correctness-vector,
   candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite

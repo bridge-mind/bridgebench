@@ -43,13 +43,35 @@ export function speedMetricFor(response: CompetitorSuccess): SpeedMetric {
 }
 
 /**
+ * How many paired trials a speed match runs per competitor. Journaled timings
+ * are the median trial's, so a single provider hiccup or cache warm-up cannot
+ * decide a match. (Journals before arena-v0.5.0 ran a single trial.)
+ */
+export const SPEED_TRIALS = 3;
+
+/**
+ * The trial whose totalMs is the median of the set — the response a speed
+ * match journals. Ties inside the sort resolve by array order, so the
+ * selection is deterministic for a fixed trial sequence.
+ */
+export function medianTrialResponse(trials: readonly CompetitorSuccess[]): CompetitorSuccess {
+  if (trials.length === 0) throw new Error('medianTrialResponse requires at least one trial');
+  const sorted = [...trials].sort(
+    (left, right) => (left.totalMs ?? left.latencyMs) - (right.totalMs ?? right.latencyMs),
+  );
+  return sorted[Math.floor((sorted.length - 1) / 2)]!;
+}
+
+/**
  * Deterministic speed winner: the competitor with the lower total wall-clock
- * completion time wins. An exact tie resolves to modelA; because modelA/modelB
- * assignment is itself randomized per match, this introduces no systematic bias.
+ * completion time wins. An exact millisecond tie returns null — the match
+ * voids as no-contest rather than awarding seat A (journals before
+ * arena-v0.5.0 resolved ties to modelA; their verifiers replay that rule).
  * The runner and the verifier both call this, so the decision is reproducible.
  */
-export function speedWinner(metrics: SpeedMetrics, modelA: string, modelB: string): string {
-  return metrics.a.totalMs <= metrics.b.totalMs ? modelA : modelB;
+export function speedWinner(metrics: SpeedMetrics, modelA: string, modelB: string): string | null {
+  if (metrics.a.totalMs === metrics.b.totalMs) return null;
+  return metrics.a.totalMs < metrics.b.totalMs ? modelA : modelB;
 }
 
 export interface SpeedDecision {
@@ -61,8 +83,10 @@ export interface SpeedDecision {
 /**
  * Decide a speed match from both competitor responses. Applies the liveness
  * gate first (forfeit / no-contest), then — when both competitors are live —
- * decides by lower total wall-clock time. speedMetrics is populated only for a
- * 'speed-decided' outcome; a forfeit or no-contest records none.
+ * decides by lower total wall-clock time. An exact millisecond tie voids the
+ * match (no winner, metrics still journaled as evidence of the tie).
+ * speedMetrics is otherwise populated only for a 'speed-decided' outcome; a
+ * forfeit or liveness no-contest records none.
  */
 export function decideSpeedMatch(
   responseA: CompetitorResponse,
@@ -77,9 +101,10 @@ export function decideSpeedMatch(
       a: speedMetricFor(responseA),
       b: speedMetricFor(responseB),
     };
+    const winnerModelId = speedWinner(speedMetrics, modelA, modelB);
     return {
-      outcome: 'speed-decided',
-      winnerModelId: speedWinner(speedMetrics, modelA, modelB),
+      outcome: winnerModelId === null ? 'no-contest' : 'speed-decided',
+      winnerModelId,
       speedMetrics,
     };
   }

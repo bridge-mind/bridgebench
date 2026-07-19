@@ -1,0 +1,69 @@
+id: speed-pr-review-summary
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: hard
+title: Synthesize a PR Review Summary Across Spec, Diff, and CI
+summary: >-
+  Read a pull-request description, product constraints, code diff, and CI output; then produce a concise
+  review summary with explicit blockers and a clear ship recommendation grounded in all artifacts.
+prompt: |
+  Review [pr-description], [cache-requirements], [diff-snippet], and [ci-output], then produce:
+
+  1. A 4-sentence summary covering intent, expected performance benefit, and what currently breaks.
+  2. Exactly two blocker bullets, each with: the violated requirement and the evidence artifact ID.
+  3. A final verdict line: `VERDICT: request-changes` or `VERDICT: approve` with a one-sentence reason.
+artifacts:
+  - id: pr-description
+    type: note
+    label: Pull request description
+    content: |
+      PR #842: "Add profile read cache to reduce DB pressure"
+      - Adds in-memory cache around GET /api/profile/:userId
+      - Author claim: should reduce repeated DB reads by ~60% on dashboard refreshes
+      - Scope note: write endpoints are unchanged in this PR
+  - id: cache-requirements
+    type: spec
+    label: Product requirements for profile caching
+    content: |
+      Profile endpoint caching requirements:
+      - TTL must be 30 seconds
+      - Any successful profile mutation via PATCH /api/profile/:userId must invalidate that user's cache key
+      - Cache misses must still read from repository and then populate cache
+      - If cache backend fails, request should continue without failing the endpoint
+  - id: diff-snippet
+    type: diff
+    label: Relevant code changes
+    content: |
+      diff --git a/src/profile/profile.service.ts b/src/profile/profile.service.ts
+      @@
+      +const PROFILE_CACHE_TTL_MS = 300000;
+      +
+       async getProfile(userId: string) {
+         const key = `profile:${userId}`;
+         const cached = await this.cache.get<ProfileDto>(key);
+         if (cached) return cached;
+         const profile = await this.repo.getProfile(userId);
+      -  return profile;
+      +  await this.cache.set(key, profile, PROFILE_CACHE_TTL_MS);
+      +  return profile;
+       }
+      @@
+       async updateProfile(userId: string, patch: UpdateProfileDto) {
+         const updated = await this.repo.updateProfile(userId, patch);
+      +  // no cache call here yet
+         return updated;
+       }
+  - id: ci-output
+    type: log
+    label: CI summary excerpt
+    content: |
+      test/profile.service.spec.ts
+        ✓ returns cached profile on cache hit
+        ✓ caches repository result on miss
+        ✗ invalidates cache on updateProfile
+
+      Failure:
+        Expected cache.del("profile:u_42") to have been called once.
+        Received number of calls: 0
+tags: [code-review, synthesis, pull-request]

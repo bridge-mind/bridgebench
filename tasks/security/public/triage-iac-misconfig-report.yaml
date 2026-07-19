@@ -1,16 +1,14 @@
 id: triage-iac-misconfig-report
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: finding-triage
 difficulty: expert
 title: Triage a Bastion IaC Scan Against the Northwind Terraform Config
 summary: >-
   A fictional infrastructure-as-code scanner "Bastion" raised 6 findings against the
-  Northwind Terraform config and declares full-tree coverage. Half are noise: an
-  intended-public CDN bucket, the load balancer's public HTTPS ingress, and an
-  RDS instance encrypted via a module default the scanner can't resolve. Classify
-  each finding as a true positive or a false positive using only the config and the
-  infra baseline, and refuse to inflate. Confirming all 6 is scored as an error.
+  Northwind Terraform config and declares full-tree coverage. Classify each finding
+  as a true positive or a false positive using only the config and the infra
+  baseline, and refuse to inflate. Confirming all 6 is scored as an error.
 prompt: |
   You are the cloud-security engineer triaging an automated IaC scan. The scanner
   "Bastion" ran against the Northwind Terraform configuration and emitted 6 findings

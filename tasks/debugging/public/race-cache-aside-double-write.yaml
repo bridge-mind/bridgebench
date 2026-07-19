@@ -1,0 +1,208 @@
+id: race-cache-aside-double-write
+version: 1.1.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Workspace Quota Cache Reinstates an Older Value After a Successful Update
+summary: >-
+  A workspace administrator updates a quota from 10 to 25, the database commits it, yet later API
+  reads serve 10 for nearly five minutes. Long TTLs, Redis replica lag, transaction isolation, and
+  duplicate update requests all look guilty. Reconcile the complete read/write paths, an observed
+  schedule, and the Redis monitor output to identify the race, rule out the red herrings, and pick
+  the fix that holds.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (quota-code, quota-schema,
+  interleaving-trace, redis-monitor, topology, client-observations, fixes). Cite the artifact id(s)
+  for every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix,
+  shallow-fix.
+
+  The quota service uses cache-aside reads and invalidates Redis after a quota update. An
+  administrator changes workspace ws-17 from a limit of 10 to 25. The update returns 200 and a
+  direct database read reports 25, but a later API read serves 10 for nearly five minutes. Trace the
+  exact interleaving; do not assume the last Redis command must represent the newest database state.
+
+  1. CONCURRENCY DEFECT. Name the single race and cite the exact code locations. State the
+     cache-coherence invariant that is violated and why a delete after the database commit is
+     insufficient in this schedule.
+  2. FAILING SCHEDULE. From interleaving-trace and redis-monitor, construct the exact sequence of
+     reader and writer steps that leaves the cache holding a stale value after the invalidation.
+     Cite the timestamps that prove each step.
+  3. SYMPTOM-TO-CAUSE CHAIN. Connect the client-visible stale response to the Redis entry and the
+     prior database snapshot. State why the update's 200 response and the direct DB read can both
+     be correct while the API read is wrong.
+  4. RED HERRING: LONG CACHE TTL. Explain why TTL=300 seconds makes the symptom last longer but is
+     not the origin, citing quota-code and interleaving-trace. State what would occur with a one-
+     second TTL during the same ordering.
+  5. RED HERRING: REDIS REPLICA LAG OR DATABASE ISOLATION. Explain why neither is involved, citing
+     topology, quota-schema, and redis-monitor. State which primary stores handled the observed
+     operations and why the database committed a monotonic revision.
+  6. ADEQUATE FIX. From fixes, name the one option that closes the race while preserving concurrent
+     reads and the API latency target. State the revision rule that prevents an older snapshot from
+     replacing a newer cached value.
+  7. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is shallow or harmful,
+     naming the interleaving it still permits or the constraint it violates.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: quota-code
+    type: code
+    label: quota-service cache-aside read and invalidating write paths complete
+    content: |
+      // This is the COMPLETE set of application paths that read or write workspace_quota and its
+      // Redis key quota:{workspaceId}. There is no sidecar cache, background invalidator, second
+      // writer, or cache proxy. All Redis commands go to the primary described in topology.
+
+      type Quota = { workspaceId: string; limit: number; revision: number };
+      const keyFor = (workspaceId: string) => `quota:${workspaceId}`;
+
+      export async function getQuota(workspaceId: string): Promise<Quota> {
+        const key = keyFor(workspaceId);
+        const cached = await redis.get(key);
+        if (cached) return JSON.parse(cached); // a cache hit trusts the stored value and revision
+
+        const row = await db.one<Quota>(
+          `SELECT workspace_id AS "workspaceId", limit, revision
+           FROM workspace_quota WHERE workspace_id = $1`,
+          [workspaceId],
+        );
+
+        await redis.set(key, JSON.stringify(row), { EX: 300 });
+        return row;
+      }
+
+      export async function updateQuota(workspaceId: string, newLimit: number): Promise<Quota> {
+        const row = await db.one<Quota>(
+          `UPDATE workspace_quota
+           SET limit = $2, revision = revision + 1, updated_at = now()
+           WHERE workspace_id = $1
+           RETURNING workspace_id AS "workspaceId", limit, revision`,
+          [workspaceId, newLimit],
+        );
+
+        // Invalidate the cached entry after the update commits.
+        await redis.del(keyFor(workspaceId));
+        return row;
+      }
+
+      // Cache invariant: after a successful update returns revision R, the cache must never later
+      // contain a representation whose revision is less than R. Reads must remain concurrent; the
+      // service cannot serialize every cache hit behind a process-wide lock.
+  - id: quota-schema
+    type: spec
+    label: workspace quota schema and revision behavior
+    content: |
+      CREATE TABLE workspace_quota (
+        workspace_id UUID PRIMARY KEY,
+        limit INTEGER NOT NULL CHECK (limit BETWEEN 1 AND 100000),
+        revision BIGINT NOT NULL DEFAULT 1,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      -- The only writer is updateQuota in quota-code. It updates one primary PostgreSQL row with:
+      --   revision = revision + 1
+      -- in the same statement that changes limit. Therefore a committed update has one unambiguous,
+      -- monotonically increasing revision. No trigger, replica writer, migration, or bulk job
+      -- modifies workspace_quota.
+      --
+      -- At 11:00:00Z, ws-17's committed row is:
+      --   (workspace_id='ws-17', limit=10, revision=41)
+      -- After the administrator update in interleaving-trace it is:
+      --   (workspace_id='ws-17', limit=25, revision=42)
+  - id: interleaving-trace
+    type: log
+    label: request and database trace for the stale quota incident
+    content: |
+      # Reader A is GET /v1/workspaces/ws-17/quota. Writer B is PATCH /v1/workspaces/ws-17/quota.
+      # Both use the code in quota-code; all timestamps are from one monotonic clock.
+
+      11:00:00.000  Reader A  Redis GET quota:ws-17 -> (nil)                # cache miss
+      11:00:00.003  Reader A  PostgreSQL primary SELECT ws-17
+                             -> { limit: 10, revision: 41 }
+      11:00:00.004  Reader A  scheduler pause before redis.set(...)
+
+      11:00:00.006  Writer B  PATCH { limit: 25 }
+      11:00:00.008  Writer B  PostgreSQL primary UPDATE ws-17
+                             -> COMMIT { limit: 25, revision: 42 }
+      11:00:00.010  Writer B  Redis DEL quota:ws-17 -> 0                    # no key exists yet
+      11:00:00.011  Writer B  HTTP 200 { limit: 25, revision: 42 }
+
+      11:00:00.014  Reader A  resumes with retained row { limit: 10, revision: 41 }
+      11:00:00.015  Reader A  Redis SET quota:ws-17 '{"limit":10,"revision":41}' EX 300 -> OK
+      11:00:00.016  Reader A  HTTP 200 { limit: 10, revision: 41 }
+
+      11:00:01.000  Reader C  Redis GET quota:ws-17
+                             -> { limit: 10, revision: 41 }                 # cache hit
+      11:00:01.001  Reader C  HTTP 200 { limit: 10, revision: 41 }
+  - id: redis-monitor
+    type: log
+    label: Redis primary MONITOR excerpt for quota ws-17
+    content: |
+      11:00:00.000 [conn=reader-A] "GET" "quota:ws-17"
+      11:00:00.010 [conn=writer-B] "DEL" "quota:ws-17"              # integer reply 0
+      11:00:00.015 [conn=reader-A] "SET" "quota:ws-17"
+                          "{\"workspaceId\":\"ws-17\",\"limit\":10,\"revision\":41}" "EX" "300"
+      11:00:01.000 [conn=reader-C] "GET" "quota:ws-17"
+                          -> "{\"workspaceId\":\"ws-17\",\"limit\":10,\"revision\":41}"
+
+      Redis primary health: role=master  connected_slaves=0  replication_offset=0
+      # Command order in MONITOR output is authoritative.
+  - id: topology
+    type: config
+    label: quota service storage topology and consistency properties
+    content: |
+      postgresql:
+        endpoint: quota-db-primary
+        readReplicas: 0
+        isolation: READ COMMITTED
+        allQuotaReads: primary
+        allQuotaWrites: primary
+      redis:
+        endpoint: quota-cache-primary
+        replicas: 0
+        readPreference: primary
+        evictionPolicy: noeviction
+      api:
+        getQuotaP99BudgetMs: 80
+        concurrentReadTarget: 2000
+  - id: client-observations
+    type: log
+    label: administrator and direct database observations
+    content: |
+      11:00:00.011  PATCH /v1/workspaces/ws-17/quota { "limit": 25 }
+                    -> 200 { "workspaceId": "ws-17", "limit": 25, "revision": 42 }
+
+      11:00:00.020  support diagnostic on quota-db-primary:
+                    SELECT limit, revision FROM workspace_quota WHERE workspace_id='ws-17'
+                    -> { limit: 25, revision: 42 }
+
+      11:00:01.001  GET /v1/workspaces/ws-17/quota
+                    -> 200 { "workspaceId": "ws-17", "limit": 10, "revision": 41 }
+
+      11:05:00.016  GET /v1/workspaces/ws-17/quota after Redis TTL expiry
+                    -> 200 { "workspaceId": "ws-17", "limit": 25, "revision": 42 }
+  - id: fixes
+    type: note
+    label: candidate fixes for cache coherence
+    content: |
+      F1: Use revision-aware write-through for both readers and writers. Store each cache value with
+          its database revision. After updateQuota commits revision R, conditionally write its row
+          to Redis rather than deleting it. When getQuota fills a miss, call one atomic Redis script:
+            set value only if the key is absent or candidate.revision >= cached.revision.
+          The update does not return success until its initial revision-R script write succeeds; a
+          durable outbox retries a transient post-commit cache failure before success is declared.
+
+      F2: Reduce the cache TTL from 300 seconds to 1 second.
+
+      F3: Keep invalidation-only writes, but issue a second DEL 500ms after every update.
+
+      F4: Guard every getQuota and updateQuota with one process-local mutex keyed by workspace ID.
+
+      F5: Disable Redis for quota reads and always query PostgreSQL.
+
+      Constraints:
+        - A successful quota update must not be followed by a cache value with a lower revision.
+        - The API must support 2,000 concurrent reads and p99 below 80ms; serializing cache hits or
+          removing the cache violates this target.
+        - Cache coherence must not rely on an assumed scheduling delay. A reader may be paused for
+          an arbitrary duration between its primary read and its cache fill.
+tags: [debugging, concurrency-defect, cache-aside, race-condition, redis, cache-coherence]

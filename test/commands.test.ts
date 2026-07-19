@@ -103,6 +103,41 @@ describe('CLI contract', () => {
   });
 });
 
+describe('ui run flags', () => {
+  function uiRunCommand(): Command {
+    const program = overrideExits(
+      buildProgram({
+        stdout() {},
+        stderr() {},
+      }),
+    );
+    const ui = program.commands.find((command) => command.name() === 'ui')!;
+    return ui.commands.find((command) => command.name() === 'run')!;
+  }
+
+  it('merges repeated and comma-separated model flags', () => {
+    const run = uiRunCommand();
+    run.parseOptions(['-m', 'acme/one,acme/two', '-m', 'acme/three']);
+    expect(run.opts().model).toEqual(['acme/one', 'acme/two', 'acme/three']);
+  });
+
+  it('validates the run key against the API contract at parse time', () => {
+    const run = uiRunCommand();
+    expect(() => run.parseOptions(['-m', 'acme/one', '--run-key', 'nope key'])).toThrow(/run key/);
+    run.parseOptions(['-m', 'acme/one', '--run-key', 'ui-console-20260715-a1b2c3']);
+    expect(run.opts().runKey).toBe('ui-console-20260715-a1b2c3');
+  });
+
+  it('rejects non-numeric ceilings and accepts temperature zero', () => {
+    const run = uiRunCommand();
+    expect(() => run.parseOptions(['-m', 'acme/one', '--max-tokens', 'zero'])).toThrow(
+      /positive integer/,
+    );
+    run.parseOptions(['-m', 'acme/one', '--temperature', '0']);
+    expect(run.opts().temperature).toBe(0);
+  });
+});
+
 describe('publish configuration', () => {
   it('requires an explicit HTTPS target and admin key', () => {
     expect(() => resolveApiConfig({})).toThrow(/BRIDGEBENCH_API_URL/);

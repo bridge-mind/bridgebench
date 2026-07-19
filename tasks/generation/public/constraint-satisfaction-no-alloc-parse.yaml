@@ -1,0 +1,171 @@
+id: constraint-satisfaction-no-alloc-parse
+version: 1.1.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: parseUInt32Strict — Which Parser Meets Single-Pass and No-Allocation Constraints
+summary: "A strict uint32 parser spec combines functional correctness with non-functional constraints: single-pass parsing, no heap allocations during parse, no library numeric parsers, and correct overflow rejection. Five implementations are reviewed. Classify all candidates against the constraints and identify the precise violating construct for any non-conformer."
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (parser-spec, behavior-vectors, candidates-a,
+  candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every claim. Do not
+  invent constraints and do not ignore one that is stated. The verdict vocabulary is exactly:
+  conforms / violates.
+
+  parser-spec defines C1..C5 and is complete. submission-manifest declares candidate-1..candidate-5
+  the complete set.
+
+  1. Classify each of candidate-1..candidate-5 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single broken constraint (C1..C5) and quote the
+     exact code statement/construct responsible. Include one behavior-vectors row that exposes the issue
+     when applicable.
+
+  3. Identify which candidates, if any, `conform`, and state the outputs a conforming
+     implementation returns for inputs "4294967295", "4294967296", and "0012".
+
+  4. In reviewer-thread, @zoe argues candidate-2 is acceptable because "trim() just normalizes input."
+     State candidate-2's verdict and the clause that refutes this.
+
+  5. Name the candidate that incorrectly rejects the maximum valid value 4294967295 and cite the
+     exact comparison causing the error.
+artifacts:
+  - id: parser-spec
+    type: spec
+    label: parseUInt32Strict specification (complete)
+    content: |
+      parseUInt32Strict(s: string): number | null
+
+      Returns the parsed unsigned 32-bit integer, or null on invalid input.
+
+      Constraints and rules (COMPLETE):
+
+      C1  SINGLE PASS. Parse characters in one left-to-right pass over the original string.
+          No second validation pass over the full input.
+
+      C2  NO ALLOCATION DURING PARSE. Parsing must not allocate derived strings or arrays.
+          Disallowed examples include trim, slice, substring, split, regex replacement, Array.from.
+
+      C3  NO LIBRARY NUMERIC PARSERS. Disallow Number(...), parseInt(...), BigInt(...), unary plus,
+          or any built-in full-string numeric conversion helper.
+
+      C4  OVERFLOW SAFETY. Accept values in [0, 4294967295] and return null above that range.
+          Overflow decision must preserve 4294967295 as valid.
+
+      C5  SYNTAX. Input must be non-empty and contain only ASCII digits [0-9]. Any sign, whitespace,
+          separator, or non-digit character yields null.
+
+      This is the complete contract.
+  - id: behavior-vectors
+    type: table
+    label: authoritative input-output vectors
+    content: |
+      #   input           expected
+      --  -------------   ----------
+      BV1 "0"             0
+      BV2 "42"            42
+      BV3 "0012"          12
+      BV4 "4294967295"    4294967295
+      BV5 "4294967296"    null
+      BV6 ""              null
+      BV7 " 42"           null
+      BV8 "+1"            null
+      BV9 "12a3"          null
+  - id: candidates-a
+    type: code
+    label: candidate-1, candidate-2, candidate-3
+    content: |
+      const MAX = 4294967295;
+
+      // ---- candidate-1 ----
+      function candidate1(s) {
+        if (s.length === 0) return null;
+        let acc = 0;
+        for (let i = 0; i < s.length; i++) {
+          const c = s.charCodeAt(i);
+          if (c < 48 || c > 57) return null;
+          const d = c - 48;
+          if (acc > 429496729 || (acc === 429496729 && d > 5)) return null;
+          acc = acc * 10 + d;
+        }
+        return acc;
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(s) {
+        const t = s.trim();
+        if (t.length === 0) return null;
+        let acc = 0;
+        for (let i = 0; i < t.length; i++) {
+          const c = t.charCodeAt(i);
+          if (c < 48 || c > 57) return null;
+          const d = c - 48;
+          if (acc > 429496729 || (acc === 429496729 && d > 5)) return null;
+          acc = acc * 10 + d;
+        }
+        return acc;
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(s) {
+        if (s.length === 0) return null;
+        if (!/^[0-9]+$/.test(s)) return null;
+        const n = parseInt(s, 10);
+        return n > MAX ? null : n;
+      }
+  - id: candidates-b
+    type: code
+    label: candidate-4 and candidate-5
+    content: |
+      const MAX = 4294967295;
+
+      // ---- candidate-4 ----
+      function candidate4(s) {
+        if (s.length === 0) return null;
+        let acc = 0;
+        for (let i = 0; i < s.length; i++) {
+          const c = s.charCodeAt(i);
+          if (c < 48 || c > 57) return null;
+          acc = acc * 10 + (c - 48);
+          if (acc >= MAX) return null;
+        }
+        return acc;
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(s) {
+        if (s.length === 0) return null;
+        for (let i = 0; i < s.length; i++) {
+          const c = s.charCodeAt(i);
+          if (c < 48 || c > 57) return null;
+        }
+        let acc = 0;
+        for (let i = 0; i < s.length; i++) {
+          const d = s.charCodeAt(i) - 48;
+          if (acc > 429496729 || (acc === 429496729 && d > 5)) return null;
+          acc = acc * 10 + d;
+        }
+        return acc;
+      }
+  - id: reviewer-thread
+    type: note
+    label: review discussion on parsing constraints
+    content: |
+      Review thread for parseUInt32Strict (PR #8462).
+
+      @zoe: "candidate-2 should be okay. trim() just normalizes whitespace and doesn't change parser
+      semantics for numeric content."
+
+      @ian: "No-allocation parsing in this hot path is explicit. Also, leading whitespace must be
+      rejected per syntax, not normalized away."
+
+      @peter: "One candidate uses >= in the overflow check and accidentally rejects the max legal value."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5.
+      This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against constraints C1..C5 and
+      behavior-vectors; submissions that satisfy every constraint are accepted.
+tags: [generation, constraint-satisfaction, parsing, uint32, performance]

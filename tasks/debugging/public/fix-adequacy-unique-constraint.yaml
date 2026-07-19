@@ -1,0 +1,185 @@
+id: fix-adequacy-unique-constraint
+version: 1.1.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Membership Provisioner Reserves Duplicate Seats During Event Replay
+summary: >-
+  During a replay of identity-provider membership events, a workspace ends up with duplicate
+  membership rows and two reserved paid seats for the same external member. Using the provisioner
+  code, schema, delivery topology, concurrent trace, seat audit, and data audit, identify the
+  missing invariant, prove the failing schedule, classify the red herrings, and evaluate the
+  candidate fixes against the requirement to prevent both duplicate rows and duplicate seats.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (provisioner-code, schema,
+  delivery-topology, concurrent-trace, seat-log, data-audit, fixes). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  The membership provisioner consumes identity-provider membership events. A duplicate delivery of
+  the same event is normal under the declared queue contract. During a replay, two consumers on
+  different pods provision the same external member into one workspace, creating duplicate rows and
+  reserving two paid seats. Determine which candidate is an adequate fix: it must prevent future
+  duplicate persistence and ensure the irreversible seat reservation occurs exactly once.
+
+  1. ROOT CAUSE. Name the single persistence invariant that is missing. Cite the exact schema and
+     handler locations. Explain why the queue's duplicate delivery is a trigger, not the defect.
+  2. FAILING SCHEDULE. From concurrent-trace, construct the interleaving in which both consumers
+     pass the existence check, both insert, and both reserve a seat. Cite the timestamps proving
+     that each SQL action succeeds.
+  3. RED HERRING: BROKER OR NETWORK DUPLICATE. Explain why the broker has not violated its contract,
+     citing delivery-topology. State why a correct consumer must be safe under concurrent repeated
+     delivery.
+  4. FIX ADEQUACY. From fixes, select the one candidate that prevents future duplicate persistence
+     and duplicate seat reservations without breaking legitimate provisioning. State why it closes
+     the observed schedule.
+  5. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is inadequate, naming
+     the TOCTOU, cross-pod, expiry, or irreversible-side-effect failure that remains.
+  6. REGRESSION CHECK. Explain why the adequate fix still allows a genuinely new member or a member
+     in a different workspace to reserve a seat, citing the composite identity definition.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: provisioner-code
+    type: code
+    label: identity membership provisioner complete event path
+    content: |
+      // This is the COMPLETE path for identity.member.added. Every consumer invokes this function.
+      // There is no framework idempotency middleware, database trigger, or downstream deduplicator.
+
+      export async function provisionMembership(event: MembershipAddedEvent) {
+        const { workspaceId, provider, externalMemberId, email } = event;
+
+        const existing = await db.oneOrNone(
+          `SELECT id FROM workspace_memberships
+           WHERE workspace_id = $1 AND provider = $2 AND external_member_id = $3`,
+          [workspaceId, provider, externalMemberId],
+        );
+
+        if (existing) {
+          return { membershipId: existing.id, outcome: 'already-provisioned' };
+        }
+
+        const membership = await db.one(
+          `INSERT INTO workspace_memberships
+             (workspace_id, provider, external_member_id, email)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id`,
+          [workspaceId, provider, externalMemberId, email],
+        );
+
+        // This external operation reserves a paid seat and is irreversible for the billing period.
+        await seatService.reserve(workspaceId, membership.id);
+        return { membershipId: membership.id, outcome: 'created' };
+      }
+  - id: schema
+    type: spec
+    label: workspace membership schema and semantic identity
+    content: |
+      CREATE TABLE workspace_memberships (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        workspace_id UUID NOT NULL,
+        provider TEXT NOT NULL,
+        external_member_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX workspace_memberships_workspace_idx ON workspace_memberships(workspace_id);
+
+      Semantic membership identity:
+        (workspace_id, provider, external_member_id)
+
+      The same external member may legitimately belong to two different workspaces. Two providers
+      may use the same string member ID. Within one workspace and provider, exactly one membership
+      is allowed. The DDL above is the complete current schema for this table.
+  - id: delivery-topology
+    type: config
+    label: membership event delivery topology and replay contract
+    content: |
+      broker:
+        delivery: at-least-once
+        visibilityTimeoutSeconds: 30
+        maxDeliveries: 5
+        ordering: best-effort
+      consumers:
+        podCount: 6
+        concurrencyPerPod: 8
+        acknowledgement: after provisionMembership resolves
+
+      Contract:
+        - The same event ID may be delivered more than once after a consumer restart, visibility
+          timeout, or producer replay.
+        - Two deliveries of the same event may be in flight concurrently on different pods.
+        - Consumers must make applying an event idempotent; the broker does not promise exactly once.
+        - Queue messages bypass the HTTP API gateway and do not carry an HTTP idempotency header.
+  - id: concurrent-trace
+    type: log
+    label: two concurrent deliveries of the same membership event
+    content: |
+      event=evt-441 workspace=ws-19 provider=okta externalMemberId=00u-alex
+
+      15:10:00.000  consumer-A pod=membership-1  broker delivers evt-441 attempt=1
+      15:10:00.002  consumer-B pod=membership-4  broker replay delivers evt-441 attempt=2
+
+      15:10:00.005  consumer-A  SELECT membership identity -> no rows
+      15:10:00.006  consumer-B  SELECT membership identity -> no rows
+      15:10:00.009  consumer-A  INSERT -> membership id=mem-a1 (success)
+      15:10:00.010  consumer-B  INSERT -> membership id=mem-b2 (success)
+      15:10:00.013  consumer-A  seatService.reserve(ws-19, mem-a1) -> reservation=seat-r1
+      15:10:00.014  consumer-B  seatService.reserve(ws-19, mem-b2) -> reservation=seat-r2
+      15:10:00.016  consumer-A  ACK evt-441
+      15:10:00.017  consumer-B  ACK evt-441
+  - id: seat-log
+    type: log
+    label: seat service audit for workspace ws-19
+    content: |
+      15:10:00.013  reserve workspace=ws-19 membership=mem-a1 reservation=seat-r1 status=committed
+      15:10:00.014  reserve workspace=ws-19 membership=mem-b2 reservation=seat-r2 status=committed
+
+      Billing policy:
+        - A committed reservation consumes a paid seat for the current billing period.
+        - Reservations cannot be automatically reversed by deleting a membership row.
+        - seatService has no knowledge of provider or external_member_id; it receives only a
+          membership ID. It reserves one seat per call.
+  - id: data-audit
+    type: table
+    label: duplicate membership audit and historical cleanup policy
+    content: |
+      workspace_id  provider  external_member_id  membership_ids      seat_reservations
+      ws-19         okta      00u-alex            mem-a1, mem-b2      seat-r1, seat-r2
+      ws-44         okta      00u-taylor          mem-c3, mem-d4      seat-r3, seat-r4
+
+      Historical cleanup policy:
+        - If a uniqueness rule is ever added to this table, each duplicate group must be
+          reconciled first.
+        - Keep the earliest created membership as the canonical row and archive later duplicate
+          rows with their event IDs for audit; reconcile duplicate seat reservations through the
+          billing workflow. Do not silently delete audit evidence.
+        - After cleanup, every (workspace_id, provider, external_member_id) group has one row.
+  - id: fixes
+    type: note
+    label: candidate fixes for duplicate membership provisioning
+    content: |
+      F1: Reconcile historical duplicates as described in data-audit, then add
+          UNIQUE(workspace_id, provider, external_member_id). Replace SELECT-then-INSERT with:
+            INSERT ... ON CONFLICT (workspace_id, provider, external_member_id) DO NOTHING
+            RETURNING id
+          Call seatService.reserve only when RETURNING produced a newly inserted membership ID; for
+          a conflict, fetch and return the canonical existing membership without reserving a seat.
+
+      F2: Keep the schema unchanged but SELECT again immediately before INSERT; skip INSERT if the
+          second SELECT finds a row.
+
+      F3: Keep the schema unchanged but add an in-memory mutex keyed by workspaceId plus
+          externalMemberId in each consumer process.
+
+      F4: Cache processed HTTP idempotency keys at the API gateway for one hour.
+
+      F5: Keep the current flow and run a nightly job that deletes duplicate membership rows.
+
+      Constraints:
+        - The broker will continue at-least-once delivery with concurrent replays across pods.
+        - A duplicate delivery must create neither a second membership nor a second paid seat.
+        - A new external member, and the same external member in a different workspace, must still
+          create one membership and reserve one seat.
+        - Any fix that adds a uniqueness rule must reconcile historical duplicate rows first.
+tags: [debugging, fix-adequacy, unique-constraint, idempotency, concurrency, event-processing]

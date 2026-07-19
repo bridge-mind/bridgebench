@@ -1,0 +1,99 @@
+id: regression-protobuf-unknown-fields
+version: 1.0.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: Gateway Refactor Drops Protobuf Fields Added by a Newer Producer
+summary: >-
+  A Go gateway originally decoded and re-encoded protobuf messages while preserving unknown fields. A
+  refactor routed messages through a JSON DTO to unify HTTP and gRPC code paths, silently discarding a
+  field known only to newer producer and consumer versions. Bisect commits and byte traces to identify
+  the introducing conversion rather than nearby schema, compression, and metrics changes.
+prompt: |
+  Diagnose the fictional ParcelWire regression using ONLY the supplied artifacts. Cite artifact ids for
+  every conclusion. Use regression-introducing, red-herring, adequate-fix, and shallow-fix.
+
+  1. State the protobuf compatibility and gateway transformation invariants, including unknown-field bytes,
+     known-field mutation, and malformed-message behavior.
+  2. Trace fixtures O, N, and M through last-good and HEAD at wire-field level. State exactly where field 9
+     is retained or discarded and what the downstream consumer observes.
+  3. Identify the single introducing commit and precise operation. Classify c1 through c5, separating
+     introduction from detection or unrelated format changes.
+  4. Explain why producer rollout, zstd, metrics, and downstream field defaults are red herrings despite
+     chronology. State why ordinary JSON round-trip is not protobuf-wire transparent.
+  5. Classify F1 through F4 and select the adequate fix. Explain how it mutates route while retaining unknown
+     bytes and rejects malformed input.
+  6. Give golden-byte and semantic tests for old/new schemas, multiple unknown fields, repeated fields,
+     malformed wire data, compression, known-field edit, and an old consumer.
+
+  Commit-history and protobuf-runtime are authoritative; exactly one commit changes unknown-field retention.
+artifacts:
+  - id: compatibility-contract
+    type: spec
+    label: authoritative gateway requirements
+    content: |
+      Gateway v1 knows fields: 1 order_id, 2 amount, 3 route. Producer/consumer v2 additionally know field
+      9 customs_code. A v1 intermediary must preserve every well-formed unknown wire field byte-for-byte
+      while changing only known field 3 route. It must reject malformed protobuf. Old consumers may ignore
+      unknowns; new consumers must receive customs_code. Compression is outside the protobuf envelope.
+  - id: protobuf-runtime
+    type: spec
+    label: Go protobuf and JSON behavior
+    content: |
+      google.golang.org/protobuf v2 Unmarshal stores unknown wire fields in message unknown storage; Marshal
+      re-emits them unless DiscardUnknown is requested. protojson marshals only fields present in the compiled
+      descriptor and cannot represent unknown wire fields. Unmarshal from that JSON creates a message with
+      empty unknown storage. Binary Unmarshal rejects malformed wire types/lengths.
+  - id: current-code
+    type: code
+    label: HEAD normalized routing path
+    content: |
+      func route(raw []byte) ([]byte, error) {
+        var msgv1 orderv1.Order
+        if err := proto.Unmarshal(raw, &msgv1); err != nil { return nil, err }
+        jsonBytes, err := protojson.Marshal(&msgv1)
+        if err != nil { return nil, err }
+        var dto RouteDTO
+        if err := json.Unmarshal(jsonBytes, &dto); err != nil { return nil, err }
+        dto.Route = chooseRoute(dto.Amount)
+        normalized, _ := json.Marshal(dto)
+        var out orderv1.Order
+        if err := protojson.Unmarshal(normalized, &out); err != nil { return nil, err }
+        return proto.Marshal(&out)
+      }
+      RouteDTO contains only orderId, amount, route. No raw message is retained after the first conversion.
+  - id: commit-history
+    type: diff
+    label: ordered commits after last-good
+    content: |
+      c1 feat producer: v2 begins sending optional field 9; old gateway binary tests still preserve it
+      c2 perf transport: zstd-compress envelopes over 4 KiB; decompressed protobuf bytes unchanged
+      c3 refactor gateway: replace direct binary message mutation with protojson -> shared RouteDTO -> protojson
+         so HTTP and gRPC routing use one function
+      c4 metrics: count missing customs_code at downstream v2; first alert becomes visible
+      c5 schema docs: document field 9 default as empty for producers that omit it
+      These are the complete changes. Deploy order is c1,c2,c3,c4,c5.
+  - id: fixture-trace
+    type: table
+    label: wire fixtures and deterministic results
+    content: |
+      O old producer bytes fields=[1:O1,2:500,3:old] -> last-good/HEAD fields=[1,2,3:new]
+      N new producer bytes fields=[1:N1,2:700,3:old,9:C-77]
+        last-good binary unmarshal: known=[1,2,3], unknown raw=[9:C-77]
+        mutate field3; binary marshal -> [1:N1,2:700,3:new,9:C-77]
+        HEAD protojson step -> JSON fields 1,2,3 only -> DTO/out unknown storage empty
+        HEAD marshal -> [1:N1,2:700,3:new]; downstream v2 sees customs_code default empty
+      M malformed length-delimited field -> both versions return error before routing
+  - id: candidate-fixes
+    type: note
+    label: proposed regression fixes
+    content: |
+      F1 Add customsCode to RouteDTO. This preserves field 9 only; any future unknown field is still dropped.
+      F2 Keep original binary-unmarshaled v1 message, mutate its known route field directly, then binary Marshal
+         without DiscardUnknown. Share routing decision as a pure typed helper rather than round-tripping wire
+         data through JSON.
+      F3 Configure json.Unmarshal with DisallowUnknownFields. Unknown protobuf fields are already absent from
+         protojson output, so this cannot retain them.
+      F4 Tell downstream to treat empty customs_code as valid for every new-producer message. This hides data
+         loss and changes the compatibility contract.
+tags: [debugging, regression-introduction, go, protobuf, compatibility]

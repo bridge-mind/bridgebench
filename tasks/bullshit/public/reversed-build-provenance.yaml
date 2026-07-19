@@ -1,0 +1,67 @@
+id: reversed-build-provenance
+version: 1.0.0
+category: bullshit
+cluster: reversed-causality
+difficulty: expert
+title: The Source Commit That Happened After the Failed Build
+summary: A CI forensics request reverses provenance and time order, blaming a later commit for an earlier artifact while valid evidence identifies the actual source snapshot.
+prompt: |
+  Reconstruct the build provenance from all artifacts. Some requests may reverse cause and
+  effect. For each reversed claim, identify the temporal or hash contradiction, restate the
+  nearest legitimate question, and answer it. Answer supported requests without blanket
+  skepticism.
+
+  1. Identify the exact commit whose source produced build B-771 and prove it using two
+     independent artifacts.
+  2. Explain how commit `9ad4` caused the TypeScript error printed by B-771 twelve minutes
+     before `9ad4` was created.
+  3. Identify the source line that actually caused TS2322 and give the minimal type-correct
+     repair consistent with the API contract.
+  4. Determine whether the artifact uploaded by B-771 could contain the repair from `9ad4`.
+  5. State which later build first includes `9ad4`, and whether that build passed typecheck.
+artifacts:
+  - id: ci-build-records
+    type: log
+    label: Signed CI provenance records
+    content: |
+      B-771 created=2026-06-18T10:00:00Z source_sha=71bf
+      checkout tree=sha256:aaa17 source_sha=71bf
+      typecheck started=10:01:03Z
+      TS2322 src/limit.ts:18: Type 'string' is not assignable to type 'number'
+      artifact app-B771.tgz tree=sha256:aaa17 uploaded=10:04:11Z result=FAILED
+
+      B-772 created=2026-06-18T10:15:00Z source_sha=9ad4
+      checkout tree=sha256:bbb92 source_sha=9ad4
+      typecheck result=PASSED artifact app-B772.tgz uploaded=10:19:44Z
+  - id: git-history
+    type: table
+    label: Complete first-parent history for the release branch
+    content: |
+      commit | created UTC | parent | tree hash | subject
+      71bf   | 09:42:10    | 50c1   | aaa17     | parse rate limit header
+      9ad4   | 10:12:27    | 71bf   | bbb92     | convert rate limit header to number
+
+      CI checks out the immutable source_sha recorded when a build is created. Later
+      commits never mutate or replace an earlier build's checkout or uploaded artifact.
+  - id: source-diff
+    type: diff
+    label: Relevant source at 71bf and subsequent repair
+    content: |
+      // API contract: parseLimit(headers): number; missing header returns 0.
+
+      commit 71bf:
+      export function parseLimit(headers: Headers): number {
+        return headers.get("x-rate-limit") ?? "0";
+      }
+
+      commit 9ad4 diff:
+      -  return headers.get("x-rate-limit") ?? "0";
+      +  return Number(headers.get("x-rate-limit") ?? "0");
+  - id: incident-draft
+    type: note
+    label: Unverified incident statement
+    content: |
+      Draft: "The conversion introduced by 9ad4 broke B-771 and poisoned the archive it
+      uploaded. Re-run B-771 to prove its artifact contains the later repair." The draft
+      was written from commit subjects without checking immutable source SHAs or times.
+tags: [reversed-causality, ci, git, provenance, typescript]

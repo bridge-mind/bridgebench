@@ -4,7 +4,14 @@ import path from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 
 import { ArenaRunner } from './arena.js';
+import {
+  formatCalibrationReport,
+  loadGoldCases,
+  recordCalibration,
+  runCalibration,
+} from './calibration.js';
 import { loadProjectEnv } from './env.js';
+import { MockOpenRouterGateway } from './mock-gateway.js';
 import { FileArenaLogger, redactSecrets, type ArenaLogger } from './logger.js';
 import { listModels, resolveCompetitorRoster } from './models.js';
 import { OpenRouterClient } from './openrouter.js';
@@ -16,10 +23,23 @@ import { launchEvalBrowser, UiArtifactEvaluator } from './suites/ui/evaluator/in
 import { UiArtifactNormalizer } from './suites/ui/normalizer.js';
 import { journalUiEvaluation, publishUiResults } from './suites/ui/publish.js';
 import { assessQualification } from './suites/ui/qualification.js';
+import { runUiBench, UI_RUN_KEY_PATTERN } from './suites/ui/run.js';
 import { UiTaskLoader } from './suites/ui/task-loader.js';
 import { UiArtifactValidator } from './suites/ui/validator.js';
 import { TaskLoader, validatePublicTaskFile } from './tasks.js';
-import { formatTriage, triageJournal } from './triage.js';
+import {
+  analyzeJudgeCalibration,
+  analyzeJudgeSeatBias,
+  analyzeNoContestBias,
+  BRIER_ALERT_THRESHOLD,
+  formatJudgeCalibration,
+  formatNoContestBias,
+  formatSeatBias,
+  formatTriage,
+  NO_CONTEST_ALERT_THRESHOLD,
+  SEAT_SWING_ALERT_THRESHOLD,
+  triageJournal,
+} from './triage.js';
 import {
   BenchmarkCategorySchema,
   CATEGORIES,
@@ -48,6 +68,8 @@ export interface ArenaRunCliOptions {
   resume: boolean;
   debug: boolean;
   healthStop: boolean;
+  /** Commander negation of --exhibition: true unless --exhibition was passed. */
+  ranked?: boolean;
 }
 
 export interface CliDependencies {
@@ -104,6 +126,34 @@ function collectOption(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
 
+/** Repeatable AND comma-separated: `-m a,b -m c` → [a, b, c]. */
+function collectCommaOption(value: string, previous: string[] = []): string[] {
+  return [
+    ...previous,
+    ...value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ];
+}
+
+function nonNegativeNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new InvalidArgumentError(`expected a non-negative number, received ${value}`);
+  }
+  return parsed;
+}
+
+function parseUiRunKey(value: string): string {
+  if (!UI_RUN_KEY_PATTERN.test(value)) {
+    throw new InvalidArgumentError(
+      `expected a run key matching ${UI_RUN_KEY_PATTERN}, received ${value}`,
+    );
+  }
+  return value;
+}
+
 export function arenaRunConfigFromOptions(options: ArenaRunCliOptions): ArenaRunConfig {
   const competitorIds = options.competitor?.length
     ? resolveCompetitorRoster(options.competitor).map((model) => model.id)
@@ -116,6 +166,7 @@ export function arenaRunConfigFromOptions(options: ArenaRunCliOptions): ArenaRun
     competitorIds,
     resume: options.resume,
     healthStop: options.healthStop,
+    ranked: options.ranked ?? true,
   };
 }
 
@@ -251,8 +302,16 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
     .option('--resume', 'skip match IDs already present in the journal', false)
     .option('--debug', 'mirror structured log entries to the console', false)
     .option('--no-health-stop', 'do not halt when most matches have failed responses')
-    .action(async (options: ArenaRunCliOptions) => {
-      const config = arenaRunConfigFromOptions(options);
+    .option(
+      '--exhibition',
+      'judge matches without moving Elo (operator-picked head-to-head)',
+      false,
+    )
+    .action(async (options: ArenaRunCliOptions & { exhibition: boolean }) => {
+      const config = arenaRunConfigFromOptions({
+        ...options,
+        ranked: !options.exhibition,
+      });
       const logger = new FileArenaLogger({
         dir: logRoot(config.category),
         verbose: options.debug,
@@ -344,32 +403,48 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
     .option('--no-health-stop', 'do not halt when most matches have failed responses')
     .option('--mock', 'use deterministic mock model completions instead of OpenRouter', false)
     .option('--no-publish-matches', 'skip publishing match results to the API as they complete')
-    .action(async (options: ArenaRunCliOptions & { mock: boolean; publishMatches: boolean }) => {
-      const config = arenaRunConfigFromOptions(options);
-      const apiConfig = dependencies.resolveApiConfig();
-      const logger = new FileArenaLogger({
-        dir: logRoot(config.category),
-        verbose: options.debug,
-      });
-      dependencies.stdout(
-        `Remote ${config.category} run against ${publishTarget(apiConfig)} (${options.mock ? 'mock' : 'openrouter'})`,
-      );
-      dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
-      try {
-        const result = await runRemoteArena(apiConfig, {
-          config,
-          mock: options.mock,
-          publishMatches: options.publishMatches,
-          logger,
+    .option(
+      '--exhibition',
+      'judge matches without moving Elo (operator-picked head-to-head)',
+      false,
+    )
+    .action(
+      async (
+        options: ArenaRunCliOptions & {
+          mock: boolean;
+          publishMatches: boolean;
+          exhibition: boolean;
+        },
+      ) => {
+        const config = arenaRunConfigFromOptions({
+          ...options,
+          ranked: !options.exhibition,
+        });
+        const apiConfig = dependencies.resolveApiConfig();
+        const logger = new FileArenaLogger({
+          dir: logRoot(config.category),
+          verbose: options.debug,
         });
         dependencies.stdout(
-          `Remote run ${result.runKey}: ${result.completed} matches, $${result.costUsd.toFixed(4)}`,
+          `Remote ${config.category} run against ${publishTarget(apiConfig)} (${options.mock ? 'mock' : 'openrouter'})`,
         );
-        if (result.cancelled) dependencies.setExitCode(130);
-      } finally {
         dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
-      }
-    });
+        try {
+          const result = await runRemoteArena(apiConfig, {
+            config,
+            mock: options.mock,
+            publishMatches: options.publishMatches,
+            logger,
+          });
+          dependencies.stdout(
+            `Remote run ${result.runKey}: ${result.completed} matches, $${result.costUsd.toFixed(4)}`,
+          );
+          if (result.cancelled) dependencies.setExitCode(130);
+        } finally {
+          dependencies.stdout(`Run log: ${displayPath(logger.filePath)}`);
+        }
+      },
+    );
 
   arena
     .command('verify')
@@ -488,11 +563,53 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
           return;
         }
         const reports = triageJournal(results);
+        const seatBias = analyzeJudgeSeatBias(results);
+        const calibration = analyzeJudgeCalibration(results);
+        const noContestBias = analyzeNoContestBias(results);
         dependencies.stdout(
-          options.json ? JSON.stringify(reports, null, 2) : formatTriage(reports),
+          options.json
+            ? JSON.stringify(
+                {
+                  runs: reports,
+                  judgeSeatBias: seatBias,
+                  judgeCalibration: calibration,
+                  noContestBias,
+                },
+                null,
+                2,
+              )
+            : [
+                formatTriage(reports),
+                formatSeatBias(seatBias),
+                formatJudgeCalibration(calibration),
+                formatNoContestBias(noContestBias),
+              ]
+                .filter(Boolean)
+                .join('\n'),
         );
         const anomalies = reports.reduce((sum, report) => sum + report.anomalies.length, 0);
-        if (options.strict && anomalies > 0) {
+        const seatAlerts = seatBias.filter((report) => report.alert).length;
+        const calibrationAlerts = calibration.filter((report) => report.alert).length;
+        const noContestAlerts = noContestBias.filter((report) => report.alert).length;
+        if (seatAlerts > 0) {
+          dependencies.stderr(
+            `Seat-bias alert: ${seatAlerts} judge(s) exceed the ${SEAT_SWING_ALERT_THRESHOLD * 100}-pt swing threshold.`,
+          );
+        }
+        if (calibrationAlerts > 0) {
+          dependencies.stderr(
+            `Calibration alert: ${calibrationAlerts} judge(s) at or above the ${BRIER_ALERT_THRESHOLD} Brier threshold.`,
+          );
+        }
+        if (noContestAlerts > 0) {
+          dependencies.stderr(
+            `No-contest bias alert: ${noContestAlerts} model(s) fail ≥ ${NO_CONTEST_ALERT_THRESHOLD * 100}% of their matches — their ladder standing under-samples hard matchups.`,
+          );
+        }
+        if (
+          options.strict &&
+          (anomalies > 0 || seatAlerts > 0 || calibrationAlerts > 0 || noContestAlerts > 0)
+        ) {
           dependencies.stderr(`Strict mode: ${anomalies} anomalies found.`);
           dependencies.setExitCode(1);
         }
@@ -506,6 +623,64 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
       const data = await dependencies.createOpenRouter().fetchGeneration(generationId);
       dependencies.stdout(JSON.stringify(data, null, 2));
     });
+
+  arena
+    .command('calibrate')
+    .description(
+      'Run judge models against the gold calibration set (seat + verbosity perturbed) and record pass/fail',
+    )
+    .option('-j, --judge <modelId>', 'judge model to calibrate (repeatable)', collectOption)
+    .option('--all-judges', 'calibrate every judge-capable model in the registry', false)
+    .option('--mock', 'use the deterministic mock gateway instead of OpenRouter', false)
+    .option('--json', 'emit the full reports as JSON', false)
+    .option('--no-record', 'do not persist results to the calibration ledger')
+    .action(
+      async (options: {
+        judge?: string[];
+        allJudges: boolean;
+        mock: boolean;
+        json: boolean;
+        record: boolean;
+      }) => {
+        const judgeIds = options.allJudges
+          ? listModels('judge').map((model) => model.id)
+          : (options.judge ?? []);
+        if (judgeIds.length === 0) {
+          throw new InvalidArgumentError('Pass --judge <modelId> (repeatable) or --all-judges');
+        }
+        const cases = await loadGoldCases();
+        if (cases.length === 0) {
+          throw new Error('No gold cases found in the calibration directory');
+        }
+        dependencies.stdout(
+          `Calibrating ${judgeIds.length} judge(s) against ${cases.length} gold cases (${
+            options.mock ? 'mock' : 'openrouter'
+          })`,
+        );
+        const gateway = options.mock
+          ? new MockOpenRouterGateway({ splitPanel: true })
+          : dependencies.createOpenRouter();
+        const reports = [];
+        let failures = 0;
+        for (const judgeId of judgeIds) {
+          const report = await runCalibration(gateway, judgeId, cases);
+          reports.push(report);
+          if (!report.passed) failures += 1;
+          // Mock verdicts are deterministic fakes; never let them into the
+          // ledger real seating decisions read from.
+          if (options.record && !options.mock) recordCalibration(report);
+          if (!options.json) dependencies.stdout(formatCalibrationReport(report));
+        }
+        if (options.json) dependencies.stdout(JSON.stringify(reports, null, 2));
+        if (options.record && !options.mock) {
+          dependencies.stdout('Results recorded to the calibration ledger.');
+        }
+        if (failures > 0) {
+          dependencies.stderr(`${failures} judge(s) failed calibration.`);
+          dependencies.setExitCode(1);
+        }
+      },
+    );
 
   const ui = program
     .command('ui')
@@ -629,17 +804,86 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
     });
 
   ui.command('run')
-    .description('Generate a UI Bench artifact from a live model and evaluate it')
-    .action(() => {
-      dependencies.stderr(
-        "ui run is not implemented on main yet: season-engine-alpha's live-model runner " +
-          "was built against a multi-provider 'providers/' abstraction that no longer exists " +
-          'here (main calls models exclusively through OpenRouter — see src/openrouter.ts). ' +
-          "Use 'ui evaluate <file> -t <taskId>' to qualify a hand- or model-written artifact " +
-          'in the meantime. See docs/ui-bench.md.',
-      );
-      dependencies.setExitCode(1);
-    });
+    .description(
+      'Generate UI Bench artifacts from live models, evaluate them in headless Chromium, ' +
+        'and journal real cost/latency. Accepts any OpenRouter slug (no preflight: a typo ' +
+        'journals a provider_error result per task instead of failing fast).',
+    )
+    .requiredOption(
+      '-m, --model <slug>',
+      'OpenRouter model slug; repeat or comma-separate for several',
+      collectCommaOption,
+    )
+    .option(
+      '-n, --name <displayName>',
+      'display name matching --model order; repeatable',
+      collectOption,
+    )
+    .option('-t, --task <taskId>', 'UI task id (default: all UI tasks); repeatable', collectOption)
+    .option('--publish', 'stream each result to the configured API as it completes', false)
+    .option(
+      '--run-key <runKey>',
+      'published run identity (default ui-s<season>-<yyyymmdd>)',
+      parseUiRunKey,
+    )
+    .option('--resume', 'skip (model, task) pairs already successful in the journal', false)
+    .option('--dry', 'generate and validate only — skip browser evaluation', false)
+    .option('--mock', 'use the golden fixture as model output; never publishes', false)
+    .option('--max-tokens <n>', 'completion token ceiling (default 32000)', positiveInteger)
+    .option('--temperature <t>', 'sampling temperature (default 0.7)', nonNegativeNumber)
+    .option('--debug', 'echo debug-level run-log events to stderr', false)
+    .action(
+      async (options: {
+        model: string[];
+        name?: string[];
+        task?: string[];
+        publish: boolean;
+        runKey?: string;
+        resume: boolean;
+        dry: boolean;
+        mock: boolean;
+        maxTokens?: number;
+        temperature?: number;
+        debug: boolean;
+      }) => {
+        const cancellation = new AbortController();
+        const requestCancellation = (): void => {
+          if (cancellation.signal.aborted) return;
+          dependencies.stderr('Cancellation requested; finishing or abandoning the current task.');
+          cancellation.abort();
+        };
+        process.once('SIGINT', requestCancellation);
+        try {
+          const summary = await runUiBench(
+            {
+              modelSlugs: options.model,
+              displayNames: options.name,
+              taskIds: options.task,
+              publish: options.publish,
+              runKey: options.runKey,
+              resume: options.resume,
+              dry: options.dry,
+              mock: options.mock,
+              maxTokens: options.maxTokens,
+              temperature: options.temperature,
+              debug: options.debug,
+            },
+            {
+              stdout: dependencies.stdout,
+              resolveApiConfig: dependencies.resolveApiConfig,
+              signal: cancellation.signal,
+            },
+          );
+          if (summary.cancelled) {
+            dependencies.setExitCode(130);
+          } else if (summary.publishFailures > 0 || summary.publishConflicts > 0) {
+            dependencies.setExitCode(1);
+          }
+        } finally {
+          process.removeListener('SIGINT', requestCancellation);
+        }
+      },
+    );
 
   program
     .command('report')

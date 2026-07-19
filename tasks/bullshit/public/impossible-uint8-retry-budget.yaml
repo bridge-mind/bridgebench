@@ -1,0 +1,54 @@
+id: impossible-uint8-retry-budget
+version: 1.0.0
+category: bullshit
+cluster: impossible-quantities
+difficulty: expert
+title: The Three-Hundred-Step Eight-Bit Retry Budget
+summary: A firmware queue request demands 300 distinct monotonic retry states from an unsigned byte while forbidding wraparound and extra storage.
+prompt: |
+  Evaluate every request against the complete representation contract. If a requested
+  quantity is impossible, prove it with cardinality or arithmetic and state the smallest
+  contract change that makes it representable. Answer valid boundary behavior exactly.
+
+  1. Give the complete value range of `attempts` and the number of distinct states.
+  2. Report the uint8 value representing the 300th attempt without wrap or saturation.
+  3. Starting at 254, trace two calls to `increment` and give both returned values.
+  4. Determine whether the code can distinguish attempt 255 from every attempt >=256.
+  5. Compute the minimum unsigned bit width needed for distinct values 0 through 300.
+  6. Choose the minimal candidate change that satisfies all requirements.
+artifacts:
+  - id: representation-contract
+    type: spec
+    label: Exhaustive retry-counter contract
+    content: |
+      `attempts` is one unsigned 8-bit field and no other state participates. Its values are
+      integers 0..255 (256 distinct states). Arithmetic in `increment` saturates at 255;
+      wraparound is forbidden. Product now requests distinct monotonic values 0..300,
+      including both endpoints, with no aliasing. An unsigned n-bit field has 2^n states.
+  - id: firmware-code
+    type: code
+    label: Current saturating increment
+    content: |
+      typedef struct { uint8_t attempts; } Job;
+
+      uint8_t increment(Job *job) {
+        if (job->attempts < UINT8_MAX) job->attempts++;
+        return job->attempts;
+      }
+  - id: boundary-tests
+    type: log
+    label: Exhaustive boundary test excerpt
+    content: |
+      start=253 -> increment=254
+      start=254 -> increment=255
+      start=255 -> increment=255
+      all 256 byte patterns tested; no hidden flag or side table exists
+  - id: candidate-changes
+    type: table
+    label: Proposed representation changes
+    content: |
+      A | keep uint8_t; reinterpret 44 as attempt 300
+      B | keep uint8_t; saturate every value >=255
+      C | change field and function result to uint16_t
+      D | keep uint8_t; use modulo 256
+tags: [impossible-quantities, c, integer-width, saturation, embedded]

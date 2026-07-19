@@ -72,14 +72,11 @@ ${controlsSection}
 11. getState() must return a small JSON-serializable object describing scene CONFIGURATION (e.g. current speed setting, palette index, object count, seed) — it is called by the harness and compared across resets and interactions. It must NOT include clocks, elapsed time, or frame counters: calling getState() twice with no user interaction in between must return identical objects, and every user-visible control change must be reflected in it.`;
 }
 
+/** The task half of the prompt — sent as the user message by the live runner. */
+export function buildUiUserPrompt(task: UiBenchTask): string {
+  return [`Task ID: ${task.id}`, `Task title: ${task.title}`, '', task.prompt.trim()].join('\n');
+}
+
 export function buildUiTaskPrompt(task: UiBenchTask): string {
-  return [
-    buildUiSystemPrompt(task),
-    '',
-    '---',
-    `Task ID: ${task.id}`,
-    `Task title: ${task.title}`,
-    '',
-    task.prompt.trim(),
-  ].join('\n');
+  return [buildUiSystemPrompt(task), '', '---', buildUiUserPrompt(task)].join('\n');
 }

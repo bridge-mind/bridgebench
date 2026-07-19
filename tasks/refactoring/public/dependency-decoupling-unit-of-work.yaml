@@ -1,0 +1,184 @@
+id: dependency-decoupling-unit-of-work
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Inject a Unit of Work Without Splitting or Reusing Database Transactions
+summary: >-
+  A transfer service must shed direct pool and repository construction while preserving one
+  serializable transaction, transaction-bound repository lifetimes, lock order, rollback, and
+  initialization topology. Four decouplings look testable; only one preserves the system.
+prompt: |
+  Use only original-modules, decoupling-contract, runtime-traces, proposals, and module-manifest.
+  Cite artifacts. Give both behavior and goal verdicts using behavior-preserving / changes-behavior
+  and meets-goal / fails-goal.
+
+  1. Classify proposal-a through proposal-d.
+  2. For every behavior change, cite D1..D8 and the first trace that exposes the change.
+  3. Identify the unique proposal that preserves behavior and meets the decoupling goal.
+  4. Trace R1, including repository creation, lock order, commit, and audit.
+  5. Explain why three individually transactional operations do not equal one transfer transaction.
+  6. Evaluate whether caching transaction-bound repositories in a singleton is safe.
+artifacts:
+  - id: original-modules
+    type: code
+    label: Existing composition root and TransferService
+    content: |
+      // composition.ts
+      const pool = createPool(config.databaseUrl);
+      const transfers = new TransferService(pool);
+      export { transfers };
+
+      // transfer-service.ts
+      class TransferService {
+        constructor(pool) { this.pool = pool; }
+        transfer(command) {
+          return this.pool.serializable(async (tx) => {
+            const accounts = new AccountsRepo(tx);
+            const ledger = new LedgerRepo(tx);
+            const ids = [command.from, command.to].sort();
+            const locked = new Map();
+            for (const id of ids) locked.set(id, await accounts.lock(id));
+            const from = locked.get(command.from);
+            if (from.balance < command.amount) throw new InsufficientFunds();
+            await accounts.setBalance(command.from, from.balance - command.amount);
+            const to = locked.get(command.to);
+            await accounts.setBalance(command.to, to.balance + command.amount);
+            const entry = await ledger.append(command);
+            return { entryId: entry.id, fromBalance: from.balance - command.amount };
+          });
+        }
+      }
+  - id: decoupling-contract
+    type: spec
+    label: Complete behavior and architecture requirements
+    content: |
+      D1 TransferService is a process singleton but stores no pool, transaction, or concrete repo.
+      D2 Its only infrastructure dependency is UnitOfWork:
+         interface UnitOfWork {
+           run<T>(work:(repos:{accounts:AccountsPort,ledger:LedgerPort})=>Promise<T>):Promise<T>
+         }
+      D3 PostgresUnitOfWork.run starts exactly one serializable transaction per call, constructs new
+         AccountsRepo(tx) and LedgerRepo(tx) inside it, passes both to work, then commits or rolls
+         back with the callback.
+      D4 Both repositories in one call share the same tx. They are never cached across calls.
+      D5 TransferService preserves sorted account lock order, insufficient-funds check, write order,
+         receipt, and propagated error types.
+      D6 If any write or ledger append fails, every balance write and ledger write rolls back.
+      D7 composition creates pool, then PostgresUnitOfWork(pool), then TransferService(uow). There is
+         no module cycle and importing transfer-service has no database side effect.
+      D8 Goal: the service module imports only UnitOfWork/port types and domain errors; concrete pool
+         and repository construction move to the adapter/composition side.
+  - id: runtime-traces
+    type: table
+    label: Authoritative transfer traces
+    content: |
+      R1 A balance 10, B balance 1, transfer A->B amount 4:
+         begin serializable tx1; new AccountsRepo(tx1); new LedgerRepo(tx1); lock A; lock B;
+         set A=6; set B=5; append transfer on tx1; commit tx1; return entry id and fromBalance 6.
+      R2 same balances, transfer B->A amount 2:
+         locks A then B, detects B insufficient, rollback; no writes.
+      R3 ledger append throws DiskFull after both balance updates:
+         rollback one transaction; balances and ledger remain unchanged; DiskFull propagates.
+      R4 two sequential successful transfers:
+         tx1 gets fresh repo pair bound tx1; tx2 gets a different fresh pair bound tx2.
+      R5 importing transfer-service.ts in a unit test:
+         no config read, pool creation, connection, or repository construction.
+  - id: proposals
+    type: code
+    label: Four decoupling proposals
+    content: |
+      // proposal-a
+      class TransferService {
+        constructor(uow) { this.uow = uow; }
+        transfer(command) {
+          return this.uow.run(async ({ accounts, ledger }) => {
+            const ids = [command.from, command.to].sort();
+            const locked = new Map();
+            for (const id of ids) locked.set(id, await accounts.lock(id));
+            const from = locked.get(command.from);
+            if (from.balance < command.amount) throw new InsufficientFunds();
+            await accounts.setBalance(command.from, from.balance - command.amount);
+            const to = locked.get(command.to);
+            await accounts.setBalance(command.to, to.balance + command.amount);
+            const entry = await ledger.append(command);
+            return { entryId: entry.id, fromBalance: from.balance - command.amount };
+          });
+        }
+      }
+      class PostgresUnitOfWork {
+        constructor(pool) { this.pool = pool; }
+        run(work) {
+          return this.pool.serializable((tx) => work({
+            accounts: new AccountsRepo(tx), ledger: new LedgerRepo(tx),
+          }));
+        }
+      }
+
+      // proposal-b: a transaction per repository operation.
+      class TransferService {
+        constructor(accounts, ledger) { this.accounts = accounts; this.ledger = ledger; }
+        async transfer(command) {
+          const ids = [command.from, command.to].sort();
+          const locked = new Map();
+          for (const id of ids) locked.set(id, await this.accounts.lockInTransaction(id));
+          const from = locked.get(command.from);
+          if (from.balance < command.amount) throw new InsufficientFunds();
+          await this.accounts.setInTransaction(command.from, from.balance - command.amount);
+          const to = locked.get(command.to);
+          await this.accounts.setInTransaction(command.to, to.balance + command.amount);
+          const entry = await this.ledger.appendInTransaction(command);
+          return { entryId: entry.id, fromBalance: from.balance - command.amount };
+        }
+      }
+
+      // proposal-c: transaction-bound repos cached on singleton after first call.
+      class PostgresUnitOfWork {
+        constructor(pool) { this.pool = pool; this.repos = null; }
+        run(work) {
+          return this.pool.serializable((tx) => {
+            if (!this.repos) this.repos = {
+              accounts: new AccountsRepo(tx), ledger: new LedgerRepo(tx),
+            };
+            return work(this.repos);
+          });
+        }
+      }
+      // TransferService body is identical to proposal-a.
+
+      // proposal-d: service is decoupled but adapter imports composition to obtain its pool.
+      // postgres-uow.ts
+      import { pool } from './composition.js';
+      export class PostgresUnitOfWork {
+        run(work) {
+          return pool.serializable((tx) => work({
+            accounts: new AccountsRepo(tx), ledger: new LedgerRepo(tx),
+          }));
+        }
+      }
+      // composition.ts
+      import { PostgresUnitOfWork } from './postgres-uow.js';
+      export const pool = createPool(config.databaseUrl);
+      export const transfers = new TransferService(new PostgresUnitOfWork());
+  - id: module-manifest
+    type: note
+    label: Exhaustive topology and proposal completion details
+    content: |
+      proposal-a composition is exactly:
+        const pool=createPool(config.databaseUrl);
+        const uow=new PostgresUnitOfWork(pool);
+        export const transfers=new TransferService(uow);
+      Its TransferService module imports only types and InsufficientFunds.
+
+      proposal-b concrete accounts/ledger adapters each open and commit their own serializable
+      transaction for the named operation. They do not coordinate rollback.
+
+      proposal-c uses proposal-a's service and composition but the shown cached adapter.
+
+      proposal-d creates the explicit cycle composition -> postgres-uow -> composition. ES module
+      evaluation reaches PostgresUnitOfWork construction before composition has initialized pool;
+      the cycle is forbidden by D7 even in runtimes where the first run happens later.
+
+      These four proposals are exhaustive; no hidden transaction coordinator or lifecycle hook
+      changes their behavior.
+tags: [refactoring, dependency-decoupling, unit-of-work, transactions, dependency-injection]

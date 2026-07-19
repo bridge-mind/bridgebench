@@ -1,5 +1,5 @@
 id: conflict-runbook-versions
-version: 1.0.0
+version: 1.1.0
 category: hallucination
 cluster: conflicting-sources
 difficulty: expert
@@ -98,8 +98,7 @@ artifacts:
     label: Failover automation script (promote step)
     content: |
       # failover_automation.py
-      # last substantive update: 2025-08-14  (predates runbook wiki v2.0)
-      # NOTE: this script has not been revised since the retry policy changed.
+      # last substantive update: 2025-08-14
 
       RETRY_LIMIT = 3            # promotion attempts before giving up
       SNAPSHOT_TIMEOUT_S = 120   # max wait for the volume snapshot to complete
@@ -159,14 +158,9 @@ artifacts:
       2.1     | 2026-06-20 | clarified step wording; no change to retry limit or step order
                            | relative to 2.0
 
-      The wiki tracks the 2.x line and supersedes the 1.4 PDF. The log records no change
-      to the ordering of the snapshot and disable-writes steps.
-
-      Known gap: the failover automation script has not been re-released since before v2.0,
-      so its hardcoded retry limit still reflects the pre-2.0 policy. This log governs the
-      documented procedure; it cannot force the deployed script to match, and no ticket in
-      scope here has reconciled the two. Treat the script's value as what actually runs and
-      the wiki's value as what is documented.
+      The wiki tracks the 2.x line and supersedes the 1.4 PDF. This log governs the
+      DOCUMENTED procedure only; it does not control what any deployed automation
+      actually executes.
   - id: slack-pin
     type: log
     label: "Pinned message in #db-oncall (failover quick-steps)"
@@ -208,8 +202,7 @@ artifacts:
       09:06:40 Ana: that matches what the #db-oncall pin already says, fwiw.
       09:07:05 Ravi: yeah. someone needs to decide officially whether we flip the wiki or
                      keep it. filing the finding; not my call to rewrite the canonical doc.
-      09:07:30 Ana: agreed. until leadership rules, wiki still says snapshot-first and the
-                     pin says writes-first. two contradicting sources.
+      09:07:30 Ana: agreed. filing it for leadership to rule on.
   - id: oncall-note
     type: note
     label: On-call handoff note (most recent failover)
@@ -219,11 +212,8 @@ artifacts:
       We followed the pinned order: disabled customer writes BEFORE snapshotting. We did
       that on purpose because in the June drill the wiki's snapshot-first order let a
       handful of writes land after the snapshot was taken and caused a data-loss scare.
-      Heads-up: leadership has NOT published which order is now canonical, and the wiki
-      still lists snapshot-first, so the wiki and the pin currently contradict each other
-      and nobody has adjudicated it.
+      Leadership has not yet published a decision on the drill finding.
 
-      Also, folks kept quoting our "20-minute RTO" on the bridge. I could not find where
-      that 20-minute figure is written down; the wiki and the PDF each say something
-      different. We should confirm the real RTO with whoever owns the SLA.
+      Also, folks kept quoting our "20-minute RTO" on the bridge. We should confirm the
+      real RTO with whoever owns the SLA.
 tags: [runbook, disaster-recovery, conflicting-sources, hallucination]

@@ -1,0 +1,208 @@
+id: state-corruption-enum-ordinal
+version: 1.1.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Stored Subscriptions Change Billing Behavior Immediately After a Deployment
+summary: >-
+  Immediately after a release that adds a GRACE_PERIOD subscription state, subscriptions stored as
+  PAST_DUE begin receiving grace-period behavior and canceled subscriptions enter dunning — yet no
+  database rows changed during the rollout. Replication, the billing state machine, and the admin UI
+  look guilty. Reconcile the pre-deploy mapping, ORM entity, readers, and writers to find the first
+  violated invariant and select the durable repair.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (subscription-entity, predeploy-map,
+  schema, deployment-timeline, affected-rows, reader-trace, writer-inventory, fixes). Cite the
+  artifact id(s) for every claim. Use this vocabulary for verdicts: root-cause, red-herring,
+  adequate-fix, shallow-fix.
+
+  A deployment introduced a GRACE_PERIOD subscription state. Immediately afterward, subscriptions
+  stored before the deployment began receiving the wrong entitlement and billing behavior. No
+  database rows changed during the rollout. Trace the first point at which the durable state
+  invariant is violated, rather than blaming downstream services that read an already
+  misinterpreted state.
+
+  1. FIRST VIOLATED INVARIANT. Name the single defect, cite the exact artifact and code location,
+     and state the stable-persistence invariant that the deployment broke. Explain how stored
+     ordinal 2 and ordinal 3 are decoded before and after the deployment.
+  2. CORRUPTION CHAIN. From deployment-timeline, affected-rows, and reader-trace, trace one
+     pre-existing PAST_DUE subscription through the new enum decoder to the incorrect downstream
+     action. State why the database value itself can remain unchanged while business state is corrupt.
+  3. RED HERRING: DATABASE REPLICATION OR ROW WRITE. Explain why a stale replica or an accidental
+     write is not the origin, citing schema, deployment-timeline, and writer-inventory. State what
+     the complete writer inventory proves.
+  4. RED HERRING: BILLING STATE MACHINE OR ADMIN UI. Explain why billing and the UI are not the
+     first corrupting components, citing reader-trace. State what value they receive and why they
+     are downstream observers.
+  5. ADEQUATE FIX. From fixes, name the one option that repairs existing data and makes future enum
+     additions safe. State the exact pre-deploy mapping that the migration must use and the durable
+     representation afterward.
+  6. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is shallow or harmful,
+     naming the future regression, wrong mapping, or downstream-only masking it creates.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: subscription-entity
+    type: code
+    label: subscription service entity deployed in release 2025.07.14
+    content: |
+      // This is the COMPLETE persistence mapping used by subscription-service. Every reader and
+      // writer of subscriptions uses this JPA entity. The database column is an INTEGER; no custom
+      // converter maps state to a stable string code.
+
+      public enum SubscriptionState {
+          TRIAL,          // ordinal 0
+          ACTIVE,         // ordinal 1
+          GRACE_PERIOD,   // ordinal 2  (added by release 2025.07.14)
+          PAST_DUE,       // ordinal 3
+          CANCELED        // ordinal 4
+      }
+
+      @Entity
+      @Table(name = "subscriptions")
+      public class Subscription {
+          @Id UUID id;
+
+          @Enumerated(EnumType.ORDINAL) // persists enum.ordinal()
+          @Column(name = "state", nullable = false)
+          SubscriptionState state;
+      }
+
+      // Invariant: a persisted subscription state must retain the same business meaning across
+      // deployments.
+  - id: predeploy-map
+    type: spec
+    label: release 2025.07.07 enum order and persisted state mapping
+    content: |
+      // This manifest is the complete production enum definition BEFORE release 2025.07.14.
+      public enum SubscriptionState {
+          TRIAL,      // persisted ordinal 0
+          ACTIVE,     // persisted ordinal 1
+          PAST_DUE,   // persisted ordinal 2
+          CANCELED    // persisted ordinal 3
+      }
+
+      Pre-deploy persisted semantics:
+        state = 0 -> TRIAL
+        state = 1 -> ACTIVE
+        state = 2 -> PAST_DUE
+        state = 3 -> CANCELED
+
+      No GRACE_PERIOD subscription existed before the deployment. The GRACE_PERIOD feature flag
+      remained disabled during this rollout, so no production writer could intentionally create a
+      new grace-period state while the ordinal mapping was changed.
+  - id: schema
+    type: spec
+    label: subscriptions table schema and primary database topology
+    content: |
+      CREATE TABLE subscriptions (
+        id UUID PRIMARY KEY,
+        customer_id UUID NOT NULL,
+        state INTEGER NOT NULL,
+        state_changed_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      database:
+        primary: billing-db-primary
+        read_replicas: 0
+        subscription_reads: primary
+        subscription_writes: primary
+        audit_trigger: enabled
+
+      # state is an INTEGER with no PostgreSQL enum type, trigger, default, or database-side
+      # translation. The database stores and returns the exact integer written by the entity. There
+      # are no replicas, so all incident reads and writes observe the one primary.
+  - id: deployment-timeline
+    type: log
+    label: subscription release and incident timeline
+    content: |
+      08:55:00  Release 2025.07.07 active. Entity order: TRIAL=0, ACTIVE=1, PAST_DUE=2, CANCELED=3.
+      09:00:00  Release 2025.07.14 starts rolling out new subscription-service pods.
+      09:02:00  First new pod reads sub-822, database state=2, decodes it as GRACE_PERIOD.
+      09:03:00  Entitlement worker grants grace access to sub-822 based on decoded GRACE_PERIOD.
+      09:04:00  Dunning worker reads sub-913, database state=3, decodes it as PAST_DUE, sends dunning.
+      09:05:00  Incident opened. Audit log shows no UPDATE subscriptions statements from 08:55–09:05.
+      09:07:00  All pods run 2025.07.14. Behavior affects every row with state 2 or 3.
+      09:10:00  GRACE_PERIOD feature flag checked: false; no transition into GRACE_PERIOD is enabled.
+  - id: affected-rows
+    type: table
+    label: representative subscription rows before and after the enum deployment
+    content: |
+      subscription_id  stored_state_integer  semantic_before_release  semantic_after_release_decode  observed_effect
+      sub-701          0                     TRIAL                    TRIAL                         none
+      sub-702          1                     ACTIVE                   ACTIVE                        none
+      sub-822          2                     PAST_DUE                 GRACE_PERIOD                  grace entitlement granted
+      sub-913          3                     CANCELED                 PAST_DUE                      dunning email scheduled
+
+      Audit comparison:
+        sub-822 state=2, state_changed_at=2025-07-03T10:00:00Z, updated_at=2025-07-03T10:00:00Z
+        sub-913 state=3, state_changed_at=2025-07-04T12:00:00Z, updated_at=2025-07-04T12:00:00Z
+
+      # The stored integers and timestamps are unchanged across the deployment.
+  - id: reader-trace
+    type: log
+    label: traces through subscription reader, billing, entitlement, and admin UI
+    content: |
+      trace=t-822
+        subscription-service: SELECT state FROM subscriptions WHERE id='sub-822' -> 2
+        JPA EnumType.ORDINAL decoder: SubscriptionState.values()[2] -> GRACE_PERIOD
+        entitlement-service: received state=GRACE_PERIOD -> grants grace entitlement
+        admin-ui: received state=GRACE_PERIOD -> displays "Grace period"
+
+      trace=t-913
+        subscription-service: SELECT state FROM subscriptions WHERE id='sub-913' -> 3
+        JPA EnumType.ORDINAL decoder: SubscriptionState.values()[3] -> PAST_DUE
+        billing-service: received state=PAST_DUE -> schedules dunning workflow
+        admin-ui: received state=PAST_DUE -> displays "Payment overdue"
+
+      # Billing, entitlement, and admin-ui receive the enum value from subscription-service; none
+      # of them reads the integer column or writes subscriptions.
+  - id: writer-inventory
+    type: code
+    label: complete subscription state writer inventory and grace flag
+    content: |
+      // Complete inventory: these are the ONLY methods that write subscriptions.state.
+      transitionToTrial()     -> sets SubscriptionState.TRIAL
+      activate()              -> sets SubscriptionState.ACTIVE
+      markPastDue()           -> sets SubscriptionState.PAST_DUE
+      cancel()                -> sets SubscriptionState.CANCELED
+
+      public void enterGracePeriod(Subscription subscription) {
+          if (!featureFlags.isEnabled("subscription-grace-period")) {
+              throw new IllegalStateException("GRACE_PERIOD is disabled");
+          }
+          subscription.setState(SubscriptionState.GRACE_PERIOD);
+      }
+
+      audit query, 08:55–09:10:
+        INSERT subscriptions: 0
+        UPDATE subscriptions SET state = ...: 0
+        enterGracePeriod calls: 0
+  - id: fixes
+    type: note
+    label: candidate repairs for ordinal state corruption
+    content: |
+      F1: Freeze state writes briefly and migrate the INTEGER column using the PRE-DEPLOY mapping:
+            0 -> 'TRIAL', 1 -> 'ACTIVE', 2 -> 'PAST_DUE', 3 -> 'CANCELED'.
+          Change the column to a stable TEXT code (or use an explicit converter with those exact
+          codes), update the entity to persist the named code rather than EnumType.ORDINAL, then
+          represent GRACE_PERIOD as the new literal 'GRACE_PERIOD'. Validate counts before and after
+          the migration and re-enable writes.
+
+      F2: Move GRACE_PERIOD to the end of the Java enum so PAST_DUE and CANCELED regain ordinals 2
+          and 3, while leaving EnumType.ORDINAL in place.
+
+      F3: Leave the entity unchanged and teach billing, entitlement, and admin-ui to reinterpret
+          GRACE_PERIOD as PAST_DUE and PAST_DUE as CANCELED during this incident.
+
+      F4: Run `UPDATE subscriptions SET state = 1 WHERE state = 2` so rows decoded as GRACE_PERIOD
+          become ACTIVE, then leave the ordinal mapping unchanged.
+
+      Constraints:
+        - Existing subscription business meaning must be preserved exactly, including PAST_DUE and
+          CANCELED rows; no downstream service may need a one-off compensation mapping.
+        - The repair must support legitimately creating GRACE_PERIOD subscriptions after the feature
+          flag is enabled.
+        - Future enum additions or reorderings must not reinterpret any persisted state.
+tags: [debugging, state-corruption, enum-ordinal, persistence, migration, subscription-state]

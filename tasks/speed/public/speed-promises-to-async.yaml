@@ -1,0 +1,35 @@
+id: speed-promises-to-async
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: hard
+title: Rewrite a Promise Chain Into Async/Await
+summary: >-
+  Mechanically transform a multi-step Promise chain into async/await while preserving return value,
+  concurrency, and wrapped error semantics exactly.
+prompt: |
+  Rewrite [promise-code] to async/await. Preserve behavior exactly.
+
+  1. Keep the function name `syncActiveUsers` and module export shape unchanged.
+  2. Keep profile fetches concurrent (equivalent to the existing `Promise.all` over IDs).
+  3. Keep the same wrapped error behavior: any failure must throw `new Error("sync failed: ...")`.
+artifacts:
+  - id: promise-code
+    type: code
+    label: Original Promise-chain implementation
+    content: |
+      function syncActiveUsers(api, store) {
+        return api
+          .fetchUserIds()
+          .then((ids) => Promise.all(ids.map((id) => api.fetchProfile(id))))
+          .then((profiles) => profiles.filter((profile) => profile.active))
+          .then((activeProfiles) =>
+            store.saveMany(activeProfiles).then(() => activeProfiles.length),
+          )
+          .catch((err) => {
+            throw new Error(`sync failed: ${err.message}`);
+          });
+      }
+
+      module.exports = { syncActiveUsers };
+tags: [javascript, async-await, refactor]

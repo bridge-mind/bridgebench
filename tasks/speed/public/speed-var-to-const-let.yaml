@@ -1,0 +1,46 @@
+id: speed-var-to-const-let
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: hard
+title: Refactor Legacy JavaScript var Declarations to const and let
+summary: >-
+  Mechanically refactor a legacy JavaScript utility function using var declarations, string concatenation,
+  and manual loops into modern ES6+ using const, let, arrow functions, and template literals.
+prompt: |
+  Refactor the legacy JavaScript function in [legacy-code] to modern ES6+. Preserve behavior exactly.
+
+  1. Replace all `var` declarations with block-scoped `const` or `let` appropriately.
+  2. Convert string concatenation to ES6 template literals.
+  3. Convert the manual `for` loop to modern array iteration methods (e.g., `filter` and `map`) or a `for...of` loop.
+  4. Use arrow functions for any inner callbacks.
+artifacts:
+  - id: legacy-code
+    type: code
+    label: Legacy JavaScript implementation
+    content: |
+      function processUserOrders(users) {
+        var result = [];
+        for (var i = 0; i < users.length; i++) {
+          var user = users[i];
+          if (user.active && user.orders) {
+            var totalSpent = 0;
+            for (var j = 0; j < user.orders.length; j++) {
+              var order = user.orders[j];
+              if (order.status === 'completed') {
+                totalSpent += order.amount;
+              }
+            }
+            var summary = 'User ' + user.name + ' (ID: ' + user.id + ') spent $' + totalSpent.toFixed(2);
+            result.push({
+              userId: user.id,
+              summary: summary,
+              totalSpent: totalSpent
+            });
+          }
+        }
+        return result;
+      }
+
+      module.exports = { processUserOrders };
+tags: [javascript, refactor, modern-es6]

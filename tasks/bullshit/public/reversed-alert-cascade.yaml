@@ -1,5 +1,5 @@
 id: reversed-alert-cascade
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: reversed-causality
 difficulty: expert
@@ -201,30 +201,15 @@ artifacts:
       09:42:40 pagerbot: 3 CRIT pages in 14s - notify-api 5xx, dispatch-queue depth,
                notify-api p99
       09:43:35 d.varga: ack all three. 5xx ~40%, queue pinned at 18k
-      09:44:05 k.osei (IC): those 503s are enqueue rejections - the queue hit max_depth at
-               09:39:12. drain is fixed at 9,600/min and brightcart's campaign has been
-               pushing 12-18k/min since ~09:31
-      09:44:35 k.osei: resizing queue-workers 64 -> 128 now. the API autoscaler already went
-               8 -> 14 at 09:39 but that can't help; the bottleneck is the queue, not API
-               capacity
+      09:44:35 k.osei (IC): resizing queue-workers 64 -> 128 now
       09:46:20 pagerbot: notify-api 5xx 0.3% - below alert threshold
       09:47:10 d.varga: depth 8.9k and draining. rejections stopped the minute the new
                workers came up
       09:48:20 pagerbot: dispatch-queue depth 0
       09:49:30 p.reyes: wild morning. the paging storm at 09:42 really hammered the API huh
-      09:50:05 k.osei: other way around. the API errors started at 09:39, three minutes
-               before the first page. alerts fire because metrics breach; pages fire because
-               alerts fire. pages go out through SignalWave and never touch our data plane
       09:50:40 p.reyes: and the autoscaler blast at 09:39 is what pushed traffic to 18k?
-      09:51:15 k.osei: no - traffic crossed 12k at 09:36 and the scale-up is a response to
-               it (three-minute sustained rule). pods don't generate client requests, and
-               the edge counter only counts external API keys. it's all brightcart-prod
-      09:52:00 d.varga: also the backlog was at cap before any alert existed - depth hit
-               18,000 at 09:39:12 and the first alert fired 09:41:05. nothing in monitoring
-               can even write to dispatch-queue
       09:52:30 p.reyes: ok. I'll take a pass at the retro
-      09:57:05 k.osei: resolved. p.reyes - please check the trigger directions in the
-               pipeline spec before you file that retro
+      09:57:05 k.osei: resolved
   - id: draft-retro
     type: note
     label: Draft retrospective for INC-2214 (unreviewed narrative)

@@ -1,0 +1,124 @@
+id: synthesis-protobuf-compat-release
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Protobuf Event Upgrade Across Generated and Hand-Rolled Consumers
+summary: Synthesize a schema diff, generated binding behavior, a strict hand-rolled decoder, deployment inventory, feature gates, and release policy to derive the only safe rollout and rollback plan for OrderEvent v3.
+prompt: |
+  Release OrderEvent schema revision 3 across the complete topology in [deployment-inventory]. No
+  artifact alone contains the answer: combine the schema change, each consumer's decoder behavior,
+  producer gate, and compatibility policy. [release-chat] is unverified.
+
+  1. State whether producer `orders 5.2` may be deployed with `emitRiskBand=false` before either
+     consumer upgrade, and prove the answer for every field it emits in that state.
+  2. Give the earliest safe ordered rollout that ends with `emitRiskBand=true` and all target versions
+     deployed. Group steps that may be simultaneous and name the gate between steps.
+  3. Evaluate plans A-D in [candidate-plans]. For every invalid plan, identify the first incompatible
+     producer/consumer pair and exact field/tag behavior that breaks it.
+  4. Determine whether `billing 3.8` must be upgraded at all for wire compatibility, and separately
+     whether policy still requires its target upgrade.
+  5. Give the safe rollback sequence after the gate is enabled if `analytics 2.5` must be rolled back
+     to 2.4. State which component can remain at its target and why.
+  6. Produce a final compatibility matrix for old/new producer output versus each old/new consumer,
+     labeling every cell safe or unsafe with cited evidence.
+artifacts:
+  - id: schema-diff
+    type: diff
+    label: OrderEvent proto revision 2 to revision 3
+    content: |
+      message OrderEvent {
+        string order_id = 1;
+      - string account_id = 2;
+      + string customer_id = 2; // symbol rename only; wire tag and string type unchanged
+        int64 total_cents = 3;
+        OrderState state = 4;
+        reserved 5, 6;
+      + optional string risk_band = 7;
+      }
+
+      Revision 3 never reuses reserved tags. `risk_band` is absent on revision-2 messages and, while
+      the producer gate is false, on revision-3 messages. Renaming the source symbol at tag 2 does not
+      change encoded bytes.
+  - id: wire-policy
+    type: spec
+    label: Complete compatibility and release policy
+    content: |
+      W1. Protobuf wire identity is field number plus wire type, not source symbol name.
+      W2. Generated decoders in this estate preserve known fields, ignore unknown fields, and use the
+          declared default for an absent optional field.
+      W3. A hand-rolled decoder is compatible only with the exact tags its own source says it accepts.
+      W4. The release gate may emit tag 7 only after every consumer role is both at its listed target
+          version and able to accept tag 7. Wire tolerance in an older generated decoder does not waive
+          this audited rollout gate.
+      W5. Rollback of any tag-7-capable consumer to a tag-7-rejecting version requires disabling the
+          producer gate and observing the drain condition before rollback.
+      W6. Drain condition: `oldest_order_event_age_seconds=0` for two consecutive 30-second samples
+          after the gate is disabled.
+      W7. The approved release target upgrades orders, billing, and analytics to their target versions,
+          even if an old version happens to be wire-compatible. No shadow consumers exist.
+
+      W1-W7 are the complete policy. Queue delivery preserves bytes; it does not strip unknown fields.
+  - id: deployment-inventory
+    type: table
+    label: Complete current and target deployment inventory
+    content: |
+      role       | current | target | instances | input
+      producer   | orders 5.1 | orders 5.2 | 4 | writes OrderEvent
+      consumer A | billing 3.8 | billing 3.9 | 6 | generated protobuf decoder
+      consumer B | analytics 2.4 | analytics 2.5 | 3 | hand-rolled decoder
+
+      All instances of a role change atomically. There are no consumers beyond A and B.
+  - id: producer-code
+    type: code
+    label: orders 5.2 event construction and gate
+    content: |
+      function toEvent(order: Order): OrderEventV3 {
+        const event = {
+          order_id: order.id,         // tag 1
+          customer_id: order.account, // tag 2; same bytes as old account_id
+          total_cents: order.total,    // tag 3
+          state: mapState(order),      // tag 4
+        };
+        if (flags.emitRiskBand) event.risk_band = classify(order); // tag 7
+        return event;
+      }
+
+      Deployment defaults `emitRiskBand=false`. Gate changes are atomic across all four producers.
+      orders 5.1 emits only tags 1-4 using revision 2.
+  - id: consumer-code
+    type: code
+    label: Deployed and target consumer decoder behavior
+    content: |
+      // billing 3.8 generated from rev 2:
+      OrderEventV2.parse(bytes); // generated runtime ignores unknown fields by W2
+      // billing 3.9 generated from rev 3:
+      OrderEventV3.parse(bytes); // risk_band defaults to "" when absent
+
+      // analytics 2.4 hand decoder (complete accepted-tag set):
+      const ACCEPTED = new Set([1,2,3,4]);
+      for (const field of scan(bytes)) if (!ACCEPTED.has(field.tag)) throw UnknownTag(field.tag);
+
+      // analytics 2.5 hand decoder:
+      const ACCEPTED = new Set([1,2,3,4,7]);
+      // absent tag 7 maps to riskBand=null; tags 5 and 6 remain rejected.
+  - id: candidate-plans
+    type: table
+    label: Proposed release plans
+    content: |
+      A. Deploy orders 5.2 (gate false); enable gate; then upgrade both consumers.
+      B. Upgrade analytics 2.5; deploy orders 5.2 (gate false); enable gate; upgrade billing 3.9 last.
+      C. Upgrade billing 3.9; deploy orders 5.2 and enable gate; upgrade analytics 2.5 last.
+      D. Upgrade both consumers; deploy orders 5.2 with gate false; enable gate after fleet health.
+
+      Plans omit no unlisted steps. Evaluate the ordering exactly as written against W1-W7.
+  - id: release-chat
+    type: note
+    label: Unverified release-room claims
+    content: |
+      - "Changing account_id to customer_id breaks every revision-2 consumer."
+      - "Generated billing 3.8 rejects risk_band because it never compiled tag 7."
+      - "The queue automatically strips unknown tags."
+      - "analytics 2.4 is safe while the flag is false, but not after tag 7 is emitted."
+      - "For rollback, rolling analytics back first and disabling the flag later is equivalent."
+tags: [protobuf, compatibility, schema-evolution, rollout, multi-artifact-synthesis]

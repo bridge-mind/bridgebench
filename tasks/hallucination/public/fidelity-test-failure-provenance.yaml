@@ -1,0 +1,80 @@
+id: fidelity-test-failure-provenance
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: Exact Test-Failure Provenance Across Retries, Shards, and Near-Match Commits
+summary: Extract the precise failing assertion, attempt history, shard, runtime, artifact path, and fix attribution from a CI packet containing deliberately similar runs.
+prompt: |
+  Reconstruct test `LeaseStore renews at equality boundary` for authoritative run `run-8801` only.
+  Preserve case, quoting, punctuation, IDs, paths, and timestamps exactly.
+
+  1. Give workflow, job, shard, OS, runtime version, and commit for run-8801.
+  2. Transcribe the test file path, line:column, expected value, received value, and assertion message.
+  3. List all attempts in order with start timestamp, seed, and result; state final job conclusion.
+  4. Give uploaded trace artifact name, relative failing screenshot path, and SHA-256.
+  5. State the first commit that fixed this exact equality assertion and the verification run that
+     proves it, without borrowing the near-match timeout fix.
+  6. Build a provenance table marking every conflicting value in [near-match-run] and [draft-summary]
+     as belonging or not belonging to run-8801.
+artifacts:
+  - id: run-manifest
+    type: config
+    label: Authoritative run-8801 manifest
+    content: |
+      workflow: ci-linux.yml
+      run: run-8801
+      job: test-node-3
+      shard: 3/6
+      os: ubuntu-24.04
+      node: v22.16.0
+      commit: c801fa9120ab
+      conclusion: failure
+  - id: attempt-log
+    type: log
+    label: Exact attempts for run-8801
+    content: |
+      A1 start=2026-07-18T22:14:03.441Z seed=0x00A17C result=FAIL
+      A2 start=2026-07-18T22:14:05.902Z seed=0x00A17C result=FAIL
+      A3 start=2026-07-18T22:14:08.410Z seed=0x00A17C result=FAIL
+      attempts_exhausted=3
+  - id: assertion-output
+    type: log
+    label: Failure output attempt A3
+    content: |
+      packages/lease/test/renew-boundary.test.ts:118:27
+      Test: LeaseStore renews at equality boundary
+      AssertionError: expected lease.expiresAt to equal 42000
+      Expected: 42000
+      Received: 41999
+  - id: trace-manifest
+    type: config
+    label: Uploaded diagnostic artifact
+    content: |
+      artifact: playwright-trace-test-node-3-attempt-3.zip
+      screenshot: test-results/lease-renew-equality/error-context.png
+      sha256: 05a77a3b9bd78c64a529defc8ee1f05fd75b519d7428e4ef82e094701750217b
+  - id: fix-history
+    type: table
+    label: Commits and verification
+    content: |
+      commit        | change                                      | run      | result
+      d9aa7701bc11  | use `now <= expiresAt` at renewal boundary   | run-8819 | PASS 3/3
+      e0174cd392ac  | raise lease integration timeout to 10s       | run-8820 | PASS
+
+      run-8819 reran the exact file and seed from run-8801. run-8820 exercised a different timeout
+      test and is not evidence for the equality assertion.
+  - id: near-match-run
+    type: log
+    label: Similar macOS failure run-8798
+    content: |
+      workflow=ci-macos.yml shard=2/6 os=macos-15 node=v22.15.1 commit=bb7120aa
+      test="LeaseStore renew timeout" Expected=10000 Received=5000 seed=0x00A17B
+      trace=playwright-trace-timeout.zip
+  - id: draft-summary
+    type: note
+    label: Error-prone draft
+    content: |
+      "run-8801 failed on macOS shard 2 at line 118:26 under Node 22.15.1. It was flaky: attempt 2
+      passed. Commit e0174cd392ac fixed Expected 10000 / Received 5000. Trace was timeout.zip."
+tags: [testing, ci, provenance, citation-fidelity, retries]

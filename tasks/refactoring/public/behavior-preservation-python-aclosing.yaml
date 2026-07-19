@@ -1,0 +1,112 @@
+id: behavior-preservation-python-aclosing
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: Adopt aclosing Without Changing Async-Generator Finalization
+summary: >-
+  A Python coroutine searches a one-shot async generator and deterministically closes it on return,
+  exhaustion, predicate failure, and cancellation. Four shorter rewrites differ in generator
+  construction, close timing, and exception precedence; one preserves all observables and meets the
+  context-manager refactoring goal.
+prompt: |
+  Use only original-coroutine, behavior-contract, schedules, rewrites, and manifest. Cite artifact ids.
+  Give behavior-preserving / changes-behavior and meets-goal / fails-goal for each rewrite.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For every change, give the first P1..P6 witness and exact log/result/exception.
+  3. Identify the unique rewrite satisfying both behavior and goal.
+  4. Trace P5 through the original and accepted rewrite.
+  5. State which exception escapes when predicate and aclose both fail.
+  6. Evaluate reviewer Noor's claim that async for closes an async generator immediately on return.
+artifacts:
+  - id: original-coroutine
+    type: code
+    label: Existing Python 3.12 coroutine
+    content: |
+      async def first_match(make_source, predicate):
+          it = make_source()
+          try:
+              async for item in it:
+                  if predicate(item):
+                      return item
+              return None
+          finally:
+              await it.aclose()
+
+      make_source() is synchronous and appends "make". Iteration appends "next:x" before yielding x.
+      predicate appends "pred:x" and may return or raise. aclose appends "close" before returning or
+      raising. Exact exception identity and log order are observable.
+  - id: behavior-contract
+    type: spec
+    label: Exhaustive observables and refactoring goal
+    content: |
+      C1 make_source is called exactly once before any await.
+      C2 items/predicates are evaluated in order until first truthy result, then no further next call.
+      C3 aclose is called and awaited exactly once on match, exhaustion, predicate throw, iteration
+         throw, or task cancellation after construction.
+      C4 close completes before result/exception/cancellation is observed by caller.
+      C5 if aclose raises, its exact exception replaces a pending return or earlier exception; Python
+         exception context may refer to the displaced exception, but no wrapper/group is created.
+      C6 construction failure escapes and no iterator exists to close.
+      C7 exact logs and result object identity are public.
+
+      Goal G: express iterator lifetime with contextlib.aclosing in first_match and remove its explicit
+      finally/aclose call, while preserving C1..C7.
+  - id: schedules
+    type: table
+    label: Authoritative async schedules
+    content: |
+      P1 source [1,2], predicate true at 2 -> log make,next:1,pred:1,next:2,pred:2,close; return object 2.
+      P2 empty source -> make,close; return None.
+      P3 predicate at 1 throws E -> make,next:1,pred:1,close; throw exact E.
+      P4 iteration before first item throws N -> make,next-error,close; throw exact N.
+      P5 predicate throws E and aclose throws C -> logs through close; throw exact C with E displaced.
+      P6 cancellation arrives while awaiting next -> close is awaited, then same CancelledError escapes.
+  - id: rewrites
+    type: code
+    label: Four proposed Python rewrites
+    content: |
+      # rewrite-a
+      async def first_match(make_source, predicate):
+          async with contextlib.aclosing(make_source()) as it:
+              async for item in it:
+                  if predicate(item): return item
+              return None
+
+      # rewrite-b
+      async def first_match(make_source, predicate):
+          async for item in make_source():
+              if predicate(item): return item
+          return None
+
+      # rewrite-c
+      async def first_match(make_source, predicate):
+          async with contextlib.aclosing(make_source()) as it:
+              async for item in make_source():
+                  if predicate(item): return item
+              return None
+
+      # rewrite-d
+      async def first_match(make_source, predicate):
+          it = make_source()
+          try:
+              async for item in it:
+                  if predicate(item): return item
+              return None
+          finally:
+              await it.aclose()
+
+      contextlib.aclosing(thing).__aexit__ awaits thing.aclose() and returns false. It does not wrap
+      exceptions. Python async-for does not guarantee eager aclose when a loop exits early.
+  - id: manifest
+    type: note
+    label: Complete runtime and reviewer assumption
+    content: |
+      rewrite-a through rewrite-d are complete. contextlib is Python 3.12's standard implementation.
+      Source generators are distinct on each make_source call. Cancellation is delivered according
+      to schedules and aclose itself does not swallow cancellation unless a schedule gives close error.
+
+      Noor's claim is false under the frozen runtime: async-for owns iteration, not necessarily the
+      generator's deterministic lifetime; P1 requires explicit/context-managed closure before return.
+tags: [refactoring, behavior-preservation, python, async-generators, lifecycle]

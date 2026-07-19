@@ -1,0 +1,239 @@
+id: error-propagation-graphql-mask
+version: 1.1.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: GraphQL API Returns Generic "Internal Server Error" for Every Backend Failure
+summary: >-
+  A GraphQL API returns a generic "Internal Server Error" for all backend failures, with no error
+  code or decline reason, even though the payment service emits structured error details. The GraphQL
+  formatter, payment service, a network timeout, and the gateway catch-all all look guilty. Reconcile
+  the service trace, code layers, and payment response to identify where structured data is first
+  lost and pick the fix that holds.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (client-error, resolver-code,
+  order-payment-module, error-formatter, payment-response, service-trace, gateway-catch, fixes).
+  Cite the artifact id(s) for every claim. Use this vocabulary for verdicts: root-cause, red-herring,
+  adequate-fix, shallow-fix.
+
+  The GraphQL API serves a checkout mutation. When the payment fails (card expired), the client
+  receives a generic "Internal Server Error" with no error code, no decline reason, and no actionable
+  message. The payment service returns complete, structured error data. Trace the error through every
+  layer to find where the structured data is first discarded.
+
+  1. TRUE ORIGIN OF MASKING. Name the single layer that first discards the structured error data.
+     Cite the exact artifact id and code location. State what error object enters this layer and
+     what leaves it.
+  2. ERROR PROPAGATION CHAIN. From service-trace, trace the error from the payment service through
+     every intermediate layer to the client. At each hop, cite what the error object contains
+     (fields, codes, messages) and whether that hop preserves, transforms, or discards information.
+  3. RED HERRING: GRAPHQL ERROR FORMATTER. Explain why the error formatter (error-formatter) is NOT
+     the origin of the masking. State what it receives and what it would output if it received
+     structured error data. Cite the code that shows it preserves error codes when present.
+  4. RED HERRING: PAYMENT SERVICE RESPONSE. Explain why the payment service is NOT at fault, citing
+     payment-response. State that it returns complete, structured error data with code, decline
+     reason, and user-facing message.
+  5. RED HERRING: NETWORK TIMEOUT / GATEWAY CATCH-ALL. Explain why the error is NOT caused by a
+     network timeout between services, citing service-trace. Explain why the gateway catch-all
+     (gateway-catch) is NOT the origin of the masking — it catches errors that are ALREADY generic
+     by the time they reach it.
+  6. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression,
+     and state the invariant it enforces about structured error propagation through the masking layer.
+  7. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow
+     or harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: client-error
+    type: log
+    label: GraphQL error response as seen by the checkout client
+    content: |
+      POST /graphql
+      Mutation: checkout(cartId: "cart-881", paymentMethodId: "pm-expired-4242")
+
+      Response (HTTP 200, GraphQL error):
+      {
+        "data": { "checkout": null },
+        "errors": [
+          {
+            "message": "Internal Server Error",
+            "path": ["checkout"],
+            "extensions": {}
+          }
+        ]
+      }
+      # No error code, no decline reason, no actionable message. The client cannot distinguish a
+      # card decline from an inventory shortage from a permission denial. All backend errors produce
+      # this same response shape.
+  - id: resolver-code
+    type: code
+    label: graphql/resolvers/checkout.resolver.ts — the checkout mutation resolver (complete)
+    content: |
+      // This resolver calls the order service to process checkout. It catches errors and re-throws
+      // them as GraphQL errors.
+
+      import { OrderService } from '../../services/order.service';
+
+      export const checkoutResolver = {
+        Mutation: {
+          checkout: async (_: any, args: { cartId: string; paymentMethodId: string }, ctx: Context) => {
+            try {
+              return await OrderService.processCheckout(args.cartId, args.paymentMethodId);
+            } catch (error: any) {
+              throw new GraphQLError(error.message || 'Unknown error', {
+                extensions: {
+                  code: error.code || 'INTERNAL_SERVER_ERROR',
+                  declineReason: error.declineReason || undefined,
+                },
+              });
+            }
+          },
+        },
+      };
+  - id: order-payment-module
+    type: code
+    label: services/order.service.ts — processCheckout → payment call (complete payment integration)
+    content: |
+      // This is the COMPLETE code path from the resolver to the payment service call.
+      // There is no other service, middleware, or interceptor between the resolver and this module
+      // that handles or transforms errors. The resolver calls processCheckout() directly.
+
+      import { PaymentClient } from '../clients/payment.client';
+
+      export class OrderService {
+        static async processCheckout(cartId: string, paymentMethodId: string) {
+          const cart = await CartRepository.getCart(cartId);
+          if (!cart) throw new AppError('Cart not found', 'CART_NOT_FOUND');
+
+          try {
+            const charge = await PaymentClient.createCharge(cart.total, paymentMethodId);
+            return { orderId: charge.orderId, status: 'completed' };
+          } catch (paymentError: any) {
+            console.error('Payment processing failed', paymentError);
+            throw new Error('Internal Server Error');
+          }
+        }
+      }
+  - id: error-formatter
+    type: code
+    label: graphql/error-formatter.ts — GraphQL error formatting middleware (complete)
+    content: |
+      // This formatter runs AFTER the resolver throws a GraphQLError. It controls what fields
+      // appear in the client-facing error response.
+
+      export function formatGraphQLError(error: GraphQLError) {
+        // Security: strip stack traces and internal details from production responses.
+        // Preserve extensions.code and extensions.declineReason if present.
+        const formatted = {
+          message: error.message,
+          path: error.path,
+          extensions: {
+            code: error.extensions?.code || 'INTERNAL_SERVER_ERROR',
+            declineReason: error.extensions?.declineReason || undefined,
+          },
+        };
+
+        // Remove undefined keys for clean JSON
+        if (!formatted.extensions.declineReason) delete formatted.extensions.declineReason;
+
+        return formatted;
+      }
+  - id: payment-response
+    type: log
+    label: payment service response for the failing charge (captured from payment service logs)
+    content: |
+      # Payment service internal log for the pm-expired-4242 charge attempt:
+      14:30:01.100  payment-svc  createCharge(amount=59.99, pm=pm-expired-4242)
+      14:30:01.250  payment-svc  Stripe API returned: {
+        "error": {
+          "type": "card_error",
+          "code": "expired_card",
+          "decline_code": "expired_card",
+          "message": "Your card has expired.",
+          "param": "payment_method"
+        }
+      }
+      14:30:01.251  payment-svc  Throwing PaymentError {
+        code: "CARD_EXPIRED",
+        declineReason: "expired_card",
+        userMessage: "Your card has expired. Please update your payment method.",
+        httpStatus: 402,
+        isRetryable: false
+      }
+  - id: service-trace
+    type: log
+    label: distributed trace for the checkout mutation (hop-by-hop error transformation)
+    content: |
+      # Trace ID: trace-88190 — checkout mutation for cart-881, pm-expired-4242
+      # Each hop shows what error object exists at that layer.
+
+      HOP 1: payment-svc (14:30:01.251)
+        Error thrown: PaymentError {
+          code: "CARD_EXPIRED", declineReason: "expired_card",
+          userMessage: "Your card has expired. Please update your payment method.",
+          httpStatus: 402
+        }
+        Latency: 151ms (14:30:01.100 -> 14:30:01.251); configured inter-service timeout: 5000ms
+
+      HOP 2: order-payment-module / OrderService.processCheckout() (14:30:01.252)
+        Error received: PaymentError { code, declineReason, userMessage, httpStatus }
+        Error thrown:   Error { message: "Internal Server Error" }
+
+      HOP 3: checkout.resolver (14:30:01.253)
+        Error received: Error { message: "Internal Server Error" }
+        Error thrown:   GraphQLError { message: "Internal Server Error",
+                        extensions: { code: "INTERNAL_SERVER_ERROR" } }
+
+      HOP 4: error-formatter (14:30:01.253)
+        Error received: GraphQLError { message: "Internal Server Error",
+                        extensions: { code: "INTERNAL_SERVER_ERROR" } }
+        Error output:   { message: "Internal Server Error", extensions: { code: "INTERNAL_SERVER_ERROR" } }
+
+      HOP 5: client
+        Received: { "errors": [{ "message": "Internal Server Error", "extensions": {} }] }
+  - id: gateway-catch
+    type: code
+    label: graphql/gateway-error-handler.ts — top-level catch-all (complete)
+    content: |
+      // This is the top-level error handler that catches any unhandled error from the GraphQL
+      // execution pipeline. It runs AFTER the resolver and formatter.
+
+      export function gatewayErrorHandler(error: any, req: Request, res: Response) {
+        // If the error is already a GraphQLError (from the resolver), it has already been formatted
+        // by error-formatter and sent in the GraphQL response body. This handler only catches
+        // errors that escape the GraphQL pipeline entirely (e.g., middleware crashes).
+        console.error('Gateway catch-all:', error.message);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal Server Error' });
+        }
+      }
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: In OrderService.processCheckout(), propagate the structured PaymentError instead of
+          wrapping it in a generic Error:
+            catch (paymentError: any) {
+              throw new AppError(paymentError.userMessage || 'Payment failed', paymentError.code || 'PAYMENT_ERROR', {
+                declineReason: paymentError.declineReason,
+                httpStatus: paymentError.httpStatus,
+                isRetryable: paymentError.isRetryable,
+              });
+            }
+
+      F2: Modify the error-formatter to add a hardcoded "PAYMENT_ERROR" code whenever the message
+          contains the word "payment" or "card" (string-matching heuristic).
+
+      F3: Add a global error-recovery middleware between the resolver and the formatter that queries
+          the payment service's error log by trace ID to reconstruct the original error.
+
+      F4: Modify the resolver to catch errors and call the payment service a second time to check
+          the charge status, then infer the error type from the charge state.
+
+      Constraints:
+        - The fix must propagate structured error data (code, decline reason, user-facing message)
+          from the payment service to the client without leaking internal implementation details
+          (stack traces, internal IDs).
+        - The fix must not add additional network calls to the error path (latency budget: <50ms
+          for error formatting).
+tags: [debugging, error-propagation, graphql, error-masking, structured-errors, payment]

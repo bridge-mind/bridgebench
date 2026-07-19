@@ -1,0 +1,38 @@
+id: speed-go-signed-webhook-consumer
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: expert
+title: Generate a Hardened Go Webhook Consumer
+summary: Produce a complete Go HTTP handler with bounded-body HMAC verification, replay protection, idempotency, and sanitized failures.
+prompt: |
+  Write a complete compilable Go file `webhook.go` implementing [interfaces] and every rule
+  in [handler-contract]. Emit the full file only; use only the standard library.
+artifacts:
+  - id: interfaces
+    type: spec
+    label: Required public interfaces
+    content: |
+      package webhook
+      type Event struct { ID string `json:"id"`; Type string `json:"type"`; Data json.RawMessage `json:"data"` }
+      type Store interface {
+        Begin(ctx context.Context, eventID string) (alreadyDone bool, commit func() error, rollback func() error, err error)
+      }
+      type Processor interface { Process(ctx context.Context, event Event) error }
+      Export `func NewHandler(secret []byte, store Store, processor Processor, now func() time.Time, logger *slog.Logger) (http.Handler, error)`.
+  - id: handler-contract
+    type: spec
+    label: Exhaustive HTTP and security behavior
+    content: |
+      Reject empty secret/nil dependencies at construction. POST only; body maximum exactly
+      1 MiB and return 413 when exceeded. Required headers: X-Event-Timestamp (base-10 Unix
+      seconds) and X-Event-Signature formatted `v1=<lowercase 64 hex>`. Reject malformed or
+      timestamps more than 300 seconds from injected now. Signature is HMAC-SHA256 over
+      `<timestamp>.<raw-body>` and must use constant-time comparison after decoding.
+      Verify before JSON parsing or Store calls. Decode exactly one JSON object, reject
+      trailing JSON, require nonempty ID and Type. `Begin` reserves the event atomically.
+      alreadyDone => 200. Otherwise Process, then commit; on any error call rollback once.
+      Success => 204. Client failures => JSON 400/401/405/413; internal failures => JSON
+      500. Never log secret, signature, raw body, Data, or internal error to clients; log
+      structured event ID and error server-side. No global state.
+tags: [go, webhooks, hmac, idempotency, http]

@@ -1,10 +1,10 @@
 id: error-propagation-config-swallow
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: error-propagation
 difficulty: expert
-title: Shipgate Throws Undefined-Multiplier Deep in Rate Calculation, Far From Its Origin
-summary: A shipping-rate service throws a TypeError reading a multiplier deep inside rate calculation, and a retry layer relabels it as ServiceUnavailable. A recent unrelated caching change and a suspected downstream outage are in play. Trace past the throw site and the relabelers to the true origin, distinguish the masking mechanism that hides it, and pick the fix that addresses the origin without masking bad config.
+title: Shipgate Throws Undefined-Multiplier Deep in Rate Calculation
+summary: Production alerts report ServiceUnavailable, while the underlying crash is a TypeError reading a multiplier deep inside rate calculation. A recent caching change and a suspected downstream outage are in play. Trace from the throw site to the true origin, explain why operators see a generic error far from it, classify the red herrings, and pick the adequate fix.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (stacktrace, rate-code,
   config-loader, zones-diff, retry-mw, error-policy, oncall-note). Cite the artifact id(s)
@@ -42,18 +42,17 @@ artifacts:
     label: production error with surrounding request log
     content: |
       12:04:01 INFO  boot: ConfigLoader.load('zones.yaml') ...
-      12:04:01 WARN  ConfigLoader: parse failed for zones.yaml, using defaults ({})   <-- only warning emitted
+      12:04:01 WARN  ConfigLoader: parse failed for zones.yaml, using defaults ({})
       12:04:01 INFO  boot: PricingContext built (zones loaded: 0)
       12:04:09 INFO  POST /v2/rates zone=EU-WEST weight=2.4kg
       12:04:09 ERROR RateCalculator.apply: TypeError: Cannot read properties of undefined (reading 'multiplier')
-          at RateCalculator.apply (rate.ts:41)          zoneTable['EU-WEST'] is undefined
+          at RateCalculator.apply (rate.ts:41)
           at PricingContext.quote (pricing-context.ts:88)
           at RetryMiddleware.run (retry.ts:33)
       12:04:09 WARN  RetryMiddleware: attempt 1 failed, retrying
       12:04:39 WARN  RetryMiddleware: attempt 2 failed, retrying
       12:05:09 ERROR RetryMiddleware: exhausted 3 attempts -> throw ServiceUnavailable('rate service degraded')
       12:05:09 ERROR POST /v2/rates -> 503 ServiceUnavailable
-      # every retry re-runs the SAME calculation against the SAME empty zoneTable and fails identically.
   - id: rate-code
     type: code
     label: RateCalculator.apply (throw site)
@@ -65,12 +64,10 @@ artifacts:
 
         apply(zone: string, weightKg: number): number {
           const base = weightKg * BASE_PER_KG;
-          const mult = this.zoneTable[zone].multiplier;   // rate.ts:41 — throws when zoneTable[zone] is undefined
+          const mult = this.zoneTable[zone].multiplier;   // rate.ts:41
           return base * mult;
         }
       }
-      // NOTE: apply assumes every zone it is asked about exists in zoneTable. It does not
-      // validate zoneTable; it is only ever as correct as the table PricingContext gives it.
   - id: config-loader
     type: code
     label: ConfigLoader.load
@@ -82,9 +79,9 @@ artifacts:
             const text = readFileSync(configPath(file), 'utf8');
             return parseYaml(text);            // throws on malformed YAML
           } catch (e) {
-            // Swallow: log a warning and hand back an empty object so boot can continue.
+            // Log a warning and return an empty object so boot can continue.
             logger.warn(`ConfigLoader: parse failed for ${file}, using defaults ({})`);
-            return {};                         // <-- real parse error is discarded here
+            return {};
           }
         }
       }
@@ -98,12 +95,11 @@ artifacts:
             multiplier: 1.35
       -     priority: false
       +     priority: false
-      +      express: true          # <-- over-indented by one space; sibling key becomes a
-                                     #     mapping value, making zones.yaml malformed YAML
+      +      express: true
           US-EAST:
             multiplier: 1.10
 
-      # commit B (unrelated, same day) "cache PricingContext for 60s" — pricing-context.ts
+      # commit B (same day) "cache PricingContext for 60s" — pricing-context.ts
         export class PricingContext {
       +   private static cache?: { ctx: PricingContext; at: number };
           static build() {
@@ -115,7 +111,6 @@ artifacts:
       +     return ctx;
           }
         }
-      # commit B changes only caching; it passes whatever ConfigLoader.load returns straight through.
   - id: retry-mw
     type: code
     label: RetryMiddleware.run
@@ -129,7 +124,6 @@ artifacts:
             catch (e) {
               attempt++;
               if (attempt >= 3) {
-                // relabels ANY exhausted failure as a generic 503, discarding the cause.
                 throw new ServiceUnavailable('rate service degraded');
               }
               await sleep(30_000);
@@ -137,7 +131,6 @@ artifacts:
           }
         }
       }
-      // Retries a pure recomputation; it does not reload config between attempts.
   - id: error-policy
     type: spec
     label: shipgate configuration error-handling policy
@@ -158,17 +151,9 @@ artifacts:
     label: on-call triage thread
     content: |
       Triage guesses during the incident (record only; not all correct):
-      - "The 60s PricingContext cache (commit B) is serving a corrupt object." — commit B
-        only adds caching and passes ConfigLoader.load's result through unchanged
-        (zones-diff); with an empty table it caches an empty table, but it did not create
-        the emptiness.
-      - "geo-service is down and that is cascading into rate errors." — per error-policy P3,
-        geo degradation surfaces as GeoUnavailable via the geo-health probe, never as an
-        undefined-multiplier TypeError; the geo-health probe was green all window.
-      - "RetryMiddleware is the problem — it keeps failing." — RetryMiddleware only relabels
-        and re-runs the same deterministic computation; it neither caused nor could fix the
-        empty table (retry-mw).
-      - "Just null-check the multiplier and move on." — that would return a wrong price for
-        every EU-WEST quote silently instead of surfacing that zones.yaml did not load.
-      Reminder: boot logged exactly one WARN — ConfigLoader parse failed, zones loaded: 0.
+      - "The 60s PricingContext cache (commit B) is serving a corrupt object."
+      - "geo-service is down and that is cascading into rate errors."
+      - "RetryMiddleware is the problem — it keeps failing."
+      - "Just null-check the multiplier and move on."
+      Observed during the window: the geo-health probe was green the whole time.
 tags: [error-propagation, config, swallowed-error, debugging, shipping]

@@ -1,0 +1,121 @@
+id: constraint-satisfaction-streaming-frame-decoder
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: Decode Length-Prefixed Frames Across Arbitrary Chunks Under Strict Space Bounds
+summary: >-
+  Four Rust streaming decoders must handle split headers, coalesced frames, CRC failures, and
+  terminal truncation while remaining single-pass and memory-bounded. Their ordinary outputs match;
+  only one satisfies every semantic and resource constraint.
+prompt: |
+  Use only frame-format, decoder-contract, chunk-vectors, candidates, and manifest. Cite artifact
+  ids. Verdicts are satisfies / violates.
+
+  1. Classify decoder-a through decoder-d against F1..F9.
+  2. For each violation, give the first K1..K6 witness and exact frames/hook/error/retained-byte result.
+  3. Identify the unique satisfying decoder and trace K4 byte by byte at header/frame boundaries.
+  4. State F8's permitted retained-byte maximum and decoder-a's actual maximum for max_payload M.
+  5. Explain why searching again from buffer offset zero violates the declared time bound.
+  6. Evaluate reviewer Ren's proposal to emit a payload before checking its CRC.
+artifacts:
+  - id: frame-format
+    type: spec
+    label: Complete binary wire format
+    content: |
+      A stream is zero or more frames. Each frame is:
+        4-byte big-endian unsigned payload length L
+        L payload bytes (arbitrary, including zero bytes)
+        4-byte big-endian CRC32C of payload
+      L may be zero and must be <= configured max_payload M. CRC32C is the Castagnoli polynomial;
+      frozen crc32c(bytes) returns the required u32. There are no sync markers or padding bytes.
+  - id: decoder-contract
+    type: spec
+    label: Complete incremental Rust API and constraints
+    content: |
+      Decoder::new(max_payload, on_frame) stores a mandatory synchronous FnMut(&[u8]) hook.
+      Decoder::push(&mut self, chunk:&[u8]) -> Result<Vec<Vec<u8>>, DecodeError> consumes all bytes
+      and returns every complete, CRC-valid payload completed by this call, in order. Immediately
+      after validating each frame's CRC and before adding its fresh owned payload to the return Vec,
+      push calls on_frame once with the exact payload bytes. The hook never panics, reenters Decoder,
+      or retains its borrowed slice. finish never calls the hook.
+      Decoder::finish(&mut self) -> Result<(), DecodeError> marks terminal end.
+
+      F1 arbitrary chunk boundaries, empty chunks, and many frames per chunk work.
+      F2 L>M returns TooLarge before retaining/awaiting payload bytes.
+      F3 CRC mismatch returns BadCrc and never returns or calls on_frame for that payload or later bytes.
+      F4 finish succeeds only at an empty frame boundary; partial header/payload/CRC is Truncated.
+      F5 after any error or finish, future push returns Closed without consuming bytes.
+      F6 returned payloads are owned fresh Vec<u8>s and earlier outputs never alias decoder storage;
+         each successful frame has exactly one ordered on_frame call with the same payload bytes.
+      F7 single pass: each input byte is copied/hashed O(1) times; no rescanning accumulated prefixes.
+      F8 excluding returned payloads, retained memory while awaiting input is <= M+8 bytes.
+      F9 no unsafe code, no panics for declared inputs, and no allocation derived from L before F2.
+  - id: chunk-vectors
+    type: table
+    label: Authoritative incremental witnesses
+    content: |
+      Let H(x) be 4-byte BE x and C(p) be H(crc32c(p)). M=5.
+      K1 push([])->[]; finish()->Ok; hook log [].
+      K2 push(H(0)+C([]))->[[]]; finish()->Ok; hook log [[]].
+      K3 push(first 2 bytes H(3))->[]; push(rest H(3)+"abc"+C("abc"))->[[97,98,99]];
+         hook log ["abc"].
+      K4 one chunk H(1)+"x"+C("x")+H(2)+"yz"+C("yz") -> ["x","yz"];
+         hook log ["x","yz"] in that order.
+      K5 push(H(6)) -> TooLarge immediately; later push([])->Closed.
+      K6 push(H(2)+"ab"+wrongCRC+H(0)+C([])) -> BadCrc, no returned frames, hook log [];
+         later finish()->Closed. Decoder d instead calls hook once with "ab" before BadCrc.
+         Separately, finish after only three header bytes -> Truncated with hook log [].
+  - id: candidates
+    type: code
+    label: Four complete decoder designs
+    content: |
+      decoder-a:
+        explicit Header{bytes,n}, Payload{len,buf,crc}, and Crc{payload,expected,bytes,n} states
+        parse header as its four bytes arrive; reject len>M before Vec::with_capacity(len)
+        copy each payload byte once while updating CRC; read CRC bytes once; compare, call on_frame,
+        then append a fresh owned payload to push output
+        after a frame reset to empty Header and continue at current chunk cursor
+        any error/finish transitions permanently to Closed
+
+      decoder-b:
+        append every chunk to a pending Vec that retains all bytes seen for diagnostics
+        from offset zero repeatedly reparse/re-hash every previously seen frame and payload, emitting
+        and calling on_frame only for frames beyond an emitted_count marker; never discard consumed
+        history; on finish apply F4/F5
+
+      decoder-c:
+        parse header incrementally, allocate Vec::with_capacity(L), then check L>M
+        otherwise use the same state machine and CRC-before-hook/output behavior as decoder-a
+
+      decoder-d:
+        same bounded state machine as decoder-a, but append a complete payload to this call's output
+        before reading/comparing its CRC; on mismatch return Err(BadCrc) with already-built output lost
+        to the caller, while a registered on_frame callback has already observed the payload
+
+      Decoder d calls on_frame immediately before placing its prematurely accepted payload into the
+      local output. Decoders a/b/c call it only after CRC success as stated above.
+  - id: bound-analysis
+    type: table
+    label: Frozen memory and work analysis
+    content: |
+      decoder-a's states are exclusive: Header retains at most 4 bytes, while Crc retains at most M
+      payload + 4 CRC bytes. Its actual maximum is therefore M+4 (also 4 when M=0), within F8's
+      permitted M+8, and it advances one cursor.
+      decoder-b retains the complete stream history and reparses/re-hashes it from zero across pushes,
+      so both retained memory and work grow with the stream rather than one bounded frame.
+      decoder-c may attempt allocation from an attacker-controlled u32 before enforcing M.
+      decoder-d meets the byte bound but violates validation-before-observation on K6.
+  - id: manifest
+    type: note
+    label: Complete assumptions and reviewer proposal
+    content: |
+      decoder-a through decoder-d are the only candidates. crc32c is correct, incremental, and cannot
+      fail. Allocation failure is outside the model only for allocations bounded by M; allocating
+      an unchecked wire length violates F9 regardless of whether a test machine happens to succeed.
+      Hook calls append a copied payload to the vector logs in chunk-vectors and otherwise have no
+      side effects; therefore callback timing and count are fully observable without adding failures.
+
+      Ren's proposal conflicts with F3 and the mandatory callback: a corrupt payload cannot be
+      retracted from an observer after CRC failure.
+tags: [generation, constraint-satisfaction, rust, streaming, binary-protocol]

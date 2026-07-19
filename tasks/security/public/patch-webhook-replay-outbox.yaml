@@ -1,0 +1,163 @@
+id: patch-webhook-replay-outbox
+version: 1.0.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Signed Billing Webhook Can Apply the Same Credit More Than Once
+summary: >-
+  A valid billing webhook may be retried or replayed inside its signature window. Four proposed diffs
+  add timestamp checks, an in-memory cache, a late database marker, or a transactional inbox/outbox.
+  Determine which patch closes replay without losing legitimate retries, and identify the shallow fixes
+  that merely narrow or relocate the duplicate-side-effect window.
+prompt: |
+  Verify the fictional MeterMint webhook patches using ONLY the supplied artifacts. Cite artifact ids
+  for every conclusion. Use closes and does-not-close for patch verdicts; use vulnerable and
+  not-a-vulnerability when classifying the current controls. Do not provide replay tooling or payloads.
+
+  1. Confirm the reported vulnerability by tracing one signed event through verification to duplicate
+     credit application. State the preconditions and bounded impact shown by the artifacts.
+  2. Explain why signature verification and the five-minute timestamp window authenticate a request but
+     do not make an event unique. Classify the raw-body and timing-safe-comparison scanner notes.
+  3. Classify P1 through P4 as closes or does-not-close. For every rejection, give the exact surviving
+     interleaving, deployment condition, or compatibility regression.
+  4. For the closing patch, state the atomicity and uniqueness invariants and trace behavior for: first
+     delivery, duplicate after success, process crash before worker consumption, and provider retry.
+  5. Explain why acknowledging a duplicate with 200 is correct under provider-contract, while a first
+     event is not acknowledged until its durable inbox/outbox transaction commits.
+  6. Give focused regression tests for concurrent duplicate deliveries on two replicas and for a crash
+     between durable acceptance and asynchronous application.
+
+  Exactly one candidate closes the report without violating the provider contract.
+artifacts:
+  - id: current-handler
+    type: code
+    label: billing/webhook.ts — current complete handler
+    content: |
+      router.post('/meterpay', rawBody({ type: 'application/json', limit: '256kb' }), async (req, res) => {
+        const timestamp = Number(req.header('x-meterpay-timestamp'));
+        const signature = req.header('x-meterpay-signature') ?? '';
+        if (!Number.isSafeInteger(timestamp) || Math.abs(Date.now() / 1000 - timestamp) > 300) {
+          return res.sendStatus(401);
+        }
+        const expected = hmacSha256(process.env.METERPAY_SIGNING_KEY, `${timestamp}.${req.rawBody}`);
+        if (!timingSafeEqualHex(signature, expected)) return res.sendStatus(401);
+
+        const event = MeterPayEvent.parse(JSON.parse(req.rawBody));
+        if (event.type === 'credit.granted') {
+          await ledger.addCredit(event.accountId, event.amountCents, event.id);
+        }
+        return res.sendStatus(200);
+      });
+      // No event id is read or written elsewhere before ledger.addCredit. The handler can run on any
+      // of eight replicas. METERPAY_SIGNING_KEY is server-only and not exposed in the supplied system.
+  - id: ledger-code
+    type: code
+    label: ledger.addCredit and schema before patches
+    content: |
+      async function addCredit(accountId, amountCents, providerEventId) {
+        await db.transaction(async tx => {
+          await tx.ledger_entries.insert({
+            id: randomUUID(), account_id: accountId, amount_cents: amountCents,
+            kind: 'meterpay_credit', provider_event_id: providerEventId,
+          });
+          await tx.accounts.update(accountId, {
+            credit_cents: sql`credit_cents + ${amountCents}`,
+          });
+        });
+      }
+
+      ledger_entries.id is unique. provider_event_id is indexed for reporting but is NOT UNIQUE.
+      Each addCredit transaction is internally atomic, but two calls with the same providerEventId are
+      two independent successful transactions. This is the complete credit application path.
+  - id: replay-trace
+    type: log
+    label: controlled duplicate-delivery trace across replicas
+    content: |
+      event id=evt-731 account=A-9 amount=2500 timestamp=1710000000
+      t+00ms replica-2 signature=valid age=12s -> ledger.addCredit(evt-731)
+      t+08ms replica-7 same bytes/signature age=12s -> ledger.addCredit(evt-731)
+      t+24ms replica-2 COMMIT ledger row L-1; account credit 10000 -> 12500
+      t+29ms replica-7 COMMIT ledger row L-2; account credit 12500 -> 15000
+      t+31ms responses: 200, 200
+      Audit: two rows have provider_event_id=evt-731. No secret was guessed; the provider's documented
+      retry sent the same signed request twice after its first connection timed out.
+  - id: provider-contract
+    type: spec
+    label: complete MeterPay delivery and acknowledgement contract
+    content: |
+      - Each event has a globally unique immutable `id`.
+      - The provider may deliver identical signed bytes concurrently and may retry for 72 hours.
+      - Every retry receives a fresh timestamp and signature, so retries can be valid inside the
+        receiver's five-minute signature window even days after the original event.
+      - Receivers must apply an event at most once. A receiver should return 2xx for an already durably
+        accepted id. A non-2xx response causes another retry.
+      - Once accepted with 2xx, processing may be asynchronous, but accepted work must survive restart.
+      These are the complete compatibility requirements relevant to the patches.
+  - id: patch-p1-p2
+    type: diff
+    label: candidate patches P1 and P2
+    content: |
+      P1 — narrower timestamp:
+        - if (ageSeconds > 300) reject
+        + if (ageSeconds > 30) reject
+        # No event-id storage. Provider retries can arrive with a fresh timestamp/signature.
+
+      P2 — process-local replay cache:
+        + const seen = new LruCache({ max: 100_000, ttl: 72 * HOURS });
+          const event = parse(req.rawBody);
+        + if (seen.has(event.id)) return res.sendStatus(200);
+        + seen.set(event.id, true);
+          await ledger.addCredit(...);
+        # Each of eight replicas owns a separate cache; caches are empty after deploy/restart.
+  - id: patch-p3
+    type: diff
+    label: candidate patch P3 — durable marker after side effect
+    content: |
+      CREATE TABLE processed_events(id text PRIMARY KEY, processed_at timestamptz NOT NULL);
+
+      const event = parse(req.rawBody);
+      if (await db.processed_events.find(event.id)) return res.sendStatus(200);
+      await ledger.addCredit(event.accountId, event.amountCents, event.id);
+      await db.processed_events.insert({ id: event.id, processed_at: now() });
+      return res.sendStatus(200);
+
+      # ledger.addCredit and processed_events.insert are separate transactions. A unique-key failure
+      # from a concurrent insert happens only after both callers may already have committed addCredit.
+  - id: patch-p4
+    type: diff
+    label: candidate patch P4 — transactional inbox and outbox
+    content: |
+      CREATE TABLE webhook_inbox(
+        provider text NOT NULL, event_id text NOT NULL, received_at timestamptz NOT NULL,
+        PRIMARY KEY(provider, event_id)
+      );
+      CREATE TABLE credit_outbox(
+        provider text NOT NULL, event_id text NOT NULL, account_id text NOT NULL,
+        amount_cents bigint NOT NULL, state text NOT NULL,
+        PRIMARY KEY(provider, event_id)
+      );
+
+      const accepted = await db.transaction(async tx => {
+        const inserted = await tx.webhook_inbox.insert({provider:'meterpay', event_id:event.id})
+          .onConflictDoNothing().returning('event_id');
+        if (inserted.length === 0) return false;
+        await tx.credit_outbox.insert({provider:'meterpay', event_id:event.id,
+          account_id:event.accountId, amount_cents:event.amountCents, state:'pending'});
+        return true;
+      });
+      return res.sendStatus(200); // first id is durable with pending work; duplicate is already durable
+
+      Worker contract: claims outbox rows with SELECT ... FOR UPDATE SKIP LOCKED, calls
+      ledger.addCreditInTransaction(tx, ..., event_id), and marks the same outbox row done in that one
+      transaction. ledger_entries gains UNIQUE(provider_event_id). A crash rolls back both application
+      and state change; the pending row is reclaimed. This is the complete P4 worker behavior.
+  - id: scanner-notes
+    type: note
+    label: static scanner side findings to classify
+    content: |
+      S1: "HMAC is computed over a parsed JSON object, so whitespace changes can bypass verification."
+          Fact: current-handler computes HMAC over req.rawBody bytes before JSON.parse.
+      S2: "Signature comparison is a plain string equality timing leak."
+          Fact: timingSafeEqualHex decodes equal-length hex into Buffers, rejects length mismatch, and
+          calls crypto.timingSafeEqual. Its implementation is covered by tests and is exhaustive here.
+tags: [security, patch-verification, webhook, replay, outbox]

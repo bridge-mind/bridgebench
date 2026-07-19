@@ -1,0 +1,112 @@
+id: extract-and-inline-kotlin-labeled-flow
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Extract a Kotlin Inline Block Without Changing Labeled Returns or Evaluation Order
+summary: >-
+  A Kotlin loop uses an inline run block to reject records locally while preserving outer-loop
+  progress and audit order. Four extraction proposals differ on non-local returns, eager dependency
+  evaluation, nullable acceptance, and exception handling; one preserves behavior and meets the
+  named-helper goal.
+prompt: |
+  Use only original-code, behavior-goal, traces, rewrites, and manifest. Cite artifact ids. Give
+  behavior-preserving / changes-behavior and meets-goal / fails-goal for each rewrite.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For every behavior change, give the first K1..K6 witness and exact log/result/exception.
+  3. Identify the unique rewrite satisfying behavior and goal.
+  4. Trace K4 through original and accepted rewrite, including when currentPolicy is evaluated.
+  5. Explain the difference between return@run, return null from a named helper, and bare return in
+     an inline lambda.
+  6. Evaluate reviewer Val's claim that reading policy before decode is harmless because both are pure.
+artifacts:
+  - id: original-code
+    type: code
+    label: Existing Kotlin function
+    content: |
+      fun accepted(inputs: List<String>): List<Record> {
+        val out = mutableListOf<Record>()
+        for (raw in inputs) {
+          val record: Record? = run {
+            audit("start:$raw")
+            val decoded = decode(raw) ?: return@run null
+            val policy = currentPolicy()
+            if (!policy.allows(decoded)) return@run null
+            audit("accept:${decoded.id}")
+            decoded
+          }
+          if (record != null) out += record
+        }
+        audit("done")
+        return out
+      }
+
+      run is Kotlin's inline standard function. audit/decode/currentPolicy/allows log at call entry;
+      decode and allows may return or throw exact objects. Record identity is observable.
+  - id: behavior-goal
+    type: spec
+    label: Complete observables and extraction goal
+    content: |
+      E1 per input order: audit start, decode; currentPolicy only after non-null decode; allows next.
+      E2 null decode rejects only that input and skips policy/allows/accept audit.
+      E3 disallowed record rejects only that input and skips accept audit.
+      E4 accepted Record object is appended without copying, after accept audit.
+      E5 any decode/policy/allows/audit exception escapes immediately; no done audit after failure.
+      E6 after every input without exception, one done audit occurs even if output is empty.
+      E7 currentPolicy is dynamic and may return a different policy per successfully decoded input.
+
+      Goal G: move the body of run into a named top-level helper
+      evaluate(raw:String):Record?, passing dependencies explicitly and eliminating run from accepted.
+  - id: traces
+    type: table
+    label: Authoritative Kotlin witnesses
+    content: |
+      K1 inputs [] -> log done; result [].
+      K2 [bad] where decode returns null -> start:bad,decode:bad,done; result [].
+      K3 [x] decode Rx, policy P denies -> start:x,decode:x,policy,allows:P:x,done; [].
+      K4 [bad,x] with bad null then x allowed by next policy P -> no policy call for bad; x logs
+         start/decode/policy/allows/accept; then done; result contains exact Rx.
+      K5 allows throws E -> logs through allows; exact E escapes; no accept/done.
+      K6 [x,y], dynamic policies allow x then deny y -> result [Rx], policy called once per decoded item.
+  - id: rewrites
+    type: code
+    label: Four proposed Kotlin transformations
+    content: |
+      // rewrite-a
+      fun evaluate(raw:String):Record? {
+        audit("start:$raw")
+        val decoded=decode(raw) ?: return null
+        val policy=currentPolicy()
+        if (!policy.allows(decoded)) return null
+        audit("accept:${decoded.id}")
+        return decoded
+      }
+      // accepted loops: evaluate(raw)?.let(out::add), then audit("done")
+
+      // rewrite-b
+      fun evaluate(raw:String, policy:Policy):Record? { audit start; val decoded=decode(raw)
+        ?: return null; if(!policy.allows(decoded)) return null; audit accept; return decoded }
+      // accepted calls evaluate(raw,currentPolicy()) for every raw
+
+      // rewrite-c
+      inline fun evaluate(raw:String, reject:()->Unit):Record? { audit start;
+        val decoded=decode(raw) ?: return reject().let { null }; ... }
+      // accepted calls evaluate(raw) { return out }, then appends and continues
+
+      // rewrite-d
+      // retains accepted exactly as original with its inline run block; only renames record to candidate
+
+      Ellipses in b/c denote the same policy check, accept audit, and return as a. In rewrite-c the
+      reject lambda is inline and bare return returns non-locally from accepted with current out.
+  - id: manifest
+    type: note
+    label: Complete language and review assumptions
+    content: |
+      rewrite-a through rewrite-d are complete. The helper in a uses the same global functions as the
+      original; these are the explicit benchmark dependencies named by Goal G (no hidden receiver).
+      `?.let(out::add)` invokes add only for non-null and preserves identity/order.
+
+      Val's purity premise is false in the declared artifacts: currentPolicy is dynamic and logged.
+      Moving it before decode changes both K2's log and which policy K4 applies to x.
+tags: [refactoring, extract-and-inline, kotlin, control-flow, evaluation-order]

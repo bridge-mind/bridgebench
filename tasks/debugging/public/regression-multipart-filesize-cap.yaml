@@ -1,5 +1,5 @@
 id: regression-multipart-filesize-cap
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: regression-introduction
 difficulty: expert
@@ -45,15 +45,11 @@ artifacts:
       c6      Wed 10:30   map file-size rejection 400 -> 413      PASS          FAIL        FAIL        PASS
       c7      Wed 16:45   chore: bump multer 1.4.5 -> 2.0.1       PASS          FAIL        FAIL        PASS
       c8      Thu 08:20   feat: add structured request logging    PASS          FAIL        FAIL        PASS
-
-      The FIRST commit where upload-2mb and upload-9mb fail is c5. They passed on c4 and every prior
-      commit. No commit after c5 changes any cell in the upload-2mb / upload-9mb columns.
   - id: c3-diff
     type: diff
     label: 'c3 — "rewrite: streaming upload handler" (large diff)'
     content: |
-      # Replaces the buffered handler with a streaming one. ~180 lines changed. No size limit is set
-      # or removed here; multer is still constructed with no `limits` option after this commit.
+      # Replaces the buffered handler with a streaming one. ~180 lines changed.
         -export function handleUpload(req, res) {
         -  const buf = Buffer.concat(req.chunks);
         -  return store.putBuffered(buf, req.file.originalname);
@@ -64,13 +60,13 @@ artifacts:
         +    .on('error', (e) => next(e));
         +}
       # multer construction after c3 (unchanged by this commit):
-        const upload = multer({ storage });   // no `limits` key -> multer default fileSize = unlimited
+        const upload = multer({ storage });   // no `limits` key
   - id: c4-diff
     type: diff
     label: 'c4 — "chore: centralize upload constants"'
     content: |
-      # Adds config/upload.ts and points the handler at it. Moves only MIME allow-list and the upload
-      # directory. It does NOT define or apply any size limit.
+      # Adds config/upload.ts and points the handler at it. Moves the MIME allow-list and the upload
+      # directory.
         +// config/upload.ts
         +export const UPLOAD = {
         +  allowedMime: ['image/png', 'image/jpeg', 'application/pdf'],
@@ -91,18 +87,15 @@ artifacts:
         +const upload = multer({
         +  storage,
         +  limits: {
-        +    fileSize: 1024 * 1024,   // intended 10 * 1024 * 1024 (10 MiB); the "10 *" was dropped
+        +    fileSize: 1024 * 1024,
         +  },
         +});
-      # multer emits a LIMIT_FILE_SIZE error for any file exceeding limits.fileSize. Before c5 no
-      # fileSize limit existed (see c3-diff / c4-diff: multer had no `limits` key), so uploads up to
-      # the body ceiling (10 MiB) were accepted.
+      # multer emits a LIMIT_FILE_SIZE error for any file exceeding limits.fileSize.
   - id: c6-diff
     type: diff
     label: c6 — "map file-size rejection 400 -> 413"
     content: |
-      # Changes ONLY the HTTP status returned when multer raises LIMIT_FILE_SIZE. It does not change
-      # which uploads are rejected — only the status code of an already-rejected upload.
+      # Changes the HTTP status returned when multer raises LIMIT_FILE_SIZE.
         function onUploadError(err, req, res, next) {
           if (err.code === 'LIMIT_FILE_SIZE') {
         -   return res.status(400).json({ error: 'file too large' });
@@ -119,9 +112,7 @@ artifacts:
         - Internal: switch to busboy 1.x.
         - No change to default limits. When `limits.fileSize` is UNSET, the default remains unlimited;
           when set, the existing LIMIT_FILE_SIZE behavior is preserved byte-for-byte.
-      After c7, the multer construction is still the c5 code: limits.fileSize = 1024 * 1024. The bump
-      neither introduced nor altered the fileSize limit. ci-matrix shows upload-2mb already failing at
-      c5 and c6, before c7.
+      After c7, the multer construction is still the c5 code: limits.fileSize = 1024 * 1024.
   - id: incident
     type: note
     label: incident report INC-552 (as filed by support)

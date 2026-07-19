@@ -1,5 +1,5 @@
 id: regression-discount-double-rounding
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: regression-introduction
 difficulty: expert
@@ -9,7 +9,7 @@ summary: >-
   orders; single-item orders reconcile exactly. A per-commit CI matrix, four commit diffs, a rounding
   spec with a worked example, and the incident report are provided. A money-lib major bump, a
   locale-formatting change, and a tax-rate config change all look suspicious. Identify the culprit
-  commit, explain the double-rounding defect, rule out the decoys, and give the fix that targets it.
+  commit, explain the defect, rule out the decoys, and give the fix that targets it.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (ci-matrix, c2-diff, c3-diff, c4-diff,
   c5-diff, rounding-spec, incident). Cite the artifact id(s) for every claim. Use this vocabulary for
@@ -49,10 +49,6 @@ artifacts:
       c4      Tue 16:05   feat: locale-aware currency formatting    PASS              FAIL              PASS
       c5      Wed 11:15   chore: update CA tax rate 7.25% -> 7.5%   PASS              FAIL              PASS
       c6      Wed 15:40   feat: add structured request logging      PASS              FAIL              PASS
-
-      The FIRST commit where total-3item-disc fails is c3. It passed on c2 and every prior commit. No
-      commit after c3 changes any cell. total-1item-disc and total-3item-nodisc stay PASS throughout —
-      the drift needs BOTH multiple lines AND a discount.
   - id: c2-diff
     type: diff
     label: 'c2 — "chore: bump money-lib 2.4 -> 3.0"'
@@ -66,35 +62,29 @@ artifacts:
       #   - Types: stricter Money<Currency> generics.
       #   - No change to rounding: roundToCents still rounds half away from zero, byte-for-byte.
       #   - No change to arithmetic or accumulation.
-      # After c2 the total pipeline still discounts the summed subtotal once, then rounds once.
   - id: c3-diff
     type: diff
     label: 'c3 — "refactor: apply order discount per line"'
     content: |
       # Author rationale (commit body): "applying the discount per line makes line-level receipts and
-      # refunds simpler; the total is just the sum of discounted lines." This moved the rounding.
+      # refunds simpler; the total is just the sum of discounted lines."
         function orderTotal(lines, discountRate) {
-      -   // v1: discount the SUMMED subtotal once, then round once.
       -   const subtotalCents = lines.reduce((s, l) => s + l.amountCents, 0);
       -   const discounted = subtotalCents * (1 - discountRate);
-      -   return money.roundToCents(discounted);            // ONE rounding, on the order total
-      +   // v2: discount and round EACH line, then sum the already-rounded lines.
+      -   return money.roundToCents(discounted);
       +   return lines.reduce(
-      +     (s, l) => s + money.roundToCents(l.amountCents * (1 - discountRate)),  // N roundings
+      +     (s, l) => s + money.roundToCents(l.amountCents * (1 - discountRate)),
       +     0);
         }
-      # roundToCents is unchanged (c2-diff). What changed is WHERE rounding happens: once on the total
-      # (v1) vs once per line (v2). Summing already-rounded lines is double rounding.
   - id: c4-diff
     type: diff
     label: 'c4 — "feat: locale-aware currency formatting"'
     content: |
-      # Changes ONLY how an already-computed integer-cent total is rendered as a display string. It does
-      # not touch orderTotal or any arithmetic; the cent value it formats is whatever orderTotal returns.
+      # Changes how a computed integer-cent total is rendered as a display string.
         -export const formatMoney = (cents) => `$${(cents / 100).toFixed(2)}`;
         +export const formatMoney = (cents, locale) =>
         +  new Intl.NumberFormat(locale, { style: 'currency', currency: 'USD' }).format(cents / 100);
-      # Formatting is display-only and runs after orderTotal; it cannot change the computed total.
+      # Files changed by c4: format.ts only.
   - id: c5-diff
     type: diff
     label: 'c5 — "chore: update CA tax rate 7.25% -> 7.5%"'
@@ -104,8 +94,7 @@ artifacts:
       -   CA: 0.0725
       +   CA: 0.0750
           WA: 0.0000
-      # The tax rate is applied AFTER orderTotal, and only to taxable jurisdictions. Every ci-matrix
-      # fixture is a tax-exempt (WA, 0.0000) order, so this row never enters the canary assertions.
+      # The tax rate is applied after orderTotal, and only to taxable jurisdictions.
   - id: rounding-spec
     type: spec
     label: checkoutd money-rounding policy (authoritative) with a worked example
@@ -119,16 +108,11 @@ artifacts:
       M2 — roundToCents(x) = the integer cent nearest x, halves away from zero. Line amounts (amountCents)
            are already whole cents; only the discounted quantity is ever rounded.
 
-      Worked example (discountRate = 0.10, all integer cents):
-        Order with lines [333, 333, 334] (subtotal 1000).
-          M1 (correct):   round(1000 * 0.90) = round(900.0)  = 900.
-          c3 (per line):  round(333*0.90)=round(299.7)=300; round(333*0.90)=300; round(334*0.90)=round(300.6)=301
-                          sum = 300 + 300 + 301 = 901.        # +1 cent vs M1
+      Worked example of M1 (discountRate = 0.10, all integer cents):
+        Order with lines [333, 333, 334] (subtotal 1000):
+          M1:  round(1000 * 0.90) = round(900.0) = 900.
         Order with ONE line [1000]:
-          M1:  round(1000*0.90) = 900.
-          c3:  round(1000*0.90) = 900.                         # identical — one rounding either way
-      This is why a single-line discounted order reconciles under c3 but a multi-line one drifts: c3
-      rounds N times where M1 rounds once, and the per-line rounding residuals accumulate.
+          M1:  round(1000 * 0.90) = 900.
   - id: incident
     type: note
     label: incident report INC-908 (as filed by finance ops)

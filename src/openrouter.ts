@@ -17,7 +17,7 @@ import {
 
 const BASE_URL = 'https://openrouter.ai/api/v1';
 const RETRYABLE =
-  /(?:429|rate.?limit|timeout|timed out|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|overloaded|5\d\d|premature close|invalid response body|socket hang up|other side closed|fetch failed|terminated|internal server error|bad gateway|service unavailable|gateway timeout|too many requests)/i;
+  /(?:429|rate.?limit|timeout|timed out|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|overloaded|5\d\d|premature close|invalid response body|socket hang up|other side closed|fetch failed|terminated|internal server error|bad gateway|service unavailable|gateway timeout|too many requests|empty completion)/i;
 
 export function isRetryableError(message: string): boolean {
   return RETRYABLE.test(message);
@@ -90,6 +90,10 @@ export class OpenRouterClient implements OpenRouterGateway {
     throwIfCancelled(request.signal);
     assertPromptSize(request);
     const maxAttempts = 3;
+    // Wall-clock zero for the whole call: recorded timings include failed
+    // attempts and retry backoff, so an unreliable provider cannot hide its
+    // retries from the speed arena's totals.
+    const overallStartedAt = Date.now();
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfCancelled(request.signal);
@@ -123,7 +127,28 @@ export class OpenRouterClient implements OpenRouterGateway {
         // Stream so bytes flow while the model reasons; a non-streaming request
         // sits silent for minutes and OpenRouter's edge closes the idle
         // connection ("Premature close") before the body arrives.
-        const completion = await runOpenRouterAttempt(this.client, request, attempt, attemptSignal);
+        const attemptCompletion = await runOpenRouterAttempt(
+          this.client,
+          request,
+          attempt,
+          attemptSignal,
+        );
+        // Attempt-relative timings shift to call-relative: earlier failed
+        // attempts and their backoff count toward ttft/total wall clock.
+        const retryOverheadMs = startedAt - overallStartedAt;
+        const completion: ModelCompletion =
+          retryOverheadMs > 0
+            ? {
+                ...attemptCompletion,
+                latencyMs: attemptCompletion.latencyMs + retryOverheadMs,
+                ...(attemptCompletion.ttftMs != null
+                  ? { ttftMs: attemptCompletion.ttftMs + retryOverheadMs }
+                  : {}),
+                ...(attemptCompletion.totalMs != null
+                  ? { totalMs: attemptCompletion.totalMs + retryOverheadMs }
+                  : {}),
+              }
+            : attemptCompletion;
         this.logger.info('openrouter.completed', {
           model: request.model.id,
           role: request.model.role,
@@ -278,10 +303,54 @@ export class OpenRouterClient implements OpenRouterGateway {
   }
 }
 
-export function parseJudgeVerdict(content: string) {
+export interface JudgeVerdictContext {
+  /** Public artifact IDs of the task; decisiveDifference.artifactIds must resolve against these. */
+  artifactIds?: readonly string[];
+  /**
+   * Structured deliverable IDs of the task, when its private overlay carries
+   * a deliverables[] rubric; decisiveDifference.deliverableId must resolve
+   * against these. Absent for prose-rubric tasks, where any label is allowed.
+   */
+  deliverableIds?: readonly string[];
+}
+
+/**
+ * Parse and validate a LIVE judge's structured verdict. Forced-choice since
+ * 2026-07-17: the judge must pick MODEL_A or MODEL_B — TIE and ABSTAIN are
+ * rejected here even if a non-strict provider produces them, consuming one
+ * of the judge's attempts exactly like malformed JSON. The decisive verdict
+ * must carry a decisiveDifference whose artifact IDs resolve against the
+ * task. Historical journal lines with TIE/ABSTAIN verdicts stay valid under
+ * JudgeVerdictSchema; this gate applies only to fresh completions.
+ */
+export function parseJudgeVerdict(content: string, context: JudgeVerdictContext = {}) {
   const trimmed = content
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '');
-  return JudgeVerdictSchema.parse(JSON.parse(trimmed));
+  const verdict = JudgeVerdictSchema.parse(JSON.parse(trimmed));
+  if (verdict.winner !== 'MODEL_A' && verdict.winner !== 'MODEL_B') {
+    throw new Error(
+      `judging is forced-choice: ${verdict.winner} is not an available verdict — pick MODEL_A or MODEL_B`,
+    );
+  }
+  const difference = verdict.decisiveDifference;
+  if (!difference) {
+    throw new Error(`a ${verdict.winner} verdict requires a non-null decisiveDifference`);
+  }
+  if (context.artifactIds) {
+    const known = new Set(context.artifactIds);
+    const unresolved = difference.artifactIds.filter((id) => !known.has(id));
+    if (unresolved.length > 0) {
+      throw new Error(
+        `decisiveDifference cites unknown artifact id(s) ${unresolved.join(', ')} — known ids: ${[...known].join(', ')}`,
+      );
+    }
+  }
+  if (context.deliverableIds && !context.deliverableIds.includes(difference.deliverableId)) {
+    throw new Error(
+      `decisiveDifference cites unknown deliverable id ${difference.deliverableId} — known ids: ${context.deliverableIds.join(', ')}`,
+    );
+  }
+  return verdict;
 }

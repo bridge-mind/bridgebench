@@ -1,0 +1,212 @@
+id: supply-npm-postinstall-hook
+version: 1.1.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: Millrace Dependency Bump Review — Malicious Postinstall vs Benign Changes
+summary: >-
+  A pull request to the fictional "Millrace" app changes five dependencies and its
+  lockfile. Read each change's resolved registry, integrity, and install-script data
+  against an authoritative registry-trust policy to decide which single change ships
+  a malicious postinstall hook, versus a routine public bump, an approved native
+  build, a mirror change with identical integrity, and a first-party scoped package.
+  Exactly one change is a compromise vector; the rest are benign.
+prompt: |
+  You are reviewing a pull request to the "Millrace" application that bumps
+  dependencies and updates package-lock.json. Someone may have slipped in a
+  tampered or malicious package. Determine which change (if any) is a supply-chain
+  compromise vector versus a routine, benign change.
+
+  Answer each deliverable using ONLY the supplied artifacts (deps-diff,
+  lockfile-entries, registry-policy, change-map, pipeline-note, install-log). Cite
+  the artifact id(s) you rely on for every claim. registry-policy is the
+  AUTHORITATIVE statement of which registries, mirrors, and install scripts are
+  trusted; treat it as ground truth. If a change cannot be shown malicious from the
+  artifacts, say so explicitly. Do NOT flag a change as malicious without an
+  artifact-grounded tell, and do NOT include exploit, payload, or command-execution
+  steps — classification and remediation only.
+
+  For deliverables 1-5, classify each dependency change as EXACTLY ONE of:
+    - MALICIOUS — its resolution, integrity, and/or lifecycle-script behavior COMBINE
+      to introduce untrusted, attacker-controlled code into the install, per
+      registry-policy.
+    - BENIGN — the change is trusted under registry-policy (resolved from a configured
+      registry/mirror with matching integrity, and any install script is approved and
+      fetches only from an approved source, or there is no install script).
+  Justify each using the package's resolved registry host, integrity match, and
+  install-script data (from lockfile-entries / change-map), read against registry-policy.
+
+  1. `lodash.merge` (version bump).
+  2. `sharp` (newly added, has an install script).
+  3. `color-parse` (newly added).
+  4. `chalk` (resolved host changed).
+  5. `@millrace/telemetry` (newly added, scoped package).
+
+  6. Name the single compromise vector. State the EXACT combination of factors that
+     makes it dangerous (resolution source + integrity/allowlist status + lifecycle
+     script behavior), and explain why the OTHER package that also runs an install
+     script is NOT dangerous. Ground both in registry-policy.
+
+  7. Give the containment / remediation steps for the compromise vector. Remediation
+     only — no exploit, payload, or command-execution steps.
+artifacts:
+  - id: deps-diff
+    type: diff
+    label: Millrace package.json + package-lock.json diff (five changes)
+    content: |
+      --- a/package.json
+      +++ b/package.json
+      @@ dependencies @@
+      -    "lodash.merge": "4.6.1",
+      +    "lodash.merge": "4.6.2",
+      +    "sharp": "0.33.2",
+      +    "color-parse": "1.0.4",
+      +    "@millrace/telemetry": "1.2.0",
+           "chalk": "5.3.0"
+      --- a/package-lock.json
+      +++ b/package-lock.json
+      @@ packages @@
+      -    "node_modules/lodash.merge": { "version": "4.6.1", "resolved": "https://registry.npmjs.org/lodash.merge/-/lodash.merge-4.6.1.tgz" }
+      +    "node_modules/lodash.merge": { "version": "4.6.2", "resolved": "https://registry.npmjs.org/lodash.merge/-/lodash.merge-4.6.2.tgz" }
+      +    "node_modules/sharp":        { "version": "0.33.2", "resolved": "https://registry.npmjs.org/sharp/-/sharp-0.33.2.tgz", "hasInstallScript": true }
+      +    "node_modules/color-parse":  { "version": "1.0.4",  "resolved": "https://registry.colorparse-cdn.top/color-parse/-/color-parse-1.0.4.tgz", "hasInstallScript": true }
+      +    "node_modules/@millrace/telemetry": { "version": "1.2.0", "resolved": "https://npm.millrace.internal/@millrace/telemetry/-/telemetry-1.2.0.tgz" }
+      -    "node_modules/chalk":        { "version": "5.3.0", "resolved": "https://registry.npmjs.org/chalk/-/chalk-5.3.0.tgz" }
+      +    "node_modules/chalk":        { "version": "5.3.0", "resolved": "https://npm-mirror.millrace.internal/chalk/-/chalk-5.3.0.tgz" }
+  - id: lockfile-entries
+    type: config
+    label: Millrace lockfile entries (authoritative excerpt, per package)
+    content: |
+      # package-lock.json — authoritative per-package detail for the five changed deps.
+      # For each: resolved host, integrity, install-script presence, and (if any) the
+      # host the lifecycle script contacts. This is the complete lockfile data for these
+      # packages; no other fields affect trust.
+
+      lodash.merge@4.6.2:
+        resolved:  https://registry.npmjs.org/lodash.merge/-/lodash.merge-4.6.2.tgz
+        integrity: sha512-lodMerge462...   # matches the npmjs registry entry
+        hasInstallScript: false
+
+      sharp@0.33.2:
+        resolved:  https://registry.npmjs.org/sharp/-/sharp-0.33.2.tgz
+        integrity: sha512-sharp0332...     # matches the npmjs registry entry
+        hasInstallScript: true
+        scripts.install: "node install/check.js"   # fetches a prebuilt libvips binary
+        install_fetches_from: https://github.com/lovell/sharp/releases   # sharp's official release host
+
+      color-parse@1.0.4:
+        resolved:  https://registry.colorparse-cdn.top/color-parse/-/color-parse-1.0.4.tgz
+        integrity: sha512-colorParse104... # matches THIS tarball, but the tarball is served
+                                           # from registry.colorparse-cdn.top, not a configured registry
+        hasInstallScript: true
+        scripts.postinstall: "node scripts/setup.js"  # setup.js retrieves and runs code from
+        install_fetches_from: http://cdn.colorparse-updates.top/setup   # an external, non-registry host
+
+      chalk@5.3.0:
+        resolved:  https://npm-mirror.millrace.internal/chalk/-/chalk-5.3.0.tgz
+        integrity: sha512-chalk530...      # IDENTICAL to the prior lockfile integrity for chalk@5.3.0
+        hasInstallScript: false            # only the resolved host changed; bytes unchanged
+
+      @millrace/telemetry@1.2.0:
+        resolved:  https://npm.millrace.internal/@millrace/telemetry/-/telemetry-1.2.0.tgz
+        integrity: sha512-mrTelem120...    # matches the internal registry entry for the @millrace scope
+        hasInstallScript: false
+  - id: registry-policy
+    type: spec
+    label: Millrace dependency-trust policy (authoritative and complete)
+    content: |
+      Millrace dependency-trust policy — AUTHORITATIVE and COMPLETE. These rules decide
+      whether a resolved dependency is trusted. There are no other trust inputs.
+
+      Configured registries (from .npmrc):
+        - Public packages resolve from https://registry.npmjs.org.
+        - https://npm-mirror.millrace.internal is an APPROVED pull-through mirror of
+          registry.npmjs.org (same bytes, same integrity; used for build reliability).
+        - The `@millrace/*` scope resolves from https://npm.millrace.internal, the org's
+          FIRST-PARTY internal registry. `@millrace/*` packages are authored in-house.
+        - Any OTHER resolved host (a host not in this list) is UNCONFIGURED and untrusted.
+
+      Integrity rule: a dependency whose integrity hash is present and matches the entry
+      served by a CONFIGURED registry/mirror is byte-for-byte trusted. If only the resolved
+      host changed but the integrity hash is UNCHANGED, the bytes are identical — that is a
+      benign source change (e.g. switching to the approved mirror), not tampering.
+
+      Install-script (lifecycle) rule: running a package's install/postinstall script
+      executes third-party code during `npm ci` with the installer's privileges. Lifecycle
+      scripts are DENIED BY DEFAULT. The APPROVED-INSTALL-SCRIPTS ALLOWLIST is EXACTLY:
+        { sharp, esbuild }
+      An allowlisted package's script is trusted ONLY IF it is resolved from a configured
+      registry AND its script fetches solely from that package's OFFICIAL host. Any package
+      NOT on this allowlist that has hasInstallScript=true is a policy violation and must be
+      treated as a compromise vector, especially if its script contacts a non-registry host.
+
+      Compromise vector (any one of these makes a change MALICIOUS):
+        - resolved from an UNCONFIGURED host; OR
+        - a lifecycle script on a non-allowlisted package; OR
+        - a lifecycle script that fetches/executes code from a host that is not the
+          package's official/registry source.
+      A matching integrity hash does NOT rescue a package resolved from an unconfigured host
+      or running an untrusted lifecycle script — integrity only proves the bytes match THAT
+      (untrusted) source.
+  - id: change-map
+    type: table
+    label: Millrace dependency change map (COMPLETE)
+    content: |
+      Dependency change map — COMPLETE. Every dependency changed by this PR is listed with
+      its resolved host, whether that host is a configured registry/mirror, whether integrity
+      matches a configured source, whether it runs a lifecycle script, whether it is on the
+      approved-install-scripts allowlist, and where any script fetches from. A package not in
+      this table is unchanged.
+
+      package             | resolved host                     | configured host? | integrity vs configured | install script? | allowlisted? | script fetches from
+      --------------------|-----------------------------------|------------------|-------------------------|-----------------|--------------|--------------------------------
+      lodash.merge@4.6.2  | registry.npmjs.org                | YES              | matches                 | no              | n/a          | n/a
+      sharp@0.33.2        | registry.npmjs.org                | YES              | matches                 | YES             | YES (sharp)  | github.com/lovell/sharp (official)
+      color-parse@1.0.4   | registry.colorparse-cdn.top       | NO (unconfigured)| matches THAT tarball    | YES             | NO           | cdn.colorparse-updates.top (non-registry)
+      chalk@5.3.0         | npm-mirror.millrace.internal      | YES (mirror)     | UNCHANGED (same bytes)  | no              | n/a          | n/a
+      @millrace/telemetry | npm.millrace.internal             | YES (@millrace)  | matches                 | no              | n/a          | n/a
+
+      Reminder (registry-policy): an unconfigured resolved host, a non-allowlisted install
+      script, or a script fetching from a non-registry host is a compromise vector. A matching
+      integrity hash does not rescue an unconfigured source.
+  - id: pipeline-note
+    type: note
+    label: Millrace maintainer PR notes (current)
+    content: |
+      Millrace dependency PR notes (maintainer-authored, for this PR).
+
+      - lodash.merge is a patch bump (4.6.1 -> 4.6.2) resolved from registry.npmjs.org with
+        matching integrity; no install script.
+      - sharp was added for image processing. It has a native install step that downloads a
+        prebuilt libvips binary from github.com/lovell/sharp/releases.
+      - chalk's resolved host moved to npm-mirror.millrace.internal. The integrity hash is
+        unchanged from the prior lockfile entry.
+      - @millrace/telemetry is a package under the @millrace scope, resolved from
+        npm.millrace.internal per the .npmrc scope mapping.
+      - color-parse was added late in the PR. Its resolved registry, integrity, and
+        lifecycle-script data are recorded in lockfile-entries and change-map.
+
+      Provenance authority: registry-policy states the configured registries, the mirror, the
+      scope mapping, and the install-script allowlist. Anything conflicting with it is the anomaly.
+  - id: install-log
+    type: log
+    label: Millrace CI install log for this PR (run #814)
+    content: |
+      Millrace CI — `npm ci` on run #814 (the PR under review)
+      registry (default): https://registry.npmjs.org
+      scope @millrace -> https://npm.millrace.internal   (from .npmrc)
+      mirror: https://npm-mirror.millrace.internal (approved pull-through)
+
+      resolving 5 changed packages:
+        lodash.merge@4.6.2         resolved=registry.npmjs.org            integrity=ok   installScript=no
+        sharp@0.33.2               resolved=registry.npmjs.org            integrity=ok   installScript=yes
+          > sharp install: fetching libvips from github.com/lovell/sharp/releases (official)   [allowlisted]
+        chalk@5.3.0                resolved=npm-mirror.millrace.internal  integrity=ok(unchanged) installScript=no
+        @millrace/telemetry@1.2.0  resolved=npm.millrace.internal         integrity=ok   installScript=no
+        color-parse@1.0.4          resolved=registry.colorparse-cdn.top   integrity=ok   installScript=yes
+          > color-parse postinstall: node scripts/setup.js
+          > color-parse postinstall: outbound request to http://cdn.colorparse-updates.top/setup   [NON-REGISTRY HOST]
+      note: color-parse resolved from registry.colorparse-cdn.top, which is not a configured
+            registry or the approved mirror; its postinstall contacted a host outside any
+            configured registry. All other packages resolved from configured sources.
+tags: [supply-chain, npm, lockfile, postinstall, dependency-provenance, security]

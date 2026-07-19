@@ -1,0 +1,227 @@
+id: root-cause-n-plus-one-orm
+version: 1.1.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Order Summary Endpoint Exhausts Its Database Pool Despite Fast Indexed Product Lookups
+summary: >-
+  The order summary endpoint degrades as page size rises even though every individual product lookup
+  uses an index and Redis is healthy. A missing index, a Redis outage, pool sizing, and database
+  CPU all look plausible. Reconcile the complete request path, query trace, and fixes to isolate the
+  defect and choose the fix that holds under load.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (endpoint-code, orm-query-log,
+  request-trace, schema-and-plan, cache-status, pool-metrics, fixes). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  The admin order-summary endpoint returns a page of recent orders with each line item's current
+  catalog details. It is fast for a five-order page but intermittently times out at the normal
+  24-order page size. The database reports many fast indexed queries rather than one slow query.
+  Trace the symptom to the query pattern that creates the load; do not stop at the pool-exhaustion
+  symptom or the individual query latency.
+
+  1. ROOT CAUSE. Name the single code-path defect and cite the exact artifact id and code locations.
+     State the query-count invariant a 24-order response should satisfy and the count this path
+     actually emits.
+  2. AMPLIFICATION CHAIN. From orm-query-log and request-trace, trace one 24-order response from
+     its one order query through the per-order line-item lookups and per-line product lookups. State
+     the number of orders, line items, distinct SKUs, total SQL queries, and why repeated SKUs do
+     not reduce the product-query count.
+  3. RED HERRING: MISSING PRODUCT INDEX. Explain why an absent or slow index is not the root cause,
+     citing schema-and-plan. State what the query plan and per-query latency prove, and why fast
+     indexed queries can still exhaust the pool in aggregate.
+  4. RED HERRING: REDIS OUTAGE. Explain why Redis is not causing the incident, citing cache-status
+     and endpoint-code. State which catalog path uses Redis, which path the endpoint actually calls,
+     and why improving a healthy cache cannot remove the ORM calls shown in the trace.
+  5. RED HERRING: DATABASE CAPACITY OR POOL SIZING. Explain why pool exhaustion is a downstream
+     symptom rather than the origin, citing pool-metrics and request-trace. State the observed
+     difference between a five-order request and a 24-order request.
+  6. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without violating
+     the tenant-specific pricing and p99 constraints. State the maximum number of SQL round trips
+     it uses for a response, independent of the number of line items.
+  7. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is shallow or harmful,
+     naming the specific regression or reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: endpoint-code
+    type: code
+    label: order-api/order-summary.service.ts complete request path
+    content: |
+      // This is the COMPLETE request path for GET /admin/orders/summary. No GraphQL resolver,
+      // interceptor, service mesh, or hidden repository method queries orders, order_items, or
+      // catalog_products for this response. The controller invokes buildOrderSummaries exactly once.
+      //
+      // Price is tenant-specific: catalogProducts.findBySku(tenantId, sku) returns the current
+      // price for that tenant's catalog.
+
+      export async function buildOrderSummaries(tenantId: string, pageSize = 24) {
+        const orders = await orderRepository.findRecentByTenant(tenantId, pageSize);
+
+        return Promise.all(
+          orders.map(async (order) => {
+            const items = await orderItemRepository.findByOrderId(order.id);
+
+            const lines = await Promise.all(
+              items.map(async (item) => {
+                const product = await catalogProducts.findBySku(tenantId, item.sku);
+                // findBySku reads PostgreSQL directly; it does not call catalogCache.
+                return {
+                  sku: item.sku,
+                  quantity: item.quantity,
+                  title: product.title,
+                  currentPriceCents: product.priceCents,
+                };
+              }),
+            );
+
+            return { id: order.id, number: order.orderNumber, lines };
+          }),
+        );
+      }
+
+      export const orderRepository = {
+        findRecentByTenant(tenantId: string, limit: number) {
+          return db.query(
+            `SELECT id, order_number FROM orders
+             WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
+            [tenantId, limit],
+          );
+        },
+      };
+
+      export const orderItemRepository = {
+        findByOrderId(orderId: string) {
+          return db.query(
+            `SELECT order_id, sku, quantity FROM order_items WHERE order_id = $1 ORDER BY position`,
+            [orderId],
+          );
+        },
+      };
+
+      export const catalogProducts = {
+        findBySku(tenantId: string, sku: string) {
+          return db.query(
+            `SELECT sku, title, price_cents AS "priceCents"
+             FROM catalog_products WHERE tenant_id = $1 AND sku = $2`,
+            [tenantId, sku],
+          );
+        },
+      };
+
+      // Invariant for this endpoint: query count must not grow with the number of returned orders
+      // or line items.
+  - id: orm-query-log
+    type: log
+    label: PostgreSQL query trace for one timed-out 24-order response
+    content: |
+      trace=req-7f91 tenant=tenant-north pageSize=24
+      10:14:00.000  Q1   SELECT orders ... LIMIT 24                                  rows=24  3.1ms
+      10:14:00.006  Q2   SELECT order_items WHERE order_id='ord-001'                 rows=3   1.0ms
+      10:14:00.007  Q3   SELECT order_items WHERE order_id='ord-002'                 rows=3   1.0ms
+      ...
+      10:14:00.029  Q25  SELECT order_items WHERE order_id='ord-024'                 rows=3   1.1ms
+
+      # (Q2..Q25 elided: 24 order_items queries in total. The 24 orders have 72 line items;
+      #  12 distinct SKUs occur across them.)
+
+      10:14:00.031  Q26  SELECT catalog_products WHERE tenant='tenant-north' AND sku='SKU-04' rows=1 0.7ms
+      10:14:00.031  Q27  SELECT catalog_products WHERE tenant='tenant-north' AND sku='SKU-09' rows=1 0.8ms
+      10:14:00.032  Q28  SELECT catalog_products WHERE tenant='tenant-north' AND sku='SKU-04' rows=1 0.7ms
+      10:14:00.032  Q29  SELECT catalog_products WHERE tenant='tenant-north' AND sku='SKU-01' rows=1 0.8ms
+      ...
+      10:14:00.075  Q97  SELECT catalog_products WHERE tenant='tenant-north' AND sku='SKU-09' rows=1 0.8ms
+
+      Summary:
+        orders queries:             1
+        order_items queries:       24
+        catalog_products queries:  72
+        total SQL queries:         97
+        unique catalog SKUs:       12
+        repeated SKU queries:      60
+  - id: request-trace
+    type: log
+    label: request traces at small and normal page sizes
+    content: |
+      trace=req-5a11  pageSize=5   orders=5   lineItems=15  distinctSkus=9
+        sqlQueries=21 (1 orders + 5 order_items + 15 products)
+        dbAcquireWaitP95=0.4ms  responseP95=47ms  outcome=200
+
+      trace=req-7f91  pageSize=24  orders=24  lineItems=72  distinctSkus=12
+        sqlQueries=97 (1 orders + 24 order_items + 72 products)
+        dbAcquireWaitP95=412ms  responseP95=1,184ms  outcome=504 at gateway timeout 1000ms
+
+      trace=req-8b02  pageSize=24  orders=24  lineItems=72  distinctSkus=12
+        sqlQueries=97 (same shape as req-7f91)
+        dbAcquireWaitP95=466ms  responseP95=1,231ms  outcome=504
+  - id: schema-and-plan
+    type: spec
+    label: database schema and representative catalog lookup plan
+    content: |
+      CREATE TABLE catalog_products (
+        tenant_id UUID NOT NULL,
+        sku TEXT NOT NULL,
+        title TEXT NOT NULL,
+        price_cents INTEGER NOT NULL,
+        PRIMARY KEY (tenant_id, sku)
+      );
+      CREATE INDEX order_items_order_id_idx ON order_items(order_id);
+
+      EXPLAIN (ANALYZE, BUFFERS)
+      SELECT sku, title, price_cents FROM catalog_products
+      WHERE tenant_id = 'tenant-north' AND sku = 'SKU-04';
+
+      Index Scan using catalog_products_pkey on catalog_products
+        Index Cond: ((tenant_id = 'tenant-north') AND (sku = 'SKU-04'))
+        Planning Time: 0.09 ms
+        Execution Time: 0.31 ms
+        Shared Hit Blocks: 4
+
+      # The complete relevant schema is shown above.
+  - id: cache-status
+    type: log
+    label: catalog cache health and routing configuration during the incident
+    content: |
+      catalog-cache status at 10:14Z:
+        redisPrimary=healthy  replicationLagMs=0  evictions=0  errorRate=0.00%
+        catalog-page cacheHitRate=98.7%  p95GetMs=0.6ms
+
+      catalog-page route:
+        getCatalogProduct(tenantId, sku) -> catalogCache.getOrLoad(...)
+
+      admin order-summary route:
+        buildOrderSummaries(...) -> catalogProducts.findBySku(...)
+        catalogProducts.findBySku(...) -> PostgreSQL directly
+  - id: pool-metrics
+    type: table
+    label: order-api PostgreSQL pool and database host metrics
+    content: |
+      minute  summaryRps  avgQueriesPerSummary  poolActive  poolWaitingP95Ms  dbCpu  dbQueryP95Ms
+      10:10   6           21                    18/40       1                21%    1.1
+      10:12   14          97                    40/40       388              24%    1.0
+      10:14   16          97                    40/40       466              26%    1.1
+      10:16   3           21                    19/40       2                20%    1.0
+  - id: fixes
+    type: note
+    label: candidate fixes for the order summary query shape
+    content: |
+      F1: Replace the nested lazy lookups with three tenant-scoped bulk queries:
+          (a) fetch the page of orders; (b) fetch all order_items WHERE order_id = ANY($1);
+          (c) fetch all catalog_products WHERE tenant_id = $1 AND sku = ANY($2), where $2 is the
+          distinct SKU set from (b). Build maps by orderId and SKU in memory. The product map is
+          scoped to this request's tenant and contains only the current response's products.
+
+      F2: Add another index on catalog_products(sku).
+
+      F3: Increase the order-api PostgreSQL pool from 40 to 160 connections.
+
+      F4: Create one process-global DataLoader keyed only by SKU with a 10-minute cache. Reuse it
+          for every tenant and every request so repeated SKU lookups avoid PostgreSQL.
+
+      Constraints:
+        - The endpoint must sustain 30 normal-size responses per second with response p99 below 300ms.
+        - Catalog prices are tenant-specific; a product lookup must never return another tenant's
+          price, even when SKUs have the same text value.
+        - The endpoint must show current catalog prices; a ten-minute process-global stale cache is
+          not allowed for this administrative workflow.
+tags: [debugging, root-cause-isolation, orm, n-plus-one, database, query-performance]

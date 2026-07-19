@@ -1,10 +1,10 @@
 id: lower-bound-insertion-point
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: algorithmic-correctness
 difficulty: expert
 title: Which Candidate Computes the Leftmost Insertion Point on Every Declared Input
-summary: A specification defines lowerBound(a, target) — the leftmost sorted-insertion index — with a complete acceptance vector of inputs and exact expected outputs. Five candidate implementations are submitted; some are correct, some carry a classic off-by-one, wrong-branch, or wrong-contract defect. Classify each candidate conforms/violates by tracing it against the declared vector, and name the exact input that disproves each violator.
+summary: A specification defines lowerBound(a, target) — the leftmost sorted-insertion index — with a complete acceptance vector of inputs and exact expected outputs. Five candidate implementations are submitted. Classify each candidate as conforms or violates by tracing it against the declared vector, and name the exact input that disproves each violator.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector,
   candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite
@@ -105,7 +105,7 @@ artifacts:
         let lo = 0, hi = a.length;
         while (lo < hi) {
           const mid = lo + ((hi - lo) >> 1);
-          if (a[mid] <= target) lo = mid + 1;   // note the comparison
+          if (a[mid] <= target) lo = mid + 1;
           else hi = mid;
         }
         return lo;
@@ -116,7 +116,7 @@ artifacts:
     content: |
       // candidate-c
       function lowerBound(a, target) {
-        let lo = 0, hi = a.length - 1;           // note the initializer
+        let lo = 0, hi = a.length - 1;
         while (lo < hi) {
           const mid = lo + ((hi - lo) >> 1);
           if (a[mid] < target) lo = mid + 1;
@@ -133,11 +133,11 @@ artifacts:
         let lo = 0, hi = a.length - 1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (a[mid] === target) return mid;     // returns on any equal element
+          if (a[mid] === target) return mid;
           if (a[mid] < target) lo = mid + 1;
           else hi = mid - 1;
         }
-        return -1;                               // returned when no equal element exists
+        return -1;
       }
   - id: candidate-e
     type: code

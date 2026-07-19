@@ -1,0 +1,40 @@
+id: speed-incident-timeline
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: hard
+title: Synthesize an Incident Timeline From Logs and Migration Records
+summary: >-
+  Read API gateway logs, auth service logs, and a database migration record to synthesize a chronological
+  incident timeline, isolate the root cause, and identify the mismatch.
+prompt: |
+  Using [gateway-logs], [auth-logs], and [migration-record], diagnose the incident.
+
+  1. Provide a chronological timeline of the incident with 4 key events, including exact timestamps.
+  2. A 2-3 sentence root-cause explanation identifying the mismatch between the database schema and the auth service query, citing specific fields from [auth-logs] and [migration-record].
+  3. Propose a one-line fix (either a database migration update or an auth service query update) to resolve the issue.
+artifacts:
+  - id: gateway-logs
+    type: log
+    label: API Gateway Logs
+    content: |
+      2026-07-16T10:00:00Z INFO GET /health - 200 OK
+      2026-07-16T10:01:15Z INFO POST /checkout - 200 OK
+      2026-07-16T10:02:30Z ERROR POST /checkout - 500 Internal Server Error (Auth Service Failure)
+      2026-07-16T10:03:00Z ERROR POST /checkout - 500 Internal Server Error (Auth Service Failure)
+  - id: auth-logs
+    type: log
+    label: Auth Service Logs
+    content: |
+      2026-07-16T10:00:00Z INFO starting auth-service v1.2.0
+      2026-07-16T10:01:15Z INFO token validated successfully for user_123
+      2026-07-16T10:02:15Z INFO starting auth-service v1.3.0
+      2026-07-16T10:02:30Z ERROR DB Query failed: SELECT id, email, is_verified FROM users WHERE id = $1 - column "is_verified" does not exist
+      2026-07-16T10:03:00Z ERROR DB Query failed: SELECT id, email, is_verified FROM users WHERE id = $1 - column "is_verified" does not exist
+  - id: migration-record
+    type: table
+    label: Database Migration Record
+    content: |
+      migration_id            | executed_at          | sql_statement
+      AddEmailVerification    | 2026-07-16T10:02:00Z | ALTER TABLE users ADD COLUMN email_verified BOOLEAN DEFAULT FALSE;
+tags: [debugging, logs, database, synthesis]

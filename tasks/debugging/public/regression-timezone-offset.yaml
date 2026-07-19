@@ -1,0 +1,232 @@
+id: regression-timezone-offset
+version: 1.1.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: Scheduling API Stores Events at the Wrong Time for Non-UTC Users
+summary: >-
+  The scheduling API stores events at the wrong time for non-UTC users — off by exactly their UTC
+  offset. Five recent commits are suspects; the CI matrix pins the regression to one. An ORM upgrade,
+  a date-library bump, a validation refactor, and a CSS fix all look plausible alongside the true
+  culprit. Reconcile the CI matrix, diffs, test output, and sample data to identify the introducing
+  commit and select the adequate fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (ci-matrix, c1-diff, c2-diff, c3-diff,
+  c4-diff, c5-diff, test-output, data-sample, tz-config, fixes). Cite the artifact id(s) for every
+  claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  The event-scheduling API accepts ISO-8601 datetime strings with timezone offsets from clients
+  (e.g. "2025-06-10T09:00:00+01:00") and stores them in a TIMESTAMPTZ column. After recent commits,
+  "09:00+01:00" is stored as "09:00 UTC" instead of the correct "08:00 UTC". Users in non-UTC
+  timezones see their events shifted by their UTC offset.
+
+  1. INTRODUCING COMMIT. Name the single commit that introduced the regression and cite ci-matrix
+     for the exact test that flipped from PASS to FAIL. State the test name, the last passing
+     commit, and the first failing commit.
+  2. THE MECHANISM. From the culprit diff, cite the exact code change and explain why it causes
+     timezone offsets to be dropped. State what the code did before and after, and why the new
+     behavior treats offset-bearing timestamps as if they were UTC.
+  3. RED HERRING: DATE LIBRARY UPGRADE (c1). Explain why the date-library version bump is NOT
+     the cause, citing c1-diff and ci-matrix. State what c1 actually changed and why the test
+     still passes after it.
+  4. RED HERRING: ORM UPGRADE (c2). Explain why the ORM version bump is NOT the cause, citing
+     c2-diff and ci-matrix. State what observable change, if any, c2 introduced and why it does
+     not affect datetime semantics.
+  5. RED HERRING: VALIDATION REFACTOR (c4) AND UI FIX (c5). Explain why neither c4 nor c5 could
+     be the introducing commit, citing ci-matrix. State that the regression was already present
+     before these commits.
+  6. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression,
+     and state the invariant it enforces between the incoming ISO-8601 string and the stored
+     TIMESTAMPTZ value.
+  7. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow
+     or harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: ci-matrix
+    type: table
+    label: CI test results per commit (chronological order c1-c5)
+    content: |
+      commit  message                              tz-offset-preserved  event-roundtrip  input-validation  ui-calendar-render
+      c1      "bump date-fns 2.30 -> 3.6"          PASS                 PASS             PASS              PASS
+      c2      "upgrade drizzle-orm 0.30 -> 0.33"   PASS                 PASS             PASS              PASS
+      c3      "normalize: consistent UTC parsing"   FAIL                 FAIL             PASS              PASS
+      c4      "refactor: extract input validators"  FAIL                 FAIL             PASS              PASS
+      c5      "fix: calendar grid off-by-one CSS"   FAIL                 FAIL             PASS              PASS
+
+      # tz-offset-preserved: sends "2025-06-10T09:00:00+01:00", expects stored UTC = "2025-06-10T08:00:00Z"
+      # event-roundtrip: creates event via API, reads it back, compares all fields including time
+  - id: c1-diff
+    type: diff
+    label: "c1: bump date-fns 2.30 -> 3.6"
+    content: |
+      # c1 upgrades the date-fns library from 2.30 to 3.6.
+      # Files changed: package.json, package-lock.json ONLY.
+      --- a/package.json
+      +++ b/package.json
+         "dependencies": {
+      -    "date-fns": "^2.30.0",
+      +    "date-fns": "^3.6.0",
+           "drizzle-orm": "^0.30.0",
+
+      # No application code changed. The date-fns 3.x release notes state:
+      #   - parseISO() behavior is UNCHANGED: it parses the full ISO-8601 string including timezone
+      #     offset and returns a Date object representing the correct instant in time.
+      #   - No breaking changes to parseISO, format, or formatISO.
+  - id: c2-diff
+    type: diff
+    label: "c2: upgrade drizzle-orm 0.30 -> 0.33"
+    content: |
+      # c2 upgrades drizzle-orm from 0.30 to 0.33.
+      # Files changed: package.json, package-lock.json, drizzle.config.ts
+      --- a/package.json
+      +++ b/package.json
+         "dependencies": {
+           "date-fns": "^3.6.0",
+      -    "drizzle-orm": "^0.30.0",
+      +    "drizzle-orm": "^0.33.0",
+
+      --- a/drizzle.config.ts
+      +++ b/drizzle.config.ts
+      -  dialect: "postgresql",
+      +  dialect: "postgresql",
+      +  verbose: true,
+
+      # Only the ORM version and a verbose logging flag changed. No schema changes, no query changes,
+      # no datetime handling code was modified. drizzle-orm 0.33 release notes:
+      #   - TIMESTAMPTZ columns: driver behavior unchanged; Date objects are serialized using
+      #     toISOString() which always produces UTC. No change to how Date objects are stored.
+  - id: c3-diff
+    type: diff
+    label: "c3: normalize — consistent UTC parsing"
+    content: |
+      # c3 "normalizes" date parsing across the scheduling module.
+      # Files changed: src/scheduling/event.service.ts
+      # The commit message reads: "Normalize all date inputs to UTC for consistency. Remove timezone
+      # offset suffixes so all times are treated as UTC — simplifies storage and comparisons."
+      --- a/src/scheduling/event.service.ts
+      +++ b/src/scheduling/event.service.ts
+       import { parseISO } from 'date-fns';
+
+      -function parseEventTime(input: string): Date {
+      -  // parseISO handles the full ISO-8601 string including timezone offset.
+      -  return parseISO(input);
+      -}
+      +function parseEventTime(input: string): Date {
+      +  // Normalize to UTC: strip any timezone offset suffix and parse as UTC.
+      +  const normalized = input.replace(/[+-]\d{2}:\d{2}$/, '');
+      +  return new Date(normalized + 'Z');
+      +}
+
+       async function createEvent(dto: CreateEventDto) {
+         const startTime = parseEventTime(dto.startTime);
+  - id: c4-diff
+    type: diff
+    label: "c4: refactor — extract input validators"
+    content: |
+      # c4 extracts validation logic into a separate validators.ts file.
+      # Files changed: src/scheduling/validators.ts (new), src/scheduling/event.service.ts
+      --- /dev/null
+      +++ b/src/scheduling/validators.ts
+      +export function validateEventTitle(title: string): string {
+      +  if (!title || title.trim().length === 0) throw new Error('Title is required');
+      +  if (title.length > 200) throw new Error('Title must be 200 chars or fewer');
+      +  return title.trim();
+      +}
+      +
+      +export function validateDuration(minutes: number): number {
+      +  if (minutes <= 0 || minutes > 1440) throw new Error('Duration must be 1-1440 minutes');
+      +  return minutes;
+      +}
+
+      --- a/src/scheduling/event.service.ts
+      +++ b/src/scheduling/event.service.ts
+      +import { validateEventTitle, validateDuration } from './validators';
+
+       async function createEvent(dto: CreateEventDto) {
+      -  if (!dto.title) throw new Error('Title is required');
+      +  const title = validateEventTitle(dto.title);
+      +  const duration = validateDuration(dto.durationMinutes);
+         const startTime = parseEventTime(dto.startTime);
+      # Files changed by c4 are listed above; the diff is complete.
+  - id: c5-diff
+    type: diff
+    label: "c5: fix — calendar grid off-by-one CSS"
+    content: |
+      # c5 fixes a CSS layout bug in the calendar UI.
+      # Files changed: src/components/CalendarGrid.module.css ONLY.
+      --- a/src/components/CalendarGrid.module.css
+      +++ b/src/components/CalendarGrid.module.css
+       .calendarGrid {
+         display: grid;
+      -  grid-template-columns: repeat(7, 1fr);
+      +  grid-template-columns: repeat(7, minmax(0, 1fr));
+         gap: 1px;
+       }
+       .dayCell {
+      -  min-height: 80px;
+      +  min-height: 100px;
+       }
+      # c5 is a frontend-only CSS change.
+  - id: test-output
+    type: log
+    label: failing test output for tz-offset-preserved (captured at c3)
+    content: |
+      FAIL  src/scheduling/__tests__/event.service.test.ts > tz-offset-preserved
+        Test: "event created with offset-bearing ISO string stores correct UTC instant"
+
+        Input:          "2025-06-10T09:00:00+01:00"
+        Expected (UTC): "2025-06-10T08:00:00.000Z"   (09:00 in UTC+1 = 08:00 UTC)
+        Received (UTC): "2025-06-10T09:00:00.000Z"
+        Difference:     +1 hour
+
+        Additional test cases:
+          Input: "2025-06-10T14:00:00-05:00"  Expected: "2025-06-10T19:00:00.000Z"  Got: "2025-06-10T14:00:00.000Z"  (diff: -5h)
+          Input: "2025-06-10T23:30:00+05:30"  Expected: "2025-06-10T18:00:00.000Z"  Got: "2025-06-10T23:30:00.000Z"  (diff: +5.5h)
+          Input: "2025-06-10T12:00:00Z"       Expected: "2025-06-10T12:00:00.000Z"  Got: "2025-06-10T12:00:00.000Z"  (PASS)
+  - id: data-sample
+    type: table
+    label: sample events created after c3, showing the offset error
+    content: |
+      event_id  user_tz   input_start_time              stored_start_utc              correct_start_utc             error
+      evt-101   UTC+1     2025-06-10T09:00:00+01:00     2025-06-10T09:00:00Z          2025-06-10T08:00:00Z          +1h
+      evt-102   UTC-5     2025-06-10T14:00:00-05:00     2025-06-10T14:00:00Z          2025-06-10T19:00:00Z          -5h
+      evt-103   UTC+5:30  2025-06-10T23:30:00+05:30     2025-06-10T23:30:00Z          2025-06-10T18:00:00Z          +5.5h
+      evt-104   UTC       2025-06-10T12:00:00Z          2025-06-10T12:00:00Z          2025-06-10T12:00:00Z          none
+      evt-105   UTC+9     2025-06-11T02:00:00+09:00     2025-06-11T02:00:00Z          2025-06-10T17:00:00Z          +9h
+  - id: tz-config
+    type: config
+    label: server and database timezone configuration (complete)
+    content: |
+      # Server process timezone (set at startup, verified in application logs):
+      TZ=UTC                               # process runs in UTC — unchanged across all commits
+
+      # Database timezone:
+      SHOW timezone;  -> 'UTC'             # PostgreSQL session timezone is UTC
+      # Column type: events.start_time is TIMESTAMPTZ (timestamp with time zone)
+      # Storage behavior: PostgreSQL stores TIMESTAMPTZ as UTC internally. A Date object inserted
+      # into a TIMESTAMPTZ column is stored as the UTC instant that Date represents; the database
+      # stores exactly what it receives.
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Revert parseEventTime to use parseISO(input) from date-fns.
+
+      F2: Keep the c3 parsing logic (strip offset, append Z) but add a server-side adjustment
+          that subtracts the user's profile timezone offset before storing. Requires reading the
+          user's timezone from their profile on every event creation.
+
+      F3: Change the database column from TIMESTAMPTZ to TEXT and store the raw ISO-8601 string
+          as-is, deferring timezone conversion to read time.
+
+      F4: Force all clients to send times in UTC only (reject any non-Z suffix with a 400 error),
+          so the stripping logic in c3 never encounters an offset.
+
+      Constraints:
+        - The API contract (documented in the OpenAPI spec) accepts ISO-8601 strings with timezone
+          offsets. Clients in multiple timezones rely on sending local times with their offset.
+        - Existing events created before c3 are stored correctly (UTC instants). The fix must not
+          require migrating historical data or changing the column type.
+        - The server and database are both UTC (tz-config).
+tags: [debugging, regression-introduction, timezone, datetime, parsing, iso-8601]

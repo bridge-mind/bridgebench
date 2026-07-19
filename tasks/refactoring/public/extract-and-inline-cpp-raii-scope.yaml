@@ -1,0 +1,110 @@
+id: extract-and-inline-cpp-raii-scope
+version: 1.0.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Extract a C++ Transaction Scope Without Moving RAII Destruction
+summary: >-
+  A C++ loop creates a transaction guard after validation, commits conditionally, and relies on
+  destructor timing before per-item reporting. Four helper extractions alter construction,
+  destruction, exception identity, or reference lifetime; one preserves every trace and meets the
+  extraction goal.
+prompt: |
+  Use only original-loop, observable-contract, scenarios, rewrites, and manifest. Cite artifact ids.
+  Give behavior-preserving / changes-behavior and meets-goal / fails-goal for every rewrite.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For every change, give the first C1..C6 witness and exact log/result/exception.
+  3. Identify the unique rewrite satisfying both axes and trace C5.
+  4. State the destruction point of Tx in the original relative to report(id).
+  5. Explain why passing a preconstructed Tx into the helper changes rejected-input behavior.
+  6. Evaluate reviewer Wes's proposal to catch and translate exceptions inside the helper.
+artifacts:
+  - id: original-loop
+    type: code
+    label: Existing C++20 implementation
+    content: |
+      std::vector<Id> process(Store& store, const std::vector<Item>& items) {
+        std::vector<Id> done;
+        for (const Item& item : items) {
+          audit("check", item.id());
+          if (!valid(item)) continue;
+          {
+            Tx tx(store);                 // logs begin
+            apply(tx, item);              // may throw
+            if (should_commit(item)) {
+              tx.commit();                // logs commit, may throw
+              done.push_back(item.id());  // copies Id, may throw
+            }
+          }                               // Tx destructor logs end/rollback
+          report(item.id());              // may throw
+        }
+        return done;
+      }
+
+      Every named call logs at entry. Tx destructor is noexcept, commits stay committed, and an
+      uncommitted Tx rolls back. Exact exception identity, done contents, and log order are observable.
+  - id: observable-contract
+    type: spec
+    label: Complete behavior and extraction goal
+    content: |
+      R1 invalid item: check/valid only; no Tx, apply, report, or done entry.
+      R2 valid item constructs exactly one Tx after validation.
+      R3 Tx destruction completes before report for that item on success.
+      R4 apply/commit/push exception unwinds Tx, skips report and all later items, exact exception escapes.
+      R5 if push_back throws after commit, transaction remains committed but destructor end occurs before
+         exception is observed; done lacks the item.
+      R6 report failure occurs after Tx destruction and preserves any appended done item internally
+         although the function throws.
+
+      Goal G: extract the braced transaction body into named helper
+      void process_one(Store&,const Item&,std::vector<Id>&), while retaining validation and report in
+      the loop and preserving R1..R6.
+  - id: scenarios
+    type: table
+    label: Authoritative RAII traces
+    content: |
+      C1 invalid x -> check:x,valid:x; return [].
+      C2 valid x, should_commit false -> check,valid,begin,apply,should,end:rollback,report; [].
+      C3 valid x commits -> check,valid,begin,apply,should,commit,copy-id,end:commit,report; [x].
+      C4 apply throws E -> check,valid,begin,apply,end:rollback; throw exact E.
+      C5 commit succeeds but Id copy for result throws P. Original copy happens before Tx destruction:
+         check,valid,begin,apply,should,commit,copy-id,end:commit; throw P.
+      C6 report throws Q after committed x -> ...commit,copy-id,end:commit,report; throw exact Q.
+  - id: rewrites
+    type: code
+    label: Four proposed helper extractions
+    content: |
+      // rewrite-a
+      void process_one(Store& s,const Item& i,std::vector<Id>& done) {
+        Tx tx(s); apply(tx,i); if(!should_commit(i)) return;
+        tx.commit(); done.push_back(i.id());
+      }
+      // loop validates, calls process_one(store,item,done), then reports
+
+      // rewrite-b
+      bool process_one(Tx tx,const Item& i) { apply(tx,i); if(!should_commit(i)) return false;
+        tx.commit(); return true; }
+      // loop constructs Tx before valid(item), passes it on valid inputs, appends id after helper returns
+
+      // rewrite-c
+      bool process_one(Store& s,const Item& i) { try { Tx tx(s); apply(tx,i);
+        if(!should_commit(i)) return false; tx.commit(); return true; }
+        catch(...) { throw ProcessingError(i.id()); } }
+      // loop validates, calls helper, appends id on true, then reports
+
+      // rewrite-d
+      // keeps the original braced transaction body in process; adds only a comment named process_one
+
+      Rewrite-a performs the same Id copy and possible vector allocation while Tx is alive. Helper
+      return destroys Tx before control reaches report, exactly matching the original scope.
+  - id: manifest
+    type: note
+    label: Complete C++ lifecycle assumptions
+    content: |
+      rewrite-a through rewrite-d are complete. rewrite-b constructs Tx before validation and appends
+      Id after its Tx has destructed. rewrite-c also moves copy after destruction and wraps exceptions.
+
+      Wes's translation proposal violates R4/R6 exact exception identity even if logs were otherwise
+      unchanged.
+tags: [refactoring, extract-and-inline, cpp, raii, exception-safety]

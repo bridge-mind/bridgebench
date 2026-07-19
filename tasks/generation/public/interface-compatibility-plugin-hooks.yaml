@@ -1,0 +1,203 @@
+id: interface-compatibility-plugin-hooks
+version: 1.1.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: normalizePlugin — Which Adapter Preserves Hook Compatibility Across Legacy and Modern Plugins
+summary: A plugin adapter contract defines modern-vs-legacy hook precedence, this-binding, default hook behavior, and metadata normalization for drop-in compatibility. Five adapter candidates are reviewed. Classify all candidates against the contract clauses and cite the fixture step that exposes each incompatibility.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (adapter-contract, fixture-scenarios,
+  candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
+  claim. Do not invent interface rules and do not ignore one that is stated. The verdict vocabulary
+  is exactly: conforms / violates.
+
+  adapter-contract defines I1..I5 and is complete. submission-manifest declares candidate-1..candidate-5
+  the complete set.
+
+  1. Classify each of candidate-1..candidate-5 as `conforms` or `violates`.
+
+  2. For every candidate you mark `violates`, name the single broken clause (I1..I5) and cite one
+     fixture-scenarios step where behavior diverges from contract-correct output/logs.
+
+  3. Identify which candidates, if any, `conform`, and state the expected log sequence for fixture F1.
+
+  4. In reviewer-thread, @nate argues candidate-2 is safer because "legacy hooks should always win if
+     both are present." State candidate-2's verdict and the clause that refutes this.
+
+  5. Name the candidate whose default `onEvent` breaks pass-through compatibility, and provide its
+     returned event for fixture F2 step E1 versus the contract-correct event.
+artifacts:
+  - id: adapter-contract
+    type: spec
+    label: normalizePlugin compatibility contract (complete)
+    content: |
+      normalizePlugin(plugin) -> normalized
+
+      Returns:
+        {
+          name: string,
+          version: 1,
+          onStart(ctx): void,
+          onEvent(event, ctx): event,
+          onStop(ctx): void
+        }
+
+      Clauses (COMPLETE):
+
+      I1  HOOK SOURCE PRECEDENCE.
+          For each hook:
+            - use modern hook if present: onStart/onEvent/onStop
+            - else fallback to legacy hook: start/event/stop
+            - else fallback to default hook per I3
+          Modern must take precedence when both modern and legacy are present.
+
+      I2  CALL SIGNATURE AND BINDING.
+          normalized.onStart(ctx), normalized.onEvent(event, ctx), normalized.onStop(ctx)
+          must invoke the chosen source hook with `this === plugin`.
+
+      I3  DEFAULT HOOKS.
+          Missing start/stop hooks default to no-op.
+          Missing event hook defaults to identity: return the input event unchanged.
+
+      I4  METADATA COMPATIBILITY.
+          normalized.name = plugin.name when it is a non-empty string; otherwise "anonymous".
+          normalized.version is exactly numeric 1.
+
+      I5  DROP-IN BEHAVIOR.
+          For the fixture scenarios below, output event and log ordering must match exactly.
+
+      This is the complete contract.
+  - id: fixture-scenarios
+    type: table
+    label: fixtures and expected behavior
+    content: |
+      Fixture F1 plugin:
+        name: "alpha"
+        onStart(ctx) { ctx.log.push("m:start:" + this.name); }
+        start(ctx)   { ctx.log.push("l:start:" + this.name); }
+        onEvent(e, ctx) { ctx.log.push("m:event:" + e.type); return { type: e.type, via: "modern" }; }
+        event(e, ctx)   { ctx.log.push("l:event:" + e.type); return { type: e.type, via: "legacy" }; }
+        onStop(ctx) { ctx.log.push("m:stop:" + this.name); }
+        stop(ctx)   { ctx.log.push("l:stop:" + this.name); }
+
+      F1 execution:
+        S1 normalized = normalizePlugin(F1)
+        S2 ctx.log = []
+        S3 normalized.onStart(ctx)
+        S4 out = normalized.onEvent({type:"tick"}, ctx)
+        S5 normalized.onStop(ctx)
+      F1 expected:
+        normalized.name = "alpha", normalized.version = 1
+        ctx.log = ["m:start:alpha", "m:event:tick", "m:stop:alpha"]
+        out = { type: "tick", via: "modern" }
+
+      Fixture F2 plugin:
+        name missing
+        start(ctx) { ctx.log.push("legacy-start"); }
+        stop(ctx)  { ctx.log.push("legacy-stop"); }
+        // no event/onEvent hook
+
+      F2 execution:
+        E1 out = normalizePlugin(F2).onEvent({type:"noop"}, ctx)
+      F2 expected:
+        normalized.name = "anonymous", normalized.version = 1
+        out = { type: "noop" }    # default identity event hook
+  - id: candidates-a
+    type: code
+    label: candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function candidate1(plugin) {
+        const startHook = plugin.onStart || plugin.start || function () {};
+        const eventHook = plugin.onEvent || plugin.event || function (evt) { return evt; };
+        const stopHook = plugin.onStop || plugin.stop || function () {};
+        return {
+          name: (typeof plugin.name === 'string' && plugin.name.length > 0) ? plugin.name : 'anonymous',
+          version: 1,
+          onStart(ctx) { return startHook.call(plugin, ctx); },
+          onEvent(evt, ctx) { return eventHook.call(plugin, evt, ctx); },
+          onStop(ctx) { return stopHook.call(plugin, ctx); },
+        };
+      }
+
+      // ---- candidate-2 ----
+      function candidate2(plugin) {
+        const startHook = plugin.start || plugin.onStart || function () {};
+        const eventHook = plugin.event || plugin.onEvent || function (evt) { return evt; };
+        const stopHook = plugin.stop || plugin.onStop || function () {};
+        return {
+          name: (typeof plugin.name === 'string' && plugin.name.length > 0) ? plugin.name : 'anonymous',
+          version: 1,
+          onStart(ctx) { return startHook.call(plugin, ctx); },
+          onEvent(evt, ctx) { return eventHook.call(plugin, evt, ctx); },
+          onStop(ctx) { return stopHook.call(plugin, ctx); },
+        };
+      }
+
+      // ---- candidate-3 ----
+      function candidate3(plugin) {
+        const startHook = plugin.onStart || plugin.start || function () {};
+        const eventHook = plugin.onEvent || plugin.event || function () { return undefined; };
+        const stopHook = plugin.onStop || plugin.stop || function () {};
+        return {
+          name: (typeof plugin.name === 'string' && plugin.name.length > 0) ? plugin.name : 'anonymous',
+          version: 1,
+          onStart(ctx) { return startHook.call(plugin, ctx); },
+          onEvent(evt, ctx) { return eventHook.call(plugin, evt, ctx); },
+          onStop(ctx) { return stopHook.call(plugin, ctx); },
+        };
+      }
+  - id: candidates-b
+    type: code
+    label: candidate-4 and candidate-5
+    content: |
+      // ---- candidate-4 ----
+      function candidate4(plugin) {
+        const startHook = plugin.onStart || plugin.start || function () {};
+        const eventHook = plugin.onEvent || plugin.event || function (evt) { return evt; };
+        const stopHook = plugin.onStop || plugin.stop || function () {};
+        return {
+          name: (typeof plugin.name === 'string' && plugin.name.length > 0) ? plugin.name : 'anonymous',
+          version: 1,
+          onStart(ctx) { return startHook(ctx); },
+          onEvent(evt, ctx) { return eventHook(evt, ctx); },
+          onStop(ctx) { return stopHook(ctx); },
+        };
+      }
+
+      // ---- candidate-5 ----
+      function candidate5(plugin) {
+        const startHook = plugin.onStart || plugin.start || function () {};
+        const eventHook = plugin.onEvent || plugin.event || function (evt) { return evt; };
+        const stopHook = plugin.onStop || plugin.stop || function () {};
+        return {
+          name: plugin.name || '',
+          version: 2,
+          onStart(ctx) { return startHook.call(plugin, ctx); },
+          onEvent(evt, ctx) { return eventHook.call(plugin, evt, ctx); },
+          onStop(ctx) { return stopHook.call(plugin, ctx); },
+        };
+      }
+  - id: reviewer-thread
+    type: note
+    label: review discussion on plugin compatibility
+    content: |
+      Review thread for normalizePlugin (PR #8588).
+
+      @nate: "candidate-2 is safer in production migrations. If both modern and legacy hooks are
+      defined, legacy should win to preserve old behavior."
+
+      @sana: "The compatibility contract says modern hooks intentionally override legacy hooks. That is
+      how plugin upgrades phase in."
+
+      @milo: "One candidate's default event hook returns undefined, which breaks pass-through plugins."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review: candidate-1, candidate-2, candidate-3, candidate-4, candidate-5.
+      This is the COMPLETE set; no other implementation is being considered.
+
+      Acceptance rule: each submission is evaluated against I1..I5 and fixture-scenarios;
+      submissions that satisfy every clause are accepted.
+tags: [generation, interface-compatibility, plugins, hooks, adapters]

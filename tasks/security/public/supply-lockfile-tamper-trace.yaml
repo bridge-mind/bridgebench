@@ -1,5 +1,5 @@
 id: supply-lockfile-tamper-trace
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: supply-chain
 difficulty: expert
@@ -192,22 +192,19 @@ artifacts:
       Torchlight dependency notes (maintainer-authored, current).
 
       - torch-build (devDependency 1.4.0): our FIRST-PARTY build tool, authored in-house and
-        published to registry.torchworks.dev. Its postinstall (bin/link-native.js) only
+        published to registry.torchworks.dev. Its postinstall (bin/link-native.js)
         symlinks prebuilt native addons bundled inside the package; it makes NO network
-        requests and spawns NO subprocesses. Reviewed and expected.
-      - flux-cache 2.2.0: a routine upstream patch we chose to pull in (manifest "^2.1.0"
+        requests and spawns NO subprocesses.
+      - flux-cache 2.2.0: an upstream patch we chose to pull in (manifest "^2.1.0"
         permits it). The 2.2.0 release adds ONE new transitive dependency, lru-ring@1.0.4,
-        its LRU-eviction helper. lru-ring is EXPECTED to appear in the lockfile as a child
-        of flux-cache 2.2.0, resolved from the canonical registry; it is not "injected."
-      - torch-logger 3.1.0: a routine patch bump ("^3.0.0" permits it), from the canonical
-        registry.
+        its LRU-eviction helper.
+      - torch-logger 3.1.0: a patch bump ("^3.0.0" permits it).
       - artifacts.torchworks.dev is our FIRST-PARTY build-artifact store (same trust domain
         as the registry). The CI bootstrap script is served from there and pinned by sha256.
-      - mesh-parser is pinned to EXACT 4.3.1 and has had NO new release; there is no
-        legitimate reason for its resolved host or its integrity hash to change.
+      - mesh-parser is pinned to EXACT 4.3.1; no new mesh-parser release has been published.
 
       Provenance authority: registry-reference lists the only canonical registry hosts and
-      the version-to-integrity rule. Anything conflicting with it is the anomaly to chase.
+      the version-to-integrity rule that every lockfile entry must satisfy.
   - id: build-log
     type: log
     label: torchlight CI install log for the build that triggered this review (build #812)
@@ -220,7 +217,6 @@ artifacts:
         lru-ring@1.0.4       <- https://registry.torchworks.dev/lru-ring/-/lru-ring-1.0.4.tgz
         torch-logger@3.1.0   <- https://registry.torchworks.dev/torch-logger/-/torch-logger-3.1.0.tgz
         ... 37 more packages, all from registry.torchworks.dev ...
-      WARN mesh-parser@4.3.1 resolved host differs from previous builds (was registry.torchworks.dev)
       running postinstall: node ./node_modules/torch-build/bin/link-native.js
       [torch-build] linked 3 native addons
       install completed in 6.2s

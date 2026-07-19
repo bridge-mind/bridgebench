@@ -1,0 +1,171 @@
+id: spec-conformance-json-patch-atomic
+version: 1.0.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: Apply a Restricted JSON Patch Atomically Without Pointer or Mutation Drift
+summary: >-
+  A frozen JSON Patch subset requires ordered add, replace, remove, and test operations, exact
+  pointer decoding, array-index rules, prototype-key rejection, and all-or-nothing mutation.
+  Four implementations look plausible; only one satisfies every declared clause.
+prompt: |
+  Use only the supplied artifacts. The contract-spec is complete, and candidate-manifest declares
+  the complete implementation set. No candidate is executed. Cite artifact ids for every verdict.
+  Use only the verdicts conforms / violates.
+
+  1. Classify candidate-a through candidate-d.
+  2. For every violation, name the first contract clause J1..J7 it can break and give one witness
+     from conformance-cases, including the required and candidate-observable result.
+  3. Identify the unique conforming candidate and trace case C6 through its clone, test, remove,
+     and add steps.
+  4. Decide whether reviewer Mira's claim that candidate-b is safe because it throws on failure is
+     correct. Distinguish exception behavior from atomicity.
+  5. For the paths /a~1b/~0key and /items/-, state the decoded tokens and the required operation.
+  6. State which candidates leave the caller's input observably changed after a failing patch.
+artifacts:
+  - id: contract-spec
+    type: spec
+    label: Complete applyRestrictedPatch contract
+    content: |
+      applyRestrictedPatch(input, operations) returns a patched JSON value or throws PatchError.
+      Inputs contain only null, booleans, finite numbers, strings, arrays, and plain objects.
+      Operations are processed in order. This is the complete contract.
+
+      J1 ATOMIC COPY. The input and every nested array/object reachable from it must remain unchanged
+         on success and failure. A failure exposes no partial result.
+      J2 POINTERS. The empty path addresses the root. Non-empty paths begin with '/'. Split on '/',
+         then decode each token by replacing '~1' with '/' and then '~0' with '~'. Any other '~'
+         escape is invalid. Tokens '__proto__', 'prototype', and 'constructor' are rejected before
+         traversal.
+      J3 OBJECTS. add creates or overwrites an object's final own property. replace and remove require
+         that final own property to exist. Traversal through a missing/non-container parent fails.
+      J4 ARRAYS. A token is either canonical decimal '0' or [1-9][0-9]*. add permits index 0..length
+         and inserts before that index; final token '-' appends. replace/remove permit only
+         0..length-1. '-' is invalid for traversal and for replace/remove.
+      J5 TEST. test requires the target to exist and compares recursively by JSON structural value:
+         object key order is irrelevant; array order matters; numbers use Object.is. A failed test
+         throws before later operations.
+      J6 ROOT. add or replace at empty path replaces the working root. remove at empty path is
+         invalid. test at empty path follows J5.
+      J7 ERRORS. Malformed operations, invalid pointers, missing targets, invalid indices, unsafe
+         keys, and failed tests all throw PatchError. No other operation names are accepted.
+  - id: conformance-cases
+    type: table
+    label: Authoritative distinguishing cases
+    content: |
+      C1 input={"a/b":{"~key":1}}, ops=[replace /a~1b/~0key with 2]
+         required return {"a/b":{"~key":2}}; original remains {"a/b":{"~key":1}}.
+      C2 input={"items":["a","c"]}, ops=[add /items/1 "b", add /items/- "d"]
+         required return {"items":["a","b","c","d"]}.
+      C3 input={"items":["a"]}, ops=[replace /items/1 "x"]
+         required PatchError; original remains {"items":["a"]}.
+      C4 input={"safe":1}, ops=[add /constructor/polluted true]
+         required PatchError before traversal; original remains {"safe":1}.
+      C5 input={"n":0}, ops=[replace /n 1, test /n 2]
+         required PatchError and caller input is still {"n":0}.
+      C6 input={"meta":{"ok":true},"items":[1,2]}, ops=[
+           test /meta {"ok":true},
+           remove /items/0,
+           add /items/- 3
+         ]
+         required return {"meta":{"ok":true},"items":[2,3]}; input remains unchanged.
+      C7 input={"x":{"a":1,"b":2}}, ops=[test /x {"b":2,"a":1}]
+         required success because object key order is irrelevant.
+      C8 input={"items":[1]}, ops=[add /items/01 2]
+         required PatchError because 01 is not a canonical array index.
+  - id: shared-helpers
+    type: code
+    label: Frozen helper semantics available to all candidates
+    content: |
+      class PatchError extends Error {}
+      const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+      const clone = (v) => {
+        if (Array.isArray(v)) return v.map(clone);
+        if (v !== null && typeof v === 'object') {
+          const out = {};
+          for (const [k, x] of Object.entries(v)) out[k] = clone(x);
+          return out;
+        }
+        return v;
+      };
+      const equalJson = (a, b) => {
+        if (typeof a === 'number' && typeof b === 'number') return Object.is(a, b);
+        if (Array.isArray(a) || Array.isArray(b))
+          return Array.isArray(a) && Array.isArray(b)
+            && a.length === b.length && a.every((x, i) => equalJson(x, b[i]));
+        if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+          const ak = Object.keys(a), bk = Object.keys(b);
+          return ak.length === bk.length && ak.every((k) => own(b, k) && equalJson(a[k], b[k]));
+        }
+        return Object.is(a, b);
+      };
+      parsePointer(path) implements J2 exactly and returns decoded tokens.
+      locate(root, tokens, mode) implements J3/J4 traversal exactly and returns
+      { parent, key, exists, value }. mode is add, replace, remove, or test.
+      applyOne(root, op) implements J3..J7 exactly, returning the possibly replaced root.
+      None of parsePointer, locate, equalJson, or applyOne mutates values except that applyOne
+      mutates the working root supplied to it.
+  - id: candidates
+    type: code
+    label: Four complete candidate entry points
+    content: |
+      // candidate-a
+      export function candidateA(input, operations) {
+        let working = clone(input);
+        for (const op of operations) working = applyOne(working, op);
+        return working;
+      }
+
+      // candidate-b
+      export function candidateB(input, operations) {
+        let working = input;
+        for (const op of operations) working = applyOne(working, op);
+        return working;
+      }
+
+      // candidate-c
+      export function candidateC(input, operations) {
+        let working = clone(input);
+        for (const op of operations) {
+          if (op.op === 'add' && op.path.endsWith('/-')) {
+            const tokens = parsePointer(op.path);
+            tokens[tokens.length - 1] = String(
+              locate(working, tokens.slice(0, -1), 'test').value.length - 1,
+            );
+            working = applyOne(working, { ...op, path: '/' + tokens.join('/') });
+          } else {
+            working = applyOne(working, op);
+          }
+        }
+        return working;
+      }
+
+      // candidate-d
+      export function candidateD(input, operations) {
+        let working = clone(input);
+        for (const op of operations) {
+          if (op.op === 'test') {
+            const tokens = parsePointer(op.path);
+            const actual = locate(working, tokens, 'test').value;
+            if (JSON.stringify(actual) !== JSON.stringify(op.value)) throw new PatchError();
+          } else {
+            working = applyOne(working, op);
+          }
+        }
+        return working;
+      }
+  - id: candidate-manifest
+    type: note
+    label: Exhaustive submission manifest and review record
+    content: |
+      The complete submissions are candidate-a, candidate-b, candidate-c, and candidate-d. They use
+      the shared helpers exactly as declared; there are no hidden wrappers or later cleanup passes.
+
+      Review notes:
+      - Mira: candidate-b throws as soon as an operation fails, so callers cannot observe a partial
+        result and its behavior is atomic.
+      - Sol: throwing does not undo writes already made to an aliased input.
+      - Priya: JSON.stringify is deterministic enough for our test operation because both operands
+        are JSON values.
+      - Acceptance requires every clause J1..J7, not merely the happy-path cases.
+tags: [generation, spec-conformance, json-patch, atomicity, code-review]

@@ -1,0 +1,54 @@
+id: speed-event-loop-trace
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: expert
+title: Trace Node Microtasks Across Timer and Check Phases
+summary: Derive an exact Node.js event order across nextTick, promises, timers, and setImmediate using a pinned scheduler contract.
+prompt: |
+  Using [scheduler-contract], trace [program] without executing it.
+
+  1. Give the exact comma-separated output sequence.
+  2. After each callback (`timer-1`, `immediate-1`), list the nextTick queue and Promise
+     microtask queue immediately before they drain.
+  3. Explain in at most six sentences why the nested immediate does or does not run in the
+     same check phase as `immediate-1`.
+artifacts:
+  - id: scheduler-contract
+    type: spec
+    label: Pinned Node scheduler semantics for this task
+    content: |
+      The program runs as the main script of Node.js 22 on an idle event loop. After the
+      main script, Node drains the nextTick queue fully, then Promise microtasks FIFO.
+      Between every individual callback, Node again drains all nextTicks then all Promise
+      microtasks. Timers due at zero run FIFO in the timers phase. The check phase follows
+      and runs the setImmediate callbacks that were queued before that check phase began.
+      A setImmediate scheduled inside a check callback is deferred to the next check phase.
+      No I/O callbacks occur.
+  - id: program
+    type: code
+    label: Program to trace
+    content: |
+      const out: string[] = [];
+      const log = (x: string) => out.push(x);
+
+      log("sync");
+      setTimeout(() => {
+        log("timer-1");
+        process.nextTick(() => log("tick-in-timer"));
+        Promise.resolve().then(() => {
+          log("promise-in-timer");
+          process.nextTick(() => log("tick-in-promise"));
+        });
+      }, 0);
+      setTimeout(() => log("timer-2"), 0);
+      setImmediate(() => {
+        log("immediate-1");
+        setImmediate(() => log("immediate-2"));
+        queueMicrotask(() => log("micro-in-immediate"));
+      });
+      process.nextTick(() => log("tick-main"));
+      Promise.resolve().then(() => log("promise-main"));
+
+      process.on("beforeExit", () => console.log(out.join(",")));
+tags: [nodejs, event-loop, microtasks, tracing]

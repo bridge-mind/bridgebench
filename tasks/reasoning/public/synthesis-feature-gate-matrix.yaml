@@ -1,0 +1,168 @@
+id: synthesis-feature-gate-matrix
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Effective Feature-Gate Matrix Across Flags, Cohorts, Plans, and Kill Switches
+summary: >-
+  Derive each request's effective feature set by synthesizing flag defaults, cohort overrides, plan
+  entitlements, and environment kill switches. Then replay an ordered traffic slice whose apparently
+  inconsistent allows and denials are all correct under the matrix.
+prompt: |
+  GateMesh is investigating feature-gate behavior during the fixed UTC window 15:00:00–15:10:00. No
+  single artifact contains an effective enablement: flag default, cohort override, plan entitlement,
+  and kill switch must all be reconciled. The artifacts are complete for this task; [analyst-note] is
+  non-authoritative.
+
+  1. Effective matrix. For each of these contexts, give whether `beta.search`, `beta.export`, and
+     `beta.agents` are ON or OFF: (a) user U-orchid on plan pro in env prod; (b) user U-ember on plan
+     enterprise in env prod; (c) user U-slate on plan free in env prod; (d) user U-orchid on plan pro
+     in env staging; (e) user U-canary on plan pro in env prod.
+  2. Ordered traffic adjudication. For every row T1–T10 in [traffic-log], state ALLOW or DENY for the
+     requested feature, and name the single decisive rule layer that decided it (kill-switch, plan,
+     cohort, or default).
+  3. Shared-flag explanation. Explain why T3 allows `beta.export` for U-ember while T4 denies the
+     same flag for U-orchid in prod, and why T8 can allow `beta.agents` for U-ember in staging when
+     T5 denies `beta.agents` for U-ember in prod.
+  4. Scoped enable review. Pick the only candidate in [proposed-change] that turns `beta.agents` ON
+     for every prod pro user without enabling it for free users or disabling any kill switch. State
+     why the two alternatives fail.
+  5. Claim review. Classify each numbered statement in [analyst-note] as correct or incorrect and give
+     the specific artifact rule or traffic row that decides it.
+artifacts:
+  - id: flag-defaults
+    type: config
+    label: Global flag defaults by environment
+    content: |
+      flags:
+        beta.search:
+          prod: false
+          staging: true
+        beta.export:
+          prod: false
+          staging: true
+        beta.agents:
+          prod: false
+          staging: true
+
+      This table is exhaustive for the three flags. Defaults apply only when no higher-priority layer
+      sets a value (see [gate-semantics]).
+  - id: cohort-overrides
+    type: table
+    label: Cohort membership and per-flag overrides
+    content: |
+      user      | cohorts
+      U-orchid  | canary-search
+      U-ember   | enterprise-export
+      U-slate   | (none)
+      U-canary  | canary-search, agents-pilot
+
+      cohort            | flag         | override
+      canary-search     | beta.search  | true
+      enterprise-export | beta.export  | true
+      agents-pilot      | beta.agents  | true
+
+      A user receives a cohort override only for an exact flag listed above. Cohorts never change plan
+      or environment. There are no hidden cohorts.
+  - id: plan-entitlements
+    type: config
+    label: Plan feature entitlements
+    content: |
+      plans:
+        free:
+          allows: [beta.search]
+          # free may use search only; export and agents are never entitled
+        pro:
+          allows: [beta.search, beta.export]
+          # agents not entitled on pro
+        enterprise:
+          allows: [beta.search, beta.export, beta.agents]
+
+      users:
+        U-orchid: pro
+        U-ember: enterprise
+        U-slate: free
+        U-canary: pro
+
+      A flag that is not in the plan's allows list is DENY regardless of defaults or cohorts, unless
+      a kill switch forces OFF (already OFF). Plans never force a flag ON by themselves; they only
+      permit enablement from lower layers.
+  - id: kill-switches
+    type: config
+    label: Environment kill switches
+    content: |
+      killSwitches:
+        prod:
+          beta.agents: forced_off   # highest priority; cannot be overridden
+        staging:
+          # no kill switches active
+
+      A forced_off kill switch makes the flag OFF for every user in that environment, ignoring plan,
+      cohort, and default. There are no forced_on kill switches in this window.
+  - id: gate-semantics
+    type: spec
+    label: Complete effective-gate algorithm
+    content: |
+      For a request (user, env, flag):
+        1. If killSwitches[env][flag] is forced_off, result = OFF. Stop.
+        2. If flag is not in plan-entitlements.plans[user.plan].allows, result = OFF. Stop.
+        3. If the user belongs to any cohort with an override for this flag, result = that override
+           (true -> ON, false -> OFF). If multiple cohorts override the same flag, the lexicographically
+           first cohort name wins. Stop.
+        4. Otherwise result = flag-defaults.flags[flag][env].
+
+      ALLOW means result is ON; DENY means result is OFF. No sticky bucketing, percentage rollouts, or
+      randomness exists in this window.
+  - id: traffic-log
+    type: log
+    label: Ordered feature-check traffic slice
+    content: |
+      # No outcomes are shown. Apply in this exact order; each row is independent (no counters).
+      row | env     | user     | flag
+      T1  | prod    | U-orchid | beta.search
+      T2  | prod    | U-slate  | beta.search
+      T3  | prod    | U-ember  | beta.export
+      T4  | prod    | U-orchid | beta.export
+      T5  | prod    | U-ember  | beta.agents
+      T6  | prod    | U-canary | beta.agents
+      T7  | prod    | U-canary | beta.search
+      T8  | staging | U-ember  | beta.agents
+      T9  | staging | U-orchid | beta.export
+      T10 | prod    | U-slate  | beta.export
+
+      Users, plans, cohorts, defaults, and kill switches are exactly as declared above. No unlisted
+      change occurs during this window.
+  - id: proposed-change
+    type: diff
+    label: Candidate scoped enables for prod pro agents
+    content: |
+      Goal: turn beta.agents ON for every prod pro user, without enabling it for free users and
+      without removing the prod kill switch's ability to force other flags off (beta.agents kill
+      switch itself must be cleared as part of a valid candidate if present).
+
+      Candidate A — add pro users to agents-pilot only for U-orchid:
+        cohorts: attach U-orchid to agents-pilot
+
+      Candidate B — clear the prod agents kill switch, entitle pro, and cohort-enable all pro users:
+        killSwitches.prod.beta.agents: forced_off -> (deleted)
+        plans.pro.allows: + beta.agents
+        new cohort pro-agents: override beta.agents=true
+        attach U-orchid and U-canary to pro-agents
+        # flag-defaults.prod beta.agents remains false; enterprise may stay on via plan+default/cohort
+
+      Candidate C — set the global prod default to true only:
+        flag-defaults.beta.agents.prod: false -> true
+        # kill switch and plan entitlements unchanged
+
+      Evaluate the goal literally: every current prod pro user must see agents ON; free must remain
+      OFF; enterprise may remain ON.
+  - id: analyst-note
+    type: note
+    label: Unverified dashboard comments
+    content: |
+      1. "U-orchid gets beta.export in prod because pro allows it and the default is irrelevant."
+      2. "The prod kill switch blocks beta.search for canary users."
+      3. "Staging and prod share kill switches, so T8 must DENY."
+      4. "Candidate C enables agents for all prod pro users because defaults apply last."
+      5. "U-slate can use beta.export in prod via the free plan search entitlement."
+tags: [feature-flags, entitlements, cohorts, kill-switch, multi-artifact-synthesis]

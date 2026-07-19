@@ -1,16 +1,14 @@
 id: race-oversell-reserve-counter
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: concurrency-defect
 difficulty: expert
-title: The Last Seat Sold Twice — A Check-Then-Act Race in Seat Reservation
+title: The Last Seat Sold Twice
 summary: >-
   ticketsvc sold the last seat of an event to two buyers, leaving remaining at -1. The reserve code,
-  two fully specified thread interleavings (one that oversells and one that does not), the database
-  isolation setting, a deployment note about replica count, a sibling release() path, and a
-  candidate-fix list are provided. Identify the exact failing interleaving and the defect, rule out
-  the in-process mutex and atomic-decrement decoys, and pick the fix that closes the race across all
-  replicas.
+  two fully specified thread interleavings, the database isolation setting, a deployment note about
+  replica count, a sibling release() path, and a candidate-fix list are provided. Identify the exact
+  failing interleaving and the defect, rule out the decoys, and pick the fix that holds.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (reserve-code, trace-fail, trace-safe,
   db-config, deploy-note, release-code, fixes). Cite the artifact id(s) for every claim.
@@ -39,18 +37,16 @@ artifacts:
       const metricsLock = new Mutex();   // used ONLY around the metrics write below
 
       export async function reserve(eventId, userId) {
-        // (1) CHECK: read current remaining
+        // (1) read current remaining
         const { remaining } = await db.query(
           'SELECT remaining FROM events WHERE id=$1', [eventId]);
         if (remaining <= 0) throw new SoldOut();
 
-        // ... no lock and no transaction is held between the read above and the write below ...
-
-        // (2) ACT: decrement and record the reservation
+        // (2) decrement and record the reservation
         await db.query('UPDATE events SET remaining = remaining - 1 WHERE id=$1', [eventId]);
         await db.query('INSERT INTO reservations(event_id, user_id) VALUES($1,$2)', [eventId, userId]);
 
-        // metrics only; the lock guards this counter, NOT the check-then-act above
+        // metrics counter update
         await metricsLock.runExclusive(async () => { await db.query(
           'UPDATE reserve_metrics SET n = n + 1 WHERE event_id=$1', [eventId]); });
         return 'ok';
@@ -63,16 +59,14 @@ artifacts:
     content: |
       # T1 = reserve(e-9, u_a) on replica R1;  T2 = reserve(e-9, u_b) on replica R2. Wall-clock in ms.
       t=0.000 T1 SELECT remaining FROM events WHERE id=e-9  -> remaining=1
-      t=0.001 T2 SELECT remaining FROM events WHERE id=e-9  -> remaining=1     # T2 reads BEFORE T1 writes
+      t=0.001 T2 SELECT remaining FROM events WHERE id=e-9  -> remaining=1
       t=0.002 T1 check (1 <= 0)? no  -> proceed
       t=0.003 T2 check (1 <= 0)? no  -> proceed
       t=0.004 T1 UPDATE events SET remaining=remaining-1 WHERE id=e-9  -> remaining now 0
-      t=0.005 T2 UPDATE events SET remaining=remaining-1 WHERE id=e-9  -> remaining now -1   # OVERSOLD
+      t=0.005 T2 UPDATE events SET remaining=remaining-1 WHERE id=e-9  -> remaining now -1
       t=0.006 T1 INSERT reservations(e-9, u_a)  -> ok
-      t=0.007 T2 INSERT reservations(e-9, u_b)  -> ok                          # second sale of one seat
-      # Final: events.remaining = -1; TWO reservations exist for the single last seat of e-9.
-      # The two decrement statements each ran correctly; the fault is that both were authorized by
-      # reads taken before either write landed.
+      t=0.007 T2 INSERT reservations(e-9, u_b)  -> ok
+      # Final: events.remaining = -1; two reservations exist for e-9.
   - id: trace-safe
     type: log
     label: interleaved execution — same code, requests happen to serialize
@@ -83,9 +77,8 @@ artifacts:
       t=0.002 T1 UPDATE events SET remaining=remaining-1 WHERE id=e-9 -> remaining now 0
       t=0.003 T1 INSERT reservations(e-9, u_a) -> ok
       t=0.020 T2 SELECT remaining WHERE id=e-9 -> remaining=0
-      t=0.021 T2 check (0<=0)? YES -> throw SoldOut()   # correct: T2 is rejected
-      # No oversell here, but ONLY because T2's read landed after T1's write. The code is correct
-      # solely under this serial timing; nothing in reserve-code enforces it.
+      t=0.021 T2 check (0<=0)? YES -> throw SoldOut()
+      # Final: events.remaining = 0; one reservation exists for e-9.
   - id: db-config
     type: config
     label: ticketsvc database settings (complete)
@@ -93,8 +86,7 @@ artifacts:
       database:
         isolationLevel: READ COMMITTED     # default; reserve() issues each statement autocommit
         statementTimeoutMs: 5000
-      # There is no advisory-lock, SELECT ... FOR UPDATE, or unique constraint on (event_id) in the
-      # reserve path today. events.remaining has no CHECK (remaining >= 0) constraint.
+      # Schema note: events.remaining is an integer column with no CHECK constraint.
   - id: deploy-note
     type: note
     label: ticketsvc deployment topology (complete)
@@ -108,17 +100,16 @@ artifacts:
     label: ticketsvc/release.ts — release a seat (sibling path, for contrast)
     content: |
       export async function release(eventId) {
-        // Single atomic statement: no check-then-act, so it cannot race with itself.
         await db.query('UPDATE events SET remaining = remaining + 1 WHERE id=$1', [eventId]);
         return 'ok';
       }
-      // release() is idempotent per reservation because it is called exactly once per cancelled
-      // reservation row (guarded by a status transition elsewhere). It is not implicated in oversell.
+      // release() is called exactly once per cancelled reservation row (guarded by a status
+      // transition elsewhere).
   - id: fixes
     type: note
     label: candidate fixes under discussion (pick the one that closes the race)
     content: |
-      F1: Replace the check-then-act with a single conditional atomic statement:
+      F1: Replace the SELECT-then-UPDATE with a single conditional atomic statement:
           UPDATE events SET remaining = remaining - 1 WHERE id=$1 AND remaining > 0 RETURNING remaining;
           treat "0 rows updated" as SoldOut (and only then INSERT the reservation).
       F2: Raise database.isolationLevel to SERIALIZABLE, keeping the two separate autocommit statements.

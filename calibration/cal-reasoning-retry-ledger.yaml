@@ -1,0 +1,68 @@
+id: cal-reasoning-retry-ledger
+task:
+  public:
+    id: cal-reasoning-retry-ledger
+    version: 1.0.0
+    category: reasoning
+    cluster: stateful-execution
+    difficulty: hard
+    title: Final retry-ledger state after a burst of failures
+    summary: Trace a retry ledger through a fixed event sequence and report the terminal counter values.
+    prompt: |
+      Using only the artifacts, trace the ledger state produced by processing the event log in order.
+      Deliverables:
+      1. Final value of `attempts`.
+      2. Final value of `budgetRemaining`.
+      3. Whether the final `giveUp` flag is set, citing the exact rule that sets it.
+    artifacts:
+      - id: ledger-rules
+        type: spec
+        label: Ledger update rules
+        content: |
+          Start: attempts=0, budgetRemaining=3, giveUp=false.
+          On FAIL: attempts+=1; budgetRemaining-=1.
+          On PASS: attempts+=1; budgetRemaining resets to 3.
+          After any update, if budgetRemaining == 0 then giveUp=true and no further events are processed.
+      - id: event-log
+        type: log
+        label: Event log (processed in order)
+        content: |
+          1 FAIL
+          2 FAIL
+          3 PASS
+          4 FAIL
+          5 FAIL
+          6 FAIL
+          7 PASS
+  private:
+    id: cal-reasoning-retry-ledger
+    version: 1.0.0
+    expectedResolution: |
+      1. attempts = 6. Events 1-6 each increment attempts; event 6 drives budgetRemaining to 0,
+         setting giveUp and halting processing, so event 7 never runs.
+      2. budgetRemaining = 0 (3 -> 2 -> 1 -> reset 3 at event 3 -> 2 -> 1 -> 0 at event 6).
+      3. giveUp = true, set by the "budgetRemaining == 0" rule immediately after event 6.
+    requiredEvidence:
+      - ledger-rules
+      - event-log
+    disqualifyingErrors:
+      - Processing event 7 after giveUp halts the ledger (attempts = 7 is wrong).
+      - Forgetting the PASS reset at event 3.
+    rubric:
+      correctness: Terminal values must match the reference trace exactly.
+      evidenceGrounding: Each value must cite the rule and event that produced it.
+      constraintHandling: The halt-on-zero rule must be honored; event 7 must be excluded.
+      completeness: All three deliverables answered.
+strongResponse: |
+  1. attempts = 6. Events 1-2 are FAILs (attempts 1-2), event 3 PASS (attempts 3, budget resets to 3),
+     events 4-6 are FAILs (attempts 4-6). Event 6 drops budgetRemaining to 0, which per ledger-rules
+     sets giveUp and stops processing — event 7 is never applied.
+  2. budgetRemaining = 0: 3→2→1, reset to 3 on the event-3 PASS, then 3→2→1→0 across events 4-6.
+  3. giveUp = true, set by the "if budgetRemaining == 0 then giveUp=true" rule right after event 6.
+weakResponse: |
+  1. attempts = 7 — all seven logged events are processed, and each FAIL or PASS increments attempts.
+  2. budgetRemaining = 3 — the final event is a PASS, which resets the budget to 3.
+  3. giveUp = false — the run ends on a PASS with a full budget, so the give-up rule never fires.
+knownDifference: >
+  The weak response ignores the halt-on-zero rule: event 6 zeroes the budget and freezes the ledger,
+  so event 7 is never processed. Strong traces the halt; weak processes all seven events.

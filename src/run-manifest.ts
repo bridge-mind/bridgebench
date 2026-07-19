@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { judgePromptPolicyHash } from './judges.js';
 import { listModels, resolveCompetitorRoster } from './models.js';
+import { JUDGE_PANEL_SIZE } from './seating.js';
 import { competitorPromptPolicyHash } from './tasks.js';
 import {
   BenchmarkCategorySchema,
@@ -44,6 +45,8 @@ export const RunManifestSchema = z
     category: BenchmarkCategorySchema,
     seed: z.string(),
     matches: z.number().int().positive(),
+    // Absent on manifests written before arena-v0.6.0; those runs are ranked.
+    ranked: z.boolean().optional(),
     competitors: z
       .array(ManifestCompetitorSchema)
       .min(2)
@@ -56,7 +59,8 @@ export const RunManifestSchema = z
         }
       }),
     // Length is category-gated by the top-level refine below: the speed arena
-    // binds an empty judge set, every other category the fixed three-judge panel.
+    // binds an empty judge set, every other category the judge pool that
+    // per-match panels are seated from.
     judges: z.array(ManifestJudgeSchema).superRefine((models, context) => {
       if (new Set(models.map((model) => model.id)).size !== models.length) {
         context.addIssue({
@@ -80,13 +84,23 @@ export const RunManifestSchema = z
     }),
   })
   .superRefine((manifest, context) => {
-    // Speed runs have no judge panel; every other category binds exactly three.
-    const expectedJudges = manifest.category === 'speed' ? 0 : 3;
-    if (manifest.judges.length !== expectedJudges) {
+    // Speed runs have no judge panel; every other category binds the judge
+    // POOL — at least a full panel's worth. Each match seats JUDGE_PANEL_SIZE
+    // judges from it (seatPanel), so exact pool membership is a consumer
+    // (API) concern, gated per methodology version.
+    if (manifest.category === 'speed') {
+      if (manifest.judges.length !== 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['judges'],
+          message: `Expected no judges for speed, found ${manifest.judges.length}`,
+        });
+      }
+    } else if (manifest.judges.length < JUDGE_PANEL_SIZE) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['judges'],
-        message: `Expected ${expectedJudges} judges for ${manifest.category}, found ${manifest.judges.length}`,
+        message: `Expected a judge pool of at least ${JUDGE_PANEL_SIZE} for ${manifest.category}, found ${manifest.judges.length}`,
       });
     }
   });
@@ -127,7 +141,7 @@ export function runIdFromManifest(manifest: RunManifest): string {
 }
 
 export function createRunManifest(
-  config: Pick<ArenaRunConfig, 'category' | 'seed' | 'matches' | 'competitorIds'>,
+  config: Pick<ArenaRunConfig, 'category' | 'seed' | 'matches' | 'competitorIds' | 'ranked'>,
   // Public-only packs (speed) carry a null privateHash; judged packs carry a real one.
   tasks: readonly ArenaTask[],
   resolvedCompetitors: readonly ModelRegistryEntry[] = resolveCompetitorRoster(
@@ -154,6 +168,7 @@ export function createRunManifest(
     category: config.category,
     seed: config.seed,
     matches: config.matches,
+    ranked: config.ranked ?? true,
     competitors,
     judges,
     tasks: tasks

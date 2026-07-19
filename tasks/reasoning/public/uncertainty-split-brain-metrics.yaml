@@ -1,0 +1,150 @@
+id: uncertainty-split-brain-metrics
+version: 1.1.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Split-Brain Latency Alarms From a Dual-Writer Metrics Path With One Stale Scrape
+summary: >-
+  Decide whether to page oncoming-call latency when regional dashboards disagree, a synthetic is
+  green, and only one scrape path is authoritative. Weigh the decision policy against dual-writer
+  evidence, the deploy diff, and control probes to isolate the one supported defect and scope.
+prompt: |
+  EdgeRouter v3.2 is live in both `region-north` and `region-south`. During a fifteen-minute window,
+  north's dashboard shows p99 latency above the page threshold while south is healthy, the synthetic
+  remains green, and CPU is elevated but under capacity alerts. At the same time, some request-level
+  evidence is alarming. Use the evidence hierarchy and stop rules in [decision-policy], not the
+  confidence expressed in [analyst-note].
+
+  1. Page decision. State whether to page, watch, or clear the north latency page now. Cite the exact
+     decision-policy rule and facts that meet or fail it; distinguish the direct dual-path rule from
+     the aggregate-only rule.
+  2. Best-supported cause. Name the exact defect, file/expression, and metrics path that trigger the
+     conflicting dashboards. Explain the causal chain without blaming an unstated dependency.
+  3. Affected scope. State precisely which region, metrics pipeline, and request classes are affected,
+     and which neighboring signals remain trustworthy. Explain why south controls are safe.
+  4. Signal adjudication. Classify request evidence, north scrape A, north scrape B, south metrics,
+     and synthetics as decisive, contradictory-stale, healthy-control, or non-covering as appropriate.
+     Explain why the green synthetic and CPU reading do not overturn the best-supported conclusion.
+  5. Remediation. Give the immediate ops action and the minimal pipeline/code remediation. State why
+     silencing the north page without fixing the dual-writer is not acceptable under the policy.
+artifacts:
+  - id: decision-policy
+    type: spec
+    label: Latency evidence hierarchy and page rules
+    content: |
+      EVIDENCE HIERARCHY (highest to lowest):
+        1. Version-tagged request traces with matched regional controls, plus a matching deploy diff
+           that explains a metrics or serving split.
+        2. Authoritative scrape path metrics (explicitly labeled primary in [pipeline-config]).
+        3. Secondary scrape path metrics.
+        4. Shared infrastructure telemetry (CPU, NIC).
+        5. Synthetic checks, only for the exact path they probe.
+
+      AGGREGATE-ONLY RULE:
+        - A region-wide p99 page may fire from secondary scrapes alone only when the primary scrape
+          is missing for >= 10 minutes. If the primary scrape is present, secondary-only threshold
+          breaches are not actionable pages.
+
+      DUAL-PATH STOP RULE:
+        - Page immediately when, within 15 minutes, the primary scrape for a region shows p99 below
+          the page threshold, the secondary scrape for the same region shows p99 above the page
+          threshold, at least five UNIQUE correlation IDs show normal 2xx application latency under
+          200ms on that region's handlers, and a deploy diff identifies a dual-writer or scrape
+          split that can explain secondary inflation. This indicates a metrics split-brain, not an
+          application latency incident — page the metrics oncall (severity: metrics-pipeline), not
+          the edge-latency oncall.
+
+      "Watch" is allowed only when neither rule is met and no higher-ranked evidence isolates a defect.
+      "Clear" means cancel an existing edge-latency page as false.
+  - id: pipeline-config
+    type: config
+    label: Metrics scrape paths and authority
+    content: |
+      regions:
+        region-north:
+          primaryScrape: "victoriametrics-a"   # authoritative
+          secondaryScrape: "prometheus-b"      # dashboards still plot this for legacy panels
+          pageThresholdP99Ms: 800
+        region-south:
+          primaryScrape: "victoriametrics-a"
+          secondaryScrape: "prometheus-b"
+          pageThresholdP99Ms: 800
+
+      writers:
+        # see deploy-diff for the v3.2 writer change
+
+      No other scrape endpoints exist. Primary is always authoritative when present.
+  - id: deploy-diff
+    type: diff
+    label: v3.1 to v3.2 metrics writer change
+    content: |
+      // src/metrics/export.ts
+      export function exportLatencyHistogram(region: string, observeMs: number) {
+        primary.writeHistogram("edge_handler_ms", observeMs, { region });
+      -  if (region === "region-south") {
+      -    secondary.writeHistogram("edge_handler_ms", observeMs, { region });
+      -  }
+      +  secondary.writeHistogram("edge_handler_ms", observeMs, { region });
+      +  if (region === "region-north") {
+      +    for (let i = 0; i < 3; i++) {
+      +      secondary.writeHistogram("edge_handler_ms", observeMs * 4, { region });
+      +    }
+      +  }
+      }
+
+      // Application request handlers were not changed. Only the metrics export path changed.
+  - id: request-evidence
+    type: log
+    label: Version-tagged handler timings and matched controls
+    content: |
+      # Each correlation ID is unique. Values are handler-observed durations, not scrape estimates.
+      time      region        correlation | route          | status | handlerMs
+      16:02:11  region-north  c-901       | /v1/edge/route | 200    | 95
+      16:02:37  region-north  c-902       | /v1/edge/route | 200    | 110
+      16:03:04  region-north  c-903       | /v1/edge/route | 200    | 88
+      16:03:41  region-north  c-904       | /v1/edge/route | 200    | 120
+      16:04:19  region-north  c-905       | /v1/edge/route | 200    | 102
+      16:04:55  region-north  c-906       | /v1/edge/route | 200    | 97
+
+      16:02:18  region-south  s-801       | /v1/edge/route | 200    | 101
+      16:03:11  region-south  s-802       | /v1/edge/route | 200    | 99
+      16:04:31  region-south  s-803       | /v1/edge/route | 200    | 105
+
+      All listed north handler timings are under 200ms. No 5xx occurred in this window for these
+      routes.
+  - id: scrape-telemetry
+    type: table
+    label: Primary vs secondary scrape observations 16:00-16:15
+    content: |
+      signal                                      | region-north | region-south | notes
+      primary p99 edge_handler_ms (VM-A)          | 140          | 135          | present entire window
+      secondary p99 edge_handler_ms (Prom-B)      | 960          | 150          | north above 800 threshold
+      primary scrape gaps                         | 0            | 0            | primary never missing
+      edge CPU                                    | 62%          | 58%          | alert at 90%
+      edge NIC errors                             | 0            | 0            |
+      active edge-latency page (north)            | firing       | n/a          | opened on secondary panel
+  - id: synthetic-suite
+    type: config
+    label: Passing synthetic coverage
+    content: |
+      synthetic: edge-route-smoke
+      cadence: every 30 seconds
+      target: both regions via public VIP
+      request:
+        GET /v1/edge/route?probe=1
+      observed 16:00-16:15:
+        region-north: 30/30 200, probe-reported handlerMs p99=118
+        region-south: 30/30 200, probe-reported handlerMs p99=112
+
+      This suite does not read prometheus-b or victoriametrics-a. Its coverage is limited to
+      application VIP success and probe-reported handler timing.
+  - id: analyst-note
+    type: note
+    label: Unverified incident-room conclusions
+    content: |
+      1. "Page edge-latency oncall because north secondary p99 is 960 > 800."
+      2. "North CPU at 62% explains the latency page."
+      3. "The green synthetic proves both scrape paths are healthy."
+      4. "Clear the page and ignore it because primary is fine — no need to notify anyone."
+      5. "South must also be broken because it shares the v3.2 binary."
+tags: [metrics, split-brain, dual-writer, observability, uncertainty-adversarial]

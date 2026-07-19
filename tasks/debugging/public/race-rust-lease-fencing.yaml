@@ -1,0 +1,99 @@
+id: race-rust-lease-fencing
+version: 1.0.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Expired Worker Commits After Its Replacement Without a Fencing Token
+summary: >-
+  Two Rust workers legitimately hold the same logical job at different times after a lease expires. The
+  original worker resumes from a pause and commits stale output after the replacement, because ownership
+  is checked only before work and result writes carry no fencing token. Trace database timestamps and
+  transactions to distinguish lease overlap from the missing stale-writer rejection.
+prompt: |
+  Diagnose the fictional MosaicRender workers using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State lease exclusivity, fencing, result monotonicity, renewal, and completion invariants.
+  2. Trace schedules A through D at transaction boundaries. Track holder, epoch, expiry, status, result hash,
+     and each worker's local view.
+  3. Identify the first corrupting write and the exact missing predicate. Separate permitted replacement
+     after expiry from the defect that lets the prior epoch mutate state later.
+  4. Explain why serializable isolation, synchronized database time, unique job id, and checking lease before
+     rendering do not fence a stale post-pause commit.
+  5. Classify P1 through P4. Select the adequate fix and describe behavior when renewal races takeover and
+     when object upload succeeds but the fenced database commit fails.
+  6. Give deterministic tests with a fake database clock and barriers for slow worker, renewal, takeover,
+     same-epoch retry, stale completion, duplicate delivery, and orphan-object cleanup.
+
+  The database is the sole lease authority. Worker clocks never determine expiry.
+artifacts:
+  - id: schema-and-code
+    type: code
+    label: PostgreSQL schema and Rust worker lifecycle
+    content: |
+      jobs(id uuid primary key, status text, lease_holder text, lease_epoch bigint not null default 0,
+           lease_expires_at timestamptz, result_hash text)
+
+      acquire(worker):
+        UPDATE jobs SET lease_holder=$worker, lease_epoch=lease_epoch+1,
+          lease_expires_at=clock_timestamp()+interval '30 seconds', status='running'
+        WHERE id=$id AND status != 'complete'
+          AND (lease_expires_at IS NULL OR lease_expires_at < clock_timestamp())
+        RETURNING lease_epoch
+
+      run(job, epoch):
+        bytes = render(job.input).await
+        hash = object_store.put_content_addressed(bytes).await
+        UPDATE jobs SET status='complete', result_hash=$hash
+          WHERE id=$id
+      The final UPDATE does not include holder, epoch, expiry, or status predicate.
+  - id: lease-contract
+    type: spec
+    label: authoritative ownership and output rules
+    content: |
+      Each successful acquire increments a monotonic epoch. Only the current unexpired epoch may renew or
+      complete a job. Every state mutation from leased work must atomically require the acquired epoch and
+      holder; affected-row count zero means fenced and must not be retried as an unconditional write.
+      A newer completed result is final. Content-addressed orphan uploads are safe and garbage-collected after
+      24h, but a stale hash must never replace the database result. Database time defines expiration.
+  - id: takeover-schedule
+    type: log
+    label: deterministic pause and takeover
+    content: |
+      10:00:00 W1 acquire J -> holder=W1 epoch=4 expires=10:00:30
+      10:00:05 W1 starts render R-old then pauses for 40s; no renewal runs during pause
+      10:00:31 W2 acquire J -> holder=W2 epoch=5 expires=10:01:01
+      10:00:38 W2 uploads H-new; unconditional UPDATE J -> complete,H-new
+      10:00:45 W1 resumes, uploads H-old; unconditional UPDATE J -> complete,H-old
+      10:00:46 API returns H-old. Both UPDATE transactions individually commit under SERIALIZABLE.
+  - id: schedule-matrix
+    type: table
+    label: additional controlled cases
+    content: |
+      A W1 epoch4 completes before expiry, no takeover -> H-old is valid
+      B W1 renews epoch4 at 25s with predicate holder=W1,epoch=4,unexpired; W2 acquire at 31s affects 0 rows
+      C W2 epoch5 completes, then W1 epoch4 completes -> HEAD ends H-old (corrupt)
+      D queue redelivers J while epoch5 unexpired -> acquire affects 0 rows, no render
+      Renew implementation already uses an atomic holder+epoch+unexpired predicate and checks row count.
+  - id: side-observations
+    type: note
+    label: attractive suspicions and controls
+    content: |
+      PostgreSQL logs show no serialization anomaly or clock skew. Both workers query clock_timestamp from the
+      same primary. job id is unique and queue duplicates cannot acquire an unexpired lease. H-old and H-new
+      are valid outputs for different input revisions captured by each epoch; renderer determinism is not the
+      issue. The only result writer is run's final UPDATE.
+  - id: patch-candidates
+    type: diff
+    label: proposed fencing patches
+    content: |
+      P1: Increase lease duration to 10 minutes. A pause longer than the duration recreates the schedule.
+      P2: Before final UPDATE, SELECT lease_epoch; if equal, perform the current UPDATE in a later statement.
+          Takeover can occur between SELECT and UPDATE.
+      P3: In one UPDATE require id, lease_holder, lease_epoch, status='running', and unexpired database time;
+          set complete/hash and clear lease. Require exactly one affected row. Renew uses the same epoch
+          predicate. A zero-row completion is fenced; leave content-addressed upload for GC. Completion and
+          takeover serialize on the row, so only the current epoch can win.
+      P4: Let the newest wall-clock `completed_at` overwrite prior results. Worker clock skew and stale writers
+          remain authoritative; wall time is not a fencing token.
+tags: [debugging, concurrency-defect, rust, lease, fencing-token]

@@ -1,10 +1,10 @@
 id: api-contract-adherence-idempotent-charges
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: api-contract-adherence
 difficulty: expert
 title: POST /v1/charges — Which Handler Obeys Every Idempotency And Status Term
-summary: A declared HTTP contract for an idempotent charge endpoint fixes create-vs-replay status codes, idempotency-conflict handling, amount and currency validation with 422 semantics, and a required idempotency-key header. Six handler submissions are under review; exactly one obeys every term while each decoy breaks exactly one. Classify all six against the contract and its canonical request scenarios.
+summary: A declared HTTP contract for an idempotent charge endpoint fixes create-vs-replay status codes, idempotency-conflict handling, amount and currency validation with 422 semantics, and a required idempotency-key header. Six handler submissions are under review. Classify all six against the contract and its canonical request scenarios, naming the term any non-conformer breaks.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (api-contract, error-code-table,
   request-scenarios, handlers-a, handlers-b, submission-manifest). Cite artifact id(s) for every
@@ -12,9 +12,8 @@ prompt: |
   vocabulary is exactly: conforms / violates. A handler `conforms` only if it satisfies EVERY term
   T1..T5 in api-contract.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
-  obeys every term. No code is executed; reason about each handler's response for the canonical
-  request-scenarios.
+  submission-manifest declares candidate-1..candidate-6 the complete set. No code is executed;
+  reason about each handler's response for the canonical request-scenarios.
 
   1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
 
@@ -22,7 +21,7 @@ prompt: |
      breaks and cite the request-scenarios request that exposes it. State the contract-correct
      response (HTTP status + error code / body) and the candidate's response.
 
-  3. Exactly one candidate `conforms`. Identify it.
+  3. Identify which candidates, if any, `conform`.
 
   4. In submission-manifest's review note, a reviewer argues candidate-2 conforms because "it
      returns 409 idempotency_key_reuse when a key is reused with a different body, and 201 for a
@@ -112,21 +111,21 @@ artifacts:
       // ---- candidate-1 ----
       function candidate1(req) {
         const key = req.headers['idempotency-key'];
-        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };   // T5
+        if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
         const { amount, currency } = req.body;
-        if (!Number.isInteger(amount) || amount < 1)                                      // T3
+        if (!Number.isInteger(amount) || amount < 1)
           return { status: 422, body: { error: 'invalid_amount' } };
-        if (!VALID.has(currency))                                                         // T4
+        if (!VALID.has(currency))
           return { status: 422, body: { error: 'unsupported_currency' } };
         const h = bodyHash(req.body);
         const prior = store.get(key);
         if (prior) {
-          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };  // T2
-          return { status: 200, body: prior.charge };                                    // T1 replay
+          if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
+          return { status: 200, body: prior.charge };
         }
         const charge = createCharge(amount, currency);
         store.set(key, { hash: h, charge });
-        return { status: 201, body: charge };                                            // T1 create
+        return { status: 201, body: charge };
       }
 
       // ---- candidate-2 ----
@@ -142,9 +141,9 @@ artifacts:
         const prior = store.get(key);
         if (prior && prior.hash !== h)
           return { status: 409, body: { error: 'idempotency_key_reuse' } };
-        const charge = createCharge(amount, currency);   // identical replay re-creates the charge
+        const charge = createCharge(amount, currency);
         store.set(key, { hash: h, charge });
-        return { status: 201, body: charge };            // always 201, even on identical replay
+        return { status: 201, body: charge };
       }
 
       // ---- candidate-3 ----
@@ -158,7 +157,7 @@ artifacts:
           return { status: 422, body: { error: 'unsupported_currency' } };
         const h = bodyHash(req.body);
         const prior = store.get(key);
-        if (prior) return { status: 200, body: prior.charge };   // replays regardless of body diff
+        if (prior) return { status: 200, body: prior.charge };
         const charge = createCharge(amount, currency);
         store.set(key, { hash: h, charge });
         return { status: 201, body: charge };
@@ -175,7 +174,7 @@ artifacts:
         if (!key) return { status: 400, body: { error: 'idempotency_key_required' } };
         const { amount, currency } = req.body;
         if (!Number.isInteger(amount) || amount < 1)
-          return { status: 400, body: { error: 'invalid_amount' } };   // 400 instead of 422
+          return { status: 400, body: { error: 'invalid_amount' } };
         if (!VALID.has(currency))
           return { status: 422, body: { error: 'unsupported_currency' } };
         const h = bodyHash(req.body);
@@ -196,14 +195,13 @@ artifacts:
         const { amount, currency } = req.body;
         if (!Number.isInteger(amount) || amount < 1)
           return { status: 422, body: { error: 'invalid_amount' } };
-        // no currency validation
         const h = bodyHash(req.body);
         const prior = store.get(key);
         if (prior) {
           if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
           return { status: 200, body: prior.charge };
         }
-        const charge = createCharge(amount, currency);   // accepts any currency, e.g. "jpy"
+        const charge = createCharge(amount, currency);
         store.set(key, { hash: h, charge });
         return { status: 201, body: charge };
       }
@@ -211,7 +209,6 @@ artifacts:
       // ---- candidate-6 ----
       function candidate6(req) {
         const key = req.headers['idempotency-key'];
-        // no idempotency-key-required check
         const { amount, currency } = req.body;
         if (!Number.isInteger(amount) || amount < 1)
           return { status: 422, body: { error: 'invalid_amount' } };
@@ -223,7 +220,7 @@ artifacts:
           if (prior.hash !== h) return { status: 409, body: { error: 'idempotency_key_reuse' } };
           return { status: 200, body: prior.charge };
         }
-        const charge = createCharge(amount, currency);   // creates a charge even with no key
+        const charge = createCharge(amount, currency);
         store.set(key, { hash: h, charge });
         return { status: 201, body: charge };
       }
@@ -235,10 +232,9 @@ artifacts:
       candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
       being considered.
 
-      Acceptance rule: exactly one submission satisfies ALL terms T1..T5 (it reproduces the
-      contract-correct response for every request-scenarios line) and is to be accepted. Each of the
-      other five breaks exactly one term. The process assumes precisely one such all-terms-correct
-      submission exists.
+      Acceptance rule: submissions are evaluated against ALL terms T1..T5 (a submission must
+      reproduce the contract-correct response for every request-scenarios line); submissions that
+      satisfy every term are accepted.
 
       Review note (@theo): "I'd approve candidate-2 — it returns 409 idempotency_key_reuse when a
       key is reused with a different body, and 201 for a fresh charge. Both idempotency behaviors

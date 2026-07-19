@@ -1,0 +1,205 @@
+id: behavior-preservation-singleflight-cleanup
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: Refactor Single-Flight Loading Without Changing Rejection or Cache Semantics
+summary: >-
+  A production loader coalesces concurrent misses, caches every resolved value including null,
+  evicts failed promises, and emits an ordered audit trace. Four cleaner rewrites differ in one
+  timing or presence detail; only one preserves every declared observable.
+prompt: |
+  Use only original-loader, observable-contract, schedules, rewrites, and manifest. Cite artifact
+  ids. For each rewrite give both verdicts: behavior-preserving / changes-behavior and meets-goal /
+  fails-goal.
+
+  1. Classify rewrite-a through rewrite-d on behavior and the stated refactoring goal.
+  2. For each behavior change, identify L1..L7 and the first schedule S1..S5 that witnesses it,
+     including source-call count, settled result, cache/inflight state, and relevant audit entries.
+  3. Identify the unique rewrite that is both behavior-preserving and meets-goal.
+  4. Trace S3 through the original and the accepted rewrite.
+  5. Explain why null must be checked with Map.has rather than truthiness.
+  6. Evaluate the claim that retaining a rejected promise is harmless because every waiter sees the
+     same error.
+artifacts:
+  - id: original-loader
+    type: code
+    label: Existing SingleFlightLoader implementation
+    content: |
+      class SingleFlightLoader {
+        cache = new Map();
+        inflight = new Map();
+        audit = [];
+        constructor(source) { this.source = source; }
+
+        load(key) {
+          if (this.cache.has(key)) {
+            this.audit.push('hit:' + key);
+            return Promise.resolve(this.cache.get(key));
+          }
+          const joined = this.inflight.get(key);
+          if (joined) {
+            this.audit.push('join:' + key);
+            return joined;
+          }
+          this.audit.push('start:' + key);
+          const pending = this.source(key)
+            .then(
+              (value) => {
+                this.cache.set(key, value);
+                this.audit.push('ok:' + key);
+                return value;
+              },
+              (error) => {
+                this.audit.push('fail:' + key);
+                throw error;
+              },
+            )
+            .finally(() => {
+              this.inflight.delete(key);
+              this.audit.push('clear:' + key);
+            });
+          this.inflight.set(key, pending);
+          return pending;
+        }
+      }
+  - id: observable-contract
+    type: spec
+    label: Complete observable behavior and refactoring goal
+    content: |
+      All source calls return native promises and never re-enter load synchronously. Map methods and
+      audit.push do not throw. The complete observables are returned promise settlement/value,
+      source call count, cache/inflight entries after each promise settles, and audit order.
+
+      L1 A cached key is recognized with cache.has, so cached null and undefined are hits.
+      L2 Concurrent misses for one key call source once and return the same pending Promise object.
+      L3 Audit for two concurrent misses begins start:key, join:key.
+      L4 On resolution, cache is set before ok:key; finally removes inflight then records clear:key.
+      L5 On rejection, no cache entry is created; fail:key precedes clear:key; the next call retries.
+      L6 Keys are independent.
+      L7 source throwing synchronously is outside the accepted input domain.
+
+      Goal: replace the duplicated fulfillment/rejection callback shape with one async workflow
+      using try/catch/finally, without changing the public load method, state fields, or observables.
+  - id: schedules
+    type: table
+    label: Authoritative schedules
+    content: |
+      S1 cache contains k->null; load(k): source calls 0, resolves null, audit hit:k.
+      S2 empty state; p1=load(a), p2=load(a) before source settles:
+         source calls 1, p1===p2, audit start:a,join:a; on value 7:
+         cache a->7, no inflight a, audit then ok:a,clear:a.
+      S3 empty; load(a), source rejects E; after settlement call load(a) again:
+         first audit start:a,fail:a,clear:a; no cache/inflight; second call appends start:a and invokes
+         source a second time.
+      S4 empty; load(a), load(b), resolve b then a:
+         audit starts start:a,start:b then ok:b,clear:b,ok:a,clear:a.
+      S5 cache contains u->undefined; load(u): source calls 0, resolves undefined, audit hit:u.
+  - id: rewrites
+    type: code
+    label: Four proposed replacement load methods
+    content: |
+      // rewrite-a
+      load(key) {
+        if (this.cache.has(key)) {
+          this.audit.push('hit:' + key);
+          return Promise.resolve(this.cache.get(key));
+        }
+        const joined = this.inflight.get(key);
+        if (joined) { this.audit.push('join:' + key); return joined; }
+        this.audit.push('start:' + key);
+        const pending = (async () => {
+          try {
+            const value = await this.source(key);
+            this.cache.set(key, value);
+            this.audit.push('ok:' + key);
+            return value;
+          } catch (error) {
+            this.audit.push('fail:' + key);
+            throw error;
+          } finally {
+            this.inflight.delete(key);
+            this.audit.push('clear:' + key);
+          }
+        })();
+        this.inflight.set(key, pending);
+        return pending;
+      }
+
+      // rewrite-b: no finally on rejection.
+      load(key) {
+        if (this.cache.has(key)) {
+          this.audit.push('hit:' + key); return Promise.resolve(this.cache.get(key));
+        }
+        const joined = this.inflight.get(key);
+        if (joined) { this.audit.push('join:' + key); return joined; }
+        this.audit.push('start:' + key);
+        const pending = (async () => {
+          try {
+            const value = await this.source(key);
+            this.cache.set(key, value);
+            this.audit.push('ok:' + key);
+            this.inflight.delete(key);
+            this.audit.push('clear:' + key);
+            return value;
+          } catch (error) {
+            this.audit.push('fail:' + key);
+            throw error;
+          }
+        })();
+        this.inflight.set(key, pending);
+        return pending;
+      }
+
+      // rewrite-c: truthiness replaces presence.
+      load(key) {
+        if (this.cache.get(key)) {
+          this.audit.push('hit:' + key); return Promise.resolve(this.cache.get(key));
+        }
+        const joined = this.inflight.get(key);
+        if (joined) { this.audit.push('join:' + key); return joined; }
+        this.audit.push('start:' + key);
+        const pending = (async () => {
+          try {
+            const value = await this.source(key);
+            this.cache.set(key, value); this.audit.push('ok:' + key); return value;
+          } catch (error) {
+            this.audit.push('fail:' + key); throw error;
+          } finally {
+            this.inflight.delete(key); this.audit.push('clear:' + key);
+          }
+        })();
+        this.inflight.set(key, pending);
+        return pending;
+      }
+
+      // rewrite-d: registers only after awaiting source.
+      async load(key) {
+        if (this.cache.has(key)) {
+          this.audit.push('hit:' + key); return this.cache.get(key);
+        }
+        const joined = this.inflight.get(key);
+        if (joined) { this.audit.push('join:' + key); return joined; }
+        this.audit.push('start:' + key);
+        const value = await this.source(key);
+        const pending = Promise.resolve(value);
+        this.inflight.set(key, pending);
+        this.cache.set(key, value);
+        this.audit.push('ok:' + key);
+        this.inflight.delete(key);
+        this.audit.push('clear:' + key);
+        return value;
+      }
+  - id: manifest
+    type: note
+    label: Exhaustive rewrite and caller declaration
+    content: |
+      rewrite-a through rewrite-d are the complete proposals and replace only load. Constructors,
+      fields, and source behavior remain as shown.
+
+      Reviewer Val says rewrite-b's retained rejected promise is desirable single-flight behavior.
+      L5 requires retry after settlement; joining a stale rejection is observable.
+
+      The no-reentrancy declaration makes invoking source inside the async workflow before assigning
+      pending safe: no second load can run until the current JavaScript stack returns.
+tags: [refactoring, behavior-preservation, async, single-flight, cache]

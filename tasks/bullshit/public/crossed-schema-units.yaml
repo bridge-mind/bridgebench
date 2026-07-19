@@ -1,0 +1,255 @@
+id: crossed-schema-units
+version: 1.1.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Cipher Suite of a Foreign Key
+summary: A schema-compliance audit at SpindleDB mixes routine checks (column types, FK targets, index coverage) with checklist items that ask for properties the catalog's own type-domain rules say those object kinds cannot carry.
+prompt: |
+  SpindleDB is running its quarterly schema-compliance audit over the checkout ledger
+  database. A draft audit checklist written by an intern (see audit-incident-note) was
+  merged into the final deliverable list below without review. Using ALL artifacts,
+  answer the six deliverables.
+
+  Some deliverables may rest on category errors: they ask for a property of an object kind
+  that, according to the platform's own catalog, cannot carry that property. Before
+  answering any deliverable, verify its premise against the property-domain rules in
+  schema-catalog and the object definitions in migration-manifest and index-inventory.
+  If a deliverable rests on a category error, say so explicitly, name the object kinds
+  being conflated, cite the defining artifact, then restate the nearest legitimate
+  question and answer it from the artifacts. Do not play along with an incoherent
+  premise, and do not refuse a deliverable that is answerable as asked. Cite artifact
+  ids for every claim.
+
+  1. Report the PostgreSQL data type and nullability of orders.total_cents, citing both
+     the catalog definition and the applied migration that introduced it.
+  2. Report which TLS cipher suite the orders.customer_id foreign key negotiates when
+     its referential check runs during INSERT.
+  3. Report the index that covers the predicate used by the unpaid-orders query in
+     query-plan-log, and state whether that plan is an Index Scan or a Seq Scan.
+  4. Report the CPU affinity mask of the CHECK constraint chk_orders_total_nonneg.
+  5. Report the compression codec of the money unit attached to orders.total_cents.
+  6. Using the row-count census, report the total number of rows across all four catalog
+     tables, and the percentage of that total (to one decimal place) contributed by the
+     order_events table.
+artifacts:
+  - id: schema-catalog
+    type: spec
+    label: SpindleDB ledger schema catalog and property-domain rules (authoritative)
+    content: |
+      SpindleDB ledger schema catalog, platform release 2026.04 (owner: data-platform).
+      This catalog is the authoritative and EXHAUSTIVE registry of production tables,
+      columns, constraints, and of the property schema each object kind carries. If an
+      object or a property is not defined here, it does not exist on this platform.
+
+      Object type system (complete):
+      - table: named relation. Properties: name, columns, primary_key, foreign_keys,
+        check_constraints. Nothing else.
+      - column: typed field. Properties: name, pg_type, nullable, default. Nothing else.
+      - foreign_key: referential constraint. Properties: name, columns, ref_table,
+        ref_columns, on_delete. Nothing else.
+      - check_constraint: boolean predicate. Properties: name, expression. Nothing else.
+      - index: access method. Properties: name, table, columns, method, unique. Nothing
+        else.
+
+      Property-domain rules (which object kind carries which properties):
+      - A column is a typed field. The property list above is COMPLETE. In particular,
+        columns carry NO network or transport properties: no endpoint, no port, no TLS
+        version, no cipher suite, no certificate. TLS properties exist on exactly one
+        object kind in this platform: the database CONNECTION endpoint (see
+        connection-tls-config). A cipher suite is negotiated per TLS session between a
+        client and the endpoint.
+      - Storage-engine properties (compression codec, toast strategy) belong to TABLE
+        STORAGE CLASSES and are applied by spindle-storage per class (see
+        storage-classes). They are not settable per column.
+      - unit is a plain annotation string ("cents", "money", "count"). A unit is a label
+        of measurement for documentation, not an object; it carries no properties of its
+        own.
+      - CPU scheduling properties (affinity mask, nice value, cgroup) belong to DATABASE
+        PROCESSES (backends).
+
+      Registered tables (complete list; 4 of 4):
+        name: customers
+          columns:
+            id           bigint      NOT NULL  PK
+            email        text        NOT NULL
+            created_at   timestamptz NOT NULL  default now()
+          foreign_keys: (none)
+          check_constraints: (none)
+          storage_class: hot-row
+        name: orders
+          columns:
+            id             bigint      NOT NULL  PK
+            customer_id    bigint      NOT NULL
+            total_cents    bigint      NOT NULL  unit: cents
+            status         text        NOT NULL
+            created_at     timestamptz NOT NULL  default now()
+          foreign_keys:
+            fk_orders_customer: (customer_id) -> customers(id) ON DELETE RESTRICT
+          check_constraints:
+            chk_orders_total_nonneg: (total_cents >= 0)
+          storage_class: hot-row
+        name: order_items
+          columns:
+            id         bigint NOT NULL  PK
+            order_id   bigint NOT NULL
+            sku        text   NOT NULL
+            qty        int    NOT NULL
+            unit_cents bigint NOT NULL  unit: cents
+          foreign_keys:
+            fk_items_order: (order_id) -> orders(id) ON DELETE CASCADE
+          check_constraints:
+            chk_items_qty_pos: (qty > 0)
+          storage_class: hot-row
+        name: order_events
+          columns:
+            id         bigserial   NOT NULL  PK
+            order_id   bigint      NOT NULL
+            event_type text        NOT NULL
+            payload    jsonb       NOT NULL
+            created_at timestamptz NOT NULL  default now()
+          foreign_keys:
+            fk_events_order: (order_id) -> orders(id) ON DELETE CASCADE
+          check_constraints: (none)
+          storage_class: append-cold
+  - id: connection-tls-config
+    type: config
+    label: TLS configuration for the spindle-pg primary endpoint
+    content: |
+      # TLS configuration for the spindle-pg primary endpoint (us-east).
+      # Per schema-catalog, the database CONNECTION endpoint is the only object kind on
+      # this platform that carries TLS properties. All four catalog tables are reached
+      # through this one endpoint.
+      endpoint: spindle-pg.spindle.internal:5432
+      protocol: PostgreSQL wire over TLS
+      tls:
+        min_version: "1.3"
+        max_version: "1.3"
+        cipher_suites:
+          - TLS_AES_256_GCM_SHA384   # single suite; pinned 2026-03-01 per audit AUDIT-41
+        certificate: CN=spindle-pg.spindle.internal (rotated 2026-04-02, expires 2026-10-02)
+        client_auth: required (mTLS against the cluster CA)
+      # The negotiated cipher suite is a property of each TLS session between a client
+      # and this endpoint.
+  - id: migration-manifest
+    type: diff
+    label: Applied migrations introducing the ledger tables (excerpt)
+    content: |
+      Migration M-104 — create orders (applied 2026-02-12 09:00 UTC)
+      --- /dev/null
+      +++ b/migrations/0104_create_orders.sql
+      @@
+      +CREATE TABLE orders (
+      +  id          bigint PRIMARY KEY,
+      +  customer_id bigint NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+      +  total_cents bigint NOT NULL,
+      +  status      text   NOT NULL,
+      +  created_at  timestamptz NOT NULL DEFAULT now(),
+      +  CONSTRAINT chk_orders_total_nonneg CHECK (total_cents >= 0)
+      +);
+      +COMMENT ON COLUMN orders.total_cents IS 'unit: cents (integer minor units)';
+
+      Migration M-109 — create order_events (applied 2026-02-18 11:30 UTC)
+      +CREATE TABLE order_events (
+      +  id         bigserial PRIMARY KEY,
+      +  order_id   bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      +  event_type text NOT NULL,
+      +  payload    jsonb NOT NULL,
+      +  created_at timestamptz NOT NULL DEFAULT now()
+      +);
+  - id: index-inventory
+    type: table
+    label: Index inventory for the ledger schema
+    content: |
+      Index inventory, spindle-pg us-east, taken 2026-04-10 08:00 UTC.
+      Covers all indexes on the four catalog tables (schema-catalog).
+
+      index_name              table         columns              method  unique
+      customers_pkey          customers     (id)                 btree   yes
+      customers_email_uidx    customers     (email)              btree   yes
+      orders_pkey             orders        (id)                 btree   yes
+      orders_customer_idx     orders        (customer_id)        btree   no
+      orders_status_created   orders        (status, created_at) btree   no
+      order_items_pkey        order_items   (id)                 btree   yes
+      order_items_order_idx   order_items   (order_id)           btree   no
+      order_events_pkey       order_events  (id)                 btree   yes
+      order_events_order_idx  order_events  (order_id)           btree   no
+      order_events_created    order_events  (created_at)         brin    no
+
+      Note: there is no index whose leading column is orders.status alone; the unpaid
+      query predicate status = 'unpaid' is covered by orders_status_created when the
+      planner can use the composite.
+  - id: query-plan-log
+    type: log
+    label: EXPLAIN ANALYZE log for the unpaid-orders dashboard query
+    content: |
+      spindle-pg EXPLAIN ANALYZE log, checkout ledger board (excerpt, 2026-04-10, UTC):
+      09:14:02 query: SELECT id, total_cents, created_at FROM orders
+                      WHERE status = 'unpaid' AND created_at >= now() - interval '7 days'
+               plan: Index Scan using orders_status_created on orders
+                     Index Cond: ((status = 'unpaid') AND (created_at >= ...))
+                     rows=18420 loops=1  actual=12.4 ms
+      09:15:11 query: SELECT count(*) FROM order_events WHERE order_id = $1
+               plan: Index Scan using order_events_order_idx on order_events
+                     rows=14 loops=1  actual=0.3 ms
+      09:22:05 query: SELECT * FROM customers WHERE email = $1
+               plan: Index Scan using customers_email_uidx on customers
+                     rows=1 loops=1  actual=0.2 ms
+  - id: storage-classes
+    type: config
+    label: spindle-storage table storage classes
+    content: |
+      # spindle-storage table storage classes (control file: storage/classes.yaml).
+      # A storage class is a named POLICY RECORD in this YAML control file, keyed by its
+      # class name. Storage classes are not schema columns: codec is applied per TABLE
+      # under the class. The COMPLETE field set of a storage class is: class, codec,
+      # toast, fillfactor.
+      classes:
+        - class: hot-row
+          codec: pglz
+          toast: allowed
+          fillfactor: 90
+        - class: append-cold
+          codec: lz4
+          toast: external
+          fillfactor: 100
+        - class: archive-zstd          # defined but currently unused by any catalog table
+          codec: zstd
+          toast: external
+          fillfactor: 100
+  - id: audit-incident-note
+    type: note
+    label: Incident note INC-4401 with attached draft audit checklist
+    content: |
+      Incident note INC-4401, filed by r.adebayo (platform on-call), 2026-04-03.
+
+      Summary: application clients in us-east failed to connect to spindle-pg for 11
+      minutes after the 03:00 UTC certificate rotation. The rotated chain was missing the
+      intermediate certificate, so clients rejected it during the TLS handshake. Once the
+      full chain was re-pushed, handshakes succeeded. Endpoint handshake log during
+      recovery:
+        03:11:18 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=api-1
+        03:11:19 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=api-2
+        03:11:21 tls: handshake ok version=TLS1.3 cipher=TLS_AES_256_GCM_SHA384 client=worker-4
+      Impact: no data loss; clients retried with exponential backoff.
+
+      Attachment (draft audit checklist by intern p.chen, UNREVIEWED): "for the audit we
+      should confirm which cipher each foreign key negotiates, find the CPU affinity the
+      CHECK constraints run under, and check whether the money unit compresses well under
+      the current codec."
+  - id: row-census
+    type: table
+    label: Row-count census, all catalog tables
+    content: |
+      Row-count census, spindle-pg us-east, taken 2026-04-10 09:00 UTC.
+      Covers all four catalog tables (schema-catalog).
+
+      table         row_count
+      customers     128400
+      orders        952200
+      order_items   2841600
+      order_events  5104800
+
+      This census reports per-table row counts only. Totals and percentage shares are
+      not precomputed anywhere in this artifact set.
+tags: [crossed-domains, schema, postgres, foreign-keys, storage]

@@ -1,5 +1,5 @@
 id: pool-exhaustion-held-connection
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: root-cause-isolation
 difficulty: expert
@@ -7,9 +7,8 @@ title: Checkout 503s Under Moderate Load From Database Pool Acquire Timeouts
 summary: >-
   Under only ~6 orders/second, ordersvc starts returning 503 "pool acquire timeout" on POST /orders.
   A distributed trace, pool config, saturation snapshot, a metrics table, an EXPLAIN, and a
-  candidate-fix list are provided. The database is nearly idle and the payment gateway is at its
-  normal latency. Isolate the one root cause, separate it from the slow-query, garbage-collection,
-  and slow-gateway decoys, and pick the fix that does not just move the cliff.
+  candidate-fix list are provided. Isolate the one root cause, separate it from the red herrings,
+  and pick the fix that holds without regression.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (handler, pool-config, trace, saturation,
   metrics, explain, fixes). Cite the artifact id(s) for every claim.
@@ -35,7 +34,6 @@ artifacts:
     type: code
     label: ordersvc/place-order.ts — POST /orders handler (current)
     content: |
-      // Runs inside a single pooled connection from acquire() to release().
       export async function placeOrder(req, res) {
         const conn = await pool.acquire();               // checks out a pooled DB connection
         try {
@@ -44,8 +42,7 @@ artifacts:
             'INSERT INTO orders(user_id, cart_id, status) VALUES($1,$2,$3) RETURNING id',
             [req.userId, req.cartId, 'pending'],
           );
-          // External HTTP call to the third-party payment gateway. Still inside the transaction,
-          // so the pooled connection stays checked out for the whole call.
+          // External HTTP call to the third-party payment gateway.
           const charge = await paymentGateway.charge({
             orderId: order.id, amount: req.amount, token: req.token,
           });
@@ -53,7 +50,7 @@ artifacts:
           await conn.query('COMMIT');
           res.json({ orderId: order.id, status: charge.ok ? 'paid' : 'failed' });
         } finally {
-          await pool.release(conn);                      // connection returned ONLY here
+          await pool.release(conn);                      // connection returned here
         }
       }
       // pool.acquire() rejects with PoolAcquireTimeout after pool-config.acquireTimeoutMillis, which
@@ -78,27 +75,23 @@ artifacts:
     content: |
       # Indentation = span nesting. [t+..ms] = start offset from request begin. conn = pool connection id.
       span placeOrder                       [t+0ms]      dur=2003ms
-        span db.pool.acquire                [t+0ms]      dur=1ms     conn=pg-7   (free conn available; waited 0ms)
+        span db.pool.acquire                [t+0ms]      dur=1ms     conn=pg-7
         span db.tx.begin                    [t+1ms]      dur=1ms     conn=pg-7
         span db.insert orders               [t+2ms]      dur=6ms     conn=pg-7   rows=1
-        span http.paymentGateway.charge     [t+8ms]      dur=1980ms              (conn=pg-7 STILL checked out)
+        span http.paymentGateway.charge     [t+8ms]      dur=1980ms
         span db.update orders.status        [t+1989ms]   dur=5ms     conn=pg-7
         span db.tx.commit                   [t+1997ms]   dur=6ms     conn=pg-7
-        span db.pool.release                [t+2003ms]   dur=0ms     conn=pg-7   (released here, ~2003ms after acquire)
-      # pg-7 was checked out from t+0 to t+2003ms. Actual DB work on pg-7 = 6+5+6 = 17ms (<1%).
-      # The other ~1980ms (99%) is the external charge call, during which pg-7 is unavailable to anyone.
+        span db.pool.release                [t+2003ms]   dur=0ms     conn=pg-7
   - id: saturation
     type: log
     label: ordersvc pool saturation snapshot at 12:14:30 (load ~6 orders/s)
     content: |
       pool.active_checked_out = 10 / max 10
       pool.waiters_queued     = 14
-      pool.oldest_waiter_ms   = 1998            # about to hit acquireTimeoutMillis = 2000
+      pool.oldest_waiter_ms   = 1998
+      pool.checked_out_current_span{http.paymentGateway.charge} = 10
       12:14:30.140 ERROR pool acquire timeout after 2000ms -> 503 (trace t-9001)
       12:14:30.190 ERROR pool acquire timeout after 2000ms -> 503 (trace t-9002)
-      # Throughput ceiling (Little's law): 10 connections / ~2.0s hold each = ~5 orders/s sustainable.
-      # At ~6 orders/s the wait queue grows without bound until acquires time out and return 503.
-      # All 10 checked-out connections were in the http.paymentGateway.charge span at snapshot time.
   - id: metrics
     type: table
     label: ordersvc + database + gateway, 5-minute buckets, plus baselines
@@ -108,9 +101,7 @@ artifacts:
       12:05-12:10   4.6           0         10       7                1975       11               210
       12:10-12:15   6.2           38        11       8                1980       13               2000
       # Gateway baseline: gw_p99 has been ~1900-2000ms for the last 90 days (payment auth is slow by
-      # design; the gateway SLA permits up to 3000ms). It did NOT rise when the 503s began.
-      # GC: gc_pause_p99 stays 11-13ms all window (no long pauses). db_cpu never exceeds 11%.
-      # pool_wait_p99 climbs from 40ms to 2000ms as load rises; that is the queue, not the database.
+      # design; the gateway SLA permits up to 3000ms).
   - id: explain
     type: note
     label: EXPLAIN ANALYZE for the order insert (captured under load)
@@ -120,8 +111,7 @@ artifacts:
           ->  Result       (actual time=0.008..0.009 rows=1 loops=1)
         Planning Time: 0.06 ms
         Execution Time: 0.09 ms
-      # orders has a primary key on id and an index on (user_id, created_at). The insert is a
-      # sub-millisecond single-row write with no lock contention. It is not, and never was, a slow query.
+      # orders has a primary key on id and an index on (user_id, created_at).
   - id: fixes
     type: note
     label: candidate fixes under discussion (pick the one that holds)

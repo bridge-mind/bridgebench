@@ -1,9 +1,9 @@
 id: counterexample-pagination-cursor
-version: 1.0.0
+version: 1.1.0
 category: reasoning
 cluster: formal-counterexample
 difficulty: expert
-title: Keyset Pagination That Claims Every Row Exactly Once But Skips a Tied Boundary Row
+title: Auditing an Exactly-Once Keyset Pagination Claim
 summary: >-
   A team claims its keyset (cursor) pagination over orders sorted by a non-unique timestamp returns
   every row exactly once. Decide whether the exactly-once property holds, and if not produce a concrete

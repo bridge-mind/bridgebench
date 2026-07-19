@@ -1,15 +1,14 @@
 id: dependency-decoupling-inject-clock
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: dependency-decoupling
 difficulty: expert
 title: Decoupling Ledger From the Global Clock — Import Cycles, Singleton Sharing, and Init Order
 summary: >-
   A Ledger is tightly coupled to a global Date.now(), the shared db singleton, and a config the
-  composition root overrides at startup. Four rewrites inject a Clock. Exactly one decouples the clock
-  while preserving the shared db instance, construction-after-override, and an acyclic import graph.
-  The decoys close an import cycle, construct a second database, or build the ledger before the
-  override. Classify each and name the observable difference.
+  composition root overrides at startup. Four rewrites inject a Clock; classify each against the
+  decoupling goal and the preservation properties — the shared db instance, construction after the
+  currency override, an acyclic import graph, and a production timestamp equal to Date.now().
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (config-mod, db-mod, ledger-original,
   module-graph, rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use
@@ -33,8 +32,8 @@ prompt: |
   4. Classify rewrite-d. State what currency a ledger entry carries and why, tracing the load order
      from module-graph.
 
-  5. Exactly one rewrite decouples the clock without an import cycle, keeps the shared db singleton,
-     and constructs the ledger after the override. Name it. Then, for ledger-original, state the
+  5. State which rewrites, if any, decouple the clock without an import cycle, keep the shared db
+     singleton, and construct the ledger after the override. Then, for ledger-original, state the
      ground truth: what currency does a ledger entry carry, and does the ledger write to the shared db
      singleton?
 artifacts:
@@ -157,7 +156,7 @@ artifacts:
       // app/ledger.ts (rewrite-b) — pulls the clock FROM main and builds the ledger at import.
       import { db, Database } from './db';
       import { config } from './config';
-      import { clock } from './main';                 // NEW edge: ledger.ts -> main.ts
+      import { clock } from './main';
       export class Ledger {
         constructor(
           private readonly database: Database,
@@ -171,7 +170,7 @@ artifacts:
       export const ledger = new Ledger(db, config.currency, clock); // runs at import of ledger.ts
 
       // app/main.ts (rewrite-b)
-      import { Ledger } from './ledger';               // main.ts -> ledger.ts (closes the cycle)
+      import { Ledger } from './ledger';
       import { systemClock } from './clock';
       export const clock = systemClock;
   - id: rewrite-c
@@ -187,7 +186,7 @@ artifacts:
       import { config } from './config';
       import type { Clock } from './clock';
       export class Ledger {
-        private readonly database = new Database(config.dbUrl); // NEW connection, not the shared db
+        private readonly database = new Database(config.dbUrl);
         constructor(
           private readonly currency: string,
           private readonly clock: Clock,
@@ -231,7 +230,7 @@ artifacts:
 
       // app/main.ts (rewrite-d)
       import { config } from './config';
-      import './ledger';                               // importing ledger triggers its construction
-      config.currency = 'EUR';                         // override runs AFTER ledger is already built
+      import './ledger';
+      config.currency = 'EUR';
       export { ledger } from './ledger';
 tags: [refactoring, dependency-decoupling, dependency-injection, import-cycle, singleton]

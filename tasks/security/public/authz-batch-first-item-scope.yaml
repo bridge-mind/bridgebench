@@ -1,0 +1,146 @@
+id: authz-batch-first-item-scope
+version: 1.0.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Batch Document Export Authorizes Only the First Requested Object
+summary: >-
+  A document export service combines global authentication, workspace membership, object visibility,
+  and an intentional public-template exception. Reconstruct the complete guard chain and decide which
+  single-item and mixed-batch requests are exposed when the batch handler scopes authorization using
+  only its first id.
+prompt: |
+  Review the fictional FolioGrid export API using ONLY the artifacts. Cite artifact ids for every
+  verdict. Use vulnerable and not-a-vulnerability. Focus on authorization reachability; do not provide
+  scripts or exploitation instructions.
+
+  1. Reconstruct the full authentication and authorization chain for GET /documents/:id/export,
+     POST /documents/batch-export, and GET /templates/:id/export.
+  2. Identify the one exposed operation. Give the smallest request shape needed to cross a workspace
+     boundary and trace every repository row and guard decision that permits it.
+  3. Classify cases A through F in request-matrix as vulnerable or not-a-vulnerability. State who may
+     receive which document content in each case.
+  4. Explain why global JwtGuard, membership in W-A, and a correctly authorized first document do not
+     authorize later batch members. Contrast this with the single-export repository query.
+  5. Explain why the public template route and W-A shared document D-3 are intended behavior, not bypasses.
+  6. Specify a fix invariant and a query/guard shape that is safe against mixed batches, duplicates, and
+     missing ids without leaking which foreign ids exist. Include one negative regression test.
+
+  The router inventory, visibility rules, and data fixture are exhaustive; no hidden middleware exists.
+artifacts:
+  - id: router-map
+    type: code
+    label: documents.router.ts — exhaustive export route registration
+    content: |
+      router.use(JwtGuard); // verifies signature, issuer, audience, exp; populates req.user.id
+
+      router.get('/documents/:id/export', WorkspaceMemberGuard, exportOne);
+      router.post('/documents/batch-export', WorkspaceMemberGuard, exportBatch);
+      router.get('/templates/:id/export', PublicTemplateGuard, exportTemplate);
+
+      // WorkspaceMemberGuard loads the workspace named by validated body.workspaceId (POST) or the
+      // document's workspace (GET) and checks memberships(user_id, workspace_id, active=true).
+      // JwtGuard and the listed per-route guard are the complete middleware chain for these routes.
+  - id: visibility-contract
+    type: spec
+    label: authoritative document visibility and error contract
+    content: |
+      - private: only active members of the owning workspace may export.
+      - shared: active members of the owning workspace may export; `shared` means shared inside that
+        workspace, not globally.
+      - public-template: any authenticated builder may export only through /templates/:id/export.
+      - Batch export accepts 1..20 document ids, all of which must independently satisfy visibility for
+        the authenticated builder and the declared workspace. One unauthorized or missing id must make
+        the entire request return generic 404 with no partial archive and no existence detail.
+      - Duplicate authorized ids are permitted and are de-duplicated in the resulting archive.
+      These rules and the three router-map routes are complete and exhaustive.
+  - id: handlers
+    type: code
+    label: export handlers and schemas
+    content: |
+      const BatchBody = z.object({
+        workspaceId: z.string().uuid(),
+        documentIds: z.array(z.string().uuid()).min(1).max(20),
+      }).strict();
+
+      async function exportOne(req, res) {
+        const doc = await documents.findVisibleOne(req.params.id, req.user.id);
+        if (!doc) return res.sendStatus(404);
+        return sendPdf(res, doc);
+      }
+
+      async function exportBatch(req, res) {
+        const body = BatchBody.parse(req.body);
+        const first = await documents.findVisibleInWorkspace(
+          body.documentIds[0], body.workspaceId, req.user.id,
+        );
+        if (!first) return res.sendStatus(404);
+
+        // Optimization added for large batches: authorization was already "proven" by `first`.
+        const docs = await documents.findByIds(body.documentIds);
+        if (docs.length !== new Set(body.documentIds).size) return res.sendStatus(404);
+        return sendZip(res, docs);
+      }
+
+      async function exportTemplate(req, res) {
+        const template = await documents.findPublicTemplate(req.params.id);
+        if (!template) return res.sendStatus(404);
+        return sendPdf(res, template);
+      }
+  - id: repository-code
+    type: code
+    label: documents.repo.ts — complete repository query semantics
+    content: |
+      findVisibleOne(id, userId):
+        SELECT d.* FROM documents d
+        JOIN memberships m ON m.workspace_id=d.workspace_id
+        WHERE d.id=$1 AND m.user_id=$2 AND m.active=true
+          AND d.visibility IN ('private','shared')
+
+      findVisibleInWorkspace(id, workspaceId, userId):
+        SELECT d.* FROM documents d
+        JOIN memberships m ON m.workspace_id=d.workspace_id
+        WHERE d.id=$1 AND d.workspace_id=$2 AND m.user_id=$3 AND m.active=true
+          AND d.visibility IN ('private','shared')
+
+      findByIds(ids):
+        SELECT d.* FROM documents d WHERE d.id = ANY($1)
+        -- intentionally no workspace, membership, or visibility predicate
+
+      findPublicTemplate(id):
+        SELECT d.* FROM documents d WHERE d.id=$1 AND d.visibility='public-template'
+
+      All placeholders are parameterized. These are the complete methods used by the handlers.
+  - id: fixture
+    type: table
+    label: complete deterministic authorization fixture
+    content: |
+      Documents:
+      id   workspace  visibility       content
+      D-1  W-A        private          A-private
+      D-2  W-B        private          B-private
+      D-3  W-A        shared           A-team-shared
+      D-4  W-B        public-template  B-public-template
+      D-5  W-B        shared           B-team-shared
+
+      Memberships:
+      user   workspace  active
+      U-1    W-A        true
+      U-1    W-B        false
+      U-2    W-B        true
+
+      UUID-shaped aliases are used in the live fixture; short ids here map one-to-one for readability.
+      U-1 has no active membership other than W-A. There are no ACL overrides or organization admins.
+  - id: request-matrix
+    type: table
+    label: requests to classify for authenticated U-1
+    content: |
+      Case  operation                                             observed result
+      A     GET /documents/D-1/export                            200 PDF(A-private)
+      B     GET /documents/D-2/export                            404
+      C     POST batch {workspaceId:W-A, ids:[D-1,D-2]}          200 ZIP(A-private,B-private)
+      D     POST batch {workspaceId:W-A, ids:[D-2,D-1]}          404
+      E     POST batch {workspaceId:W-A, ids:[D-3,D-5,D-3]}      200 ZIP(A-team-shared,B-team-shared)
+      F     GET /templates/D-4/export                            200 PDF(B-public-template)
+      Every result was reproduced against the fixture. Case E de-duplicates D-3 after authorization.
+tags: [security, authz-boundary, bola, batch-api, tenant-isolation]

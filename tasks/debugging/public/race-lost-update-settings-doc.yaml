@@ -1,15 +1,14 @@
 id: race-lost-update-settings-doc
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: concurrency-defect
 difficulty: expert
-title: A User's Theme Change Silently Reverts — A Read-Modify-Write Race on a Settings Document
+title: A User's Theme Change Silently Reverts
 summary: >-
   prefsvc stores each user's settings as one JSONB document. When a user flips two settings at once,
-  one change silently disappears. The update code, two fully specified interleavings (one that loses a
-  write, one that does not), the isolation setting, a replica deploy note, a sibling atomic path, and a
-  candidate-fix list are provided. Identify the failing interleaving and the defect, rule out the
-  in-process mutex and atomic-write decoys, and pick the fix that closes the race across all replicas.
+  one change silently disappears. The update code, two fully specified interleavings, the isolation
+  setting, a replica deploy note, a sibling settings path, and a candidate-fix list are provided.
+  Identify the failing interleaving and the defect, rule out the decoys, and pick the fix that holds.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (update-code, trace-fail, trace-safe,
   db-config, sibling-code, bug-report, fixes). Cite the artifact id(s) for every claim. Use this
@@ -51,31 +50,28 @@ artifacts:
         // (2) MODIFY one key in the in-memory copy.
         settings[key] = value;
 
-        // ... no transaction, no row lock, and no version check between the read and the write ...
-
-        // (3) WRITE the ENTIRE document back, overwriting every key with this request's copy.
+        // (3) WRITE the document back.
         await db.query('UPDATE users SET settings=$1 WHERE id=$2', [settings, userId]);
 
-        // audit only; the lock guards this append, NOT the read-modify-write above.
+        // audit-log append
         await auditLock.runExclusive(async () => { await db.query(
           'INSERT INTO settings_audit(user_id, key) VALUES($1,$2)', [userId, key]); });
         return 'ok';
       }
       // Each db.query() runs in its own autocommit transaction; updateSetting opens no explicit
-      // transaction. The UPDATE writes the full `settings` object this request built from its own SELECT.
+      // transaction.
   - id: trace-fail
     type: log
     label: interleaved execution — user u-1 settings {theme:light, language:en, notify:true}
     content: |
       # T1 = updateSetting(u-1, 'theme', 'dark') on replica R1;  T2 = updateSetting(u-1, 'language', 'fr') on replica R2.
       t=0.000 T1 SELECT settings WHERE id=u-1 -> {theme:light, language:en, notify:true}
-      t=0.001 T2 SELECT settings WHERE id=u-1 -> {theme:light, language:en, notify:true}   # T2 reads BEFORE T1 writes
+      t=0.001 T2 SELECT settings WHERE id=u-1 -> {theme:light, language:en, notify:true}
       t=0.002 T1 settings.theme = 'dark'      -> in-memory {theme:dark,  language:en, notify:true}
-      t=0.003 T2 settings.language = 'fr'     -> in-memory {theme:light, language:fr, notify:true}   # base still had theme:light
+      t=0.003 T2 settings.language = 'fr'     -> in-memory {theme:light, language:fr, notify:true}
       t=0.004 T1 UPDATE users SET settings={theme:dark,  language:en, notify:true} WHERE id=u-1  -> committed
-      t=0.005 T2 UPDATE users SET settings={theme:light, language:fr, notify:true} WHERE id=u-1  -> committed (LAST writer)
-      # Final row: {theme:light, language:fr, notify:true}. T2 overwrote the whole document with a copy
-      # whose theme was still 'light' (its stale base), so T1's theme=dark is LOST. Both audits recorded.
+      t=0.005 T2 UPDATE users SET settings={theme:light, language:fr, notify:true} WHERE id=u-1  -> committed
+      # Final row: {theme:light, language:fr, notify:true}. Both audit rows recorded.
   - id: trace-safe
     type: log
     label: interleaved execution — same code, requests happen to serialize
@@ -83,10 +79,9 @@ artifacts:
       # Same two calls, but T2's SELECT happens after T1's UPDATE has committed.
       t=0.000 T1 SELECT settings WHERE id=u-1 -> {theme:light, language:en, notify:true}
       t=0.002 T1 UPDATE users SET settings={theme:dark, language:en, notify:true} WHERE id=u-1 -> committed
-      t=0.020 T2 SELECT settings WHERE id=u-1 -> {theme:dark, language:en, notify:true}   # reads T1's write
+      t=0.020 T2 SELECT settings WHERE id=u-1 -> {theme:dark, language:en, notify:true}
       t=0.022 T2 UPDATE users SET settings={theme:dark, language:fr, notify:true} WHERE id=u-1 -> committed
-      # Final row: {theme:dark, language:fr, notify:true}. No write lost — but ONLY because T2's read
-      # landed after T1's write. Nothing in update-code enforces that ordering; the good outcome is luck.
+      # Final row: {theme:dark, language:fr, notify:true}.
   - id: db-config
     type: config
     label: prefsvc database settings (complete)
@@ -95,39 +90,34 @@ artifacts:
         isolationLevel: READ COMMITTED     # default; updateSetting issues each statement autocommit
         statementTimeoutMs: 5000
       schema:
-        users.settings: jsonb              # one document per user; the whole column is replaced by (3)
-      # Semantics (authoritative): an UPDATE that sets settings to a full document built by the
-      # application overwrites EVERY key, including keys another transaction changed after this request's
-      # SELECT. There is no version column, no SELECT ... FOR UPDATE, and no CHECK on users.settings.
-      # Under READ COMMITTED, two UPDATEs to the SAME row serialize on the row lock, and a statement that
-      # re-reads the row value at UPDATE time (e.g. jsonb_set(settings, ...)) sees the latest committed
-      # value; a statement that writes a precomputed document does not re-read anything.
+        users.settings: jsonb              # one document per user
+      # Semantics (authoritative): under READ COMMITTED, two UPDATEs to the SAME row serialize on the
+      # row lock. A statement that re-reads the row value at UPDATE time (e.g. jsonb_set(settings, ...))
+      # sees the latest committed value; a statement that writes a precomputed document does not re-read
+      # anything. There is no version column and no CHECK on users.settings.
   - id: sibling-code
     type: code
     label: prefsvc — other settings paths (for contrast) and the change that introduced the RMW
     content: |
-      // bumpLoginCount does its whole modify INSIDE one statement: the DB reads the current row value
-      // and applies the increment atomically, so two concurrent calls cannot lose each other's bump.
+      // bumpLoginCount applies its increment inside a single UPDATE statement.
       export async function bumpLoginCount(userId) {
         await db.query(
           "UPDATE users SET settings = jsonb_set(settings, '{loginCount}', "
-          + "to_jsonb((settings->>'loginCount')::int + 1)) WHERE id=$1", [userId]);   // single atomic RMW
+          + "to_jsonb((settings->>'loginCount')::int + 1)) WHERE id=$1", [userId]);
       }
 
       // History: updateSetting used to be a single jsonb_set statement like bumpLoginCount. A refactor
       // "read the doc so we can validate the value in JS before writing" replaced it with the
-      // read-in-JS, modify-in-JS, write-whole-doc form now in update-code. The validation is correct;
-      // the regression is that the modify now spans two statements over a client-side copy.
+      // read-in-JS, modify-in-JS, write-whole-doc form now in update-code.
   - id: bug-report
     type: note
     label: bug report PREF-204 (as filed)
     content: |
       Reporter: "I switched to dark mode and changed my language to French in the same visit; the
       language stuck but dark mode reverted to light a second later." QA reproduced by firing two
-      setting changes for one account within a few milliseconds: whichever request's UPDATE commits last
-      wins the whole document, and the other request's key reverts to the value that was current when the
-      last writer did its SELECT. Changing two settings for DIFFERENT users, or the same setting twice
-      slowly, never loses data. The audit log shows BOTH changes were received.
+      setting changes for one account within a few milliseconds: one of the two changes reverts.
+      Changing two settings for DIFFERENT users, or the same setting twice slowly, never loses data.
+      The audit log shows BOTH changes were received.
   - id: fixes
     type: note
     label: candidate fixes under discussion (pick the one that closes the race)

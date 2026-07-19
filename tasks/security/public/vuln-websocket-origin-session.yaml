@@ -1,0 +1,100 @@
+id: vuln-websocket-origin-session
+version: 1.0.0
+category: security
+cluster: vuln-discovery
+difficulty: expert
+title: Cookie-Authenticated WebSocket Accepts Cross-Site State-Changing Messages
+summary: >-
+  A collaboration service relies on a valid session cookie and per-document ownership but never validates
+  the WebSocket Origin or binds a CSRF token to the upgrade. Determine whether a foreign page can open an
+  authenticated channel and invoke owner-authorized mutations, while separating cross-site WebSocket
+  hijacking from XSS, IDOR, CORS, and public-presence red herrings.
+prompt: |
+  Review the fictional CanvasForge channel using ONLY the supplied artifacts. Cite artifact ids for every
+  verdict. Use vulnerable and not-a-vulnerability. Do not provide browser exploit code.
+
+  1. Reconstruct browser cookie behavior, HTTP upgrade authentication, Origin handling, message parsing,
+     per-document authorization, and mutation side effects.
+  2. Trace cases A through F from browser-matrix. State whether the connection opens, whose identity is
+     used, which authorization decision runs, and whether state changes or data is disclosed.
+  3. Identify the reachable vulnerability, preconditions, and bounded impact. Explain why correct ownership
+     authorization does not establish request intent when the browser automatically supplies credentials.
+  4. Classify scanner claims S1 through S5, distinguishing WebSocket Origin policy from CORS, SameSite,
+     XSS, IDOR, and intentionally public presence.
+  5. Evaluate patches P1 through P4. Define an exact Origin and connection-token invariant, failure behavior,
+     token lifetime/replay rules, and native-client handling.
+  6. Give browser-level tests for same-site, foreign Origin, absent Origin, stale/replayed token, wrong
+     document, SameSite modes, session rotation, and read-versus-write messages.
+
+  Browser-policy and server-code are exhaustive. The foreign page cannot read cookies directly.
+artifacts:
+  - id: browser-policy
+    type: spec
+    label: cookie and WebSocket browser behavior
+    content: |
+      Session cookie: `sid=...; Secure; HttpOnly; SameSite=None; Domain=collab.canvas.example; Path=/`.
+      Browsers include eligible cookies in a cross-site wss://collab.canvas.example/socket upgrade and add
+      `Origin: https://foreign.example`. HttpOnly prevents script from reading sid but not automatic sending.
+      WebSocket handshakes are not governed by fetch CORS preflight. Browser JavaScript can send and receive
+      frames after a successful upgrade. A strict SameSite cookie would not be sent cross-site in this fixture.
+  - id: server-code
+    type: code
+    label: Node WebSocket upgrade and message handler
+    content: |
+      server.on('upgrade', async (req, socket, head) => {
+        const session = await sessions.verifyCookie(req.headers.cookie);
+        if (!session) return reject(socket, 401);
+        // req.headers.origin is logged but not checked
+        wss.handleUpgrade(req, socket, head, ws => attach(ws, session.userId));
+      });
+
+      async function onMessage(ws, userId, raw) {
+        const msg = MessageSchema.parse(JSON.parse(raw));
+        const doc = await documents.findByIdAndOwner(msg.documentId, userId);
+        if (!doc) return ws.send(genericNotFound());
+        if (msg.type === 'rename') await documents.rename(doc.id, msg.title);
+        if (msg.type === 'snapshot') ws.send(await documents.snapshot(doc.id));
+      }
+      MessageSchema limits type, UUID documentId, and title length. SQL is parameterized.
+  - id: route-inventory
+    type: config
+    label: complete origins and public endpoints
+    content: |
+      Browser app origin: https://app.canvas.example
+      WebSocket origin: wss://collab.canvas.example
+      Native desktop clients send Origin https://desktop.canvas.example and obtain a one-time channel token.
+      GET /presence/:documentId is intentionally public and returns only anonymous viewer count.
+      No Content-Security-Policy bypass or script injection exists in the supplied app.
+  - id: browser-matrix
+    type: table
+    label: deterministic sessions and message outcomes
+    content: |
+      A app.canvas.example, valid U-1 cookie, rename U-1/D-1 -> upgrade; rename succeeds
+      B foreign.example, valid U-1 cookie auto-sent, rename U-1/D-1 -> upgrade; rename succeeds
+      C foreign.example, valid U-1 cookie, snapshot U-1/D-1 -> upgrade; snapshot bytes received by page
+      D foreign.example, no cookie -> 401 before frames
+      E foreign.example, valid U-1 cookie, rename U-2/D-2 -> generic not found; no mutation
+      F foreign.example GET public presence/D-2 -> anonymous count only by documented route
+      U-1 owns only D-1; U-2 owns only D-2. There are no shared documents in this fixture.
+  - id: scanner-claims
+    type: note
+    label: candidate findings
+    content: |
+      S1 Cross-site WebSocket hijacking because Origin is ignored and cookies authenticate the upgrade.
+      S2 IDOR because documentId is client supplied. Query includes owner=userId from verified session.
+      S3 CORS wildcard permits the socket. The HTTP API has no wildcard and WebSocket upgrade is not
+          protected by fetch CORS policy.
+      S4 XSS on app.canvas.example is required. browser-policy shows a foreign origin can trigger the flow.
+      S5 Public presence leaks document contents. It returns only an intentionally public aggregate count.
+  - id: patch-candidates
+    type: diff
+    label: proposed channel protections
+    content: |
+      P1: Require exact allowlisted HTTPS Origins (`app.canvas.example`, `desktop.canvas.example`) at upgrade;
+          require a short-lived, single-use, session-bound channel token obtained from a same-site authenticated
+          endpoint; consume it atomically before upgrade, then retain per-message owner authorization. Reject
+          absent/foreign Origin for browsers and define a separately authenticated native-client protocol.
+      P2: Add `Access-Control-Allow-Origin: https://app.canvas.example` to the 101 response only.
+      P3: Check Origin only on rename frames after accepting the connection and allowing snapshot frames.
+      P4: Remove document ownership checks because Origin proves which builder is connected.
+tags: [security, vuln-discovery, websocket, csrf, origin]

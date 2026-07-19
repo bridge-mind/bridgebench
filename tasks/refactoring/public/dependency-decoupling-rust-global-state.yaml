@@ -1,0 +1,107 @@
+id: dependency-decoupling-rust-global-state
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Inject Rust Shared State Without Duplicating Initialization or Shortening Lifetimes
+summary: >-
+  A Rust worker uses a process-global OnceLock of Arc<State>. Four constructor refactors attempt to
+  make state injectable but differ on lazy initialization, Arc identity, clone timing, drop order,
+  and test isolation; one removes the global from Worker while preserving all declared behavior.
+prompt: |
+  Use only original-module, behavior-goal, lifecycle-traces, proposals, and manifest. Cite artifact ids.
+  Give behavior-preserving / changes-behavior and meets-goal / fails-goal for each proposal.
+
+  1. Classify proposal-a through proposal-d on both axes.
+  2. For every change, give the first R1..R6 witness and exact init/strong-count/drop/output difference.
+  3. Identify the unique proposal satisfying both axes and trace R4.
+  4. State when State::new is allowed to run and how many Arc allocations exist in production.
+  5. Explain why cloning State behind a new Arc is not equivalent to cloning Arc<State>.
+  6. Evaluate reviewer Sol's claim that keeping a fallback call to global() is harmless for tests.
+artifacts:
+  - id: original-module
+    type: code
+    label: Existing Rust module
+    content: |
+      static STATE: OnceLock<Arc<State>> = OnceLock::new();
+      fn global() -> &'static Arc<State> {
+          STATE.get_or_init(|| Arc::new(State::new()))
+      }
+
+      struct Worker { state: Arc<State> }
+      impl Worker {
+          fn new() -> Self { Self { state: Arc::clone(global()) } }
+          fn handle(&self, job:&Job) -> Output { self.state.run(job) }
+      }
+
+      State::new logs init and assigns a unique generation. Clone for State creates an independent
+      state and logs clone-state. State::drop logs drop:generation. Arc strong_count and ptr_eq are
+      observed by diagnostics supplied in traces.
+  - id: behavior-goal
+    type: spec
+    label: Complete lifecycle contract and dependency goal
+    content: |
+      D1 module load and unrelated commands perform no State::new.
+      D2 first production Worker construction initializes exactly one Arc<State>; later Workers share
+         it by Arc::ptr_eq and observe the same mutable counters/generation.
+      D3 dropping any Worker cannot drop State while another Worker/global owner exists.
+      D4 handle delegates once and preserves exact Output/exception (panic) behavior.
+      D5 tests can construct Worker with an isolated injected Arc<State> without initializing STATE.
+      D6 production STATE remains alive until process teardown; injected test state drops after its
+         final Worker/test owner drops.
+
+      Goal G: Worker must have new(state:Arc<State>) and no reference to STATE/global/OnceLock. A
+      composition-root production_worker() may own lazy global wiring. Tests inject directly.
+  - id: lifecycle-traces
+    type: table
+    label: Authoritative Arc and initialization witnesses
+    content: |
+      R1 importing module -> no init.
+      R2 production_worker W1 -> init generation 1 once; W2 -> no init; ptr_eq true; shared counter.
+      R3 drop W1 while W2 lives -> no State drop; W2 handles successfully.
+      R4 test creates Arc generation 90, Worker::new(clone Arc), handle -> generation 90; STATE untouched;
+         dropping worker then test Arc logs drop:90 exactly once.
+      R5 run panics P -> exact P propagates; Arc remains valid.
+      R6 production teardown -> generation 1 drops only with process/global teardown.
+  - id: proposals
+    type: code
+    label: Four dependency rewrites
+    content: |
+      // proposal-a
+      impl Worker { fn new(state:Arc<State>)->Self { Self{state} } }
+      fn production_worker()->Worker { Worker::new(Arc::clone(global())) }
+
+      // proposal-b
+      impl Worker { fn new(state:&State)->Self { Self{state:Arc::new(state.clone())} } }
+      fn production_worker()->Worker { Worker::new(global().as_ref()) }
+
+      // proposal-c
+      impl Worker { fn new(state:Option<Arc<State>>)->Self {
+        Self{state:state.unwrap_or_else(|| Arc::clone(global()))} } }
+      fn production_worker()->Worker { Worker::new(None) }
+
+      // proposal-d
+      static EAGER: LazyLock<Arc<State>> = LazyLock::new(|| Arc::new(State::new()));
+      impl Worker { fn new()->Self { Self{state:Arc::clone(&EAGER)} } }
+
+      proposal-a leaves global/STATE only in the composition root. Its tests call Worker::new directly.
+      LazyLock in d initializes on first dereference, not import, but Worker retains global coupling.
+  - id: ownership-analysis
+    type: table
+    label: Frozen candidate identity and drop effects
+    content: |
+      proposal-a: one production Arc allocation; injected Arc identity retained; drop follows owners.
+      proposal-b: every Worker allocates/clones an independent State generation/counters.
+      proposal-c: Some injection matches ordinary lifecycle but Worker code still has a global fallback,
+      so tests can accidentally initialize production state and Goal G is unmet.
+      proposal-d: production sharing works but there is no injection path and Worker names EAGER.
+  - id: manifest
+    type: note
+    label: Complete threading and review assumptions
+    content: |
+      proposal-a through proposal-d are complete. State's internal synchronization is correct and Arc
+      cloning cannot fail. Composition-root global() retains original OnceLock semantics exactly.
+
+      Sol's fallback claim conflicts with D5 and Goal G: optional injection preserves a hidden global
+      dependency and makes omitted test setup mutate process-wide state.
+tags: [refactoring, dependency-decoupling, rust, arc, lifecycle]

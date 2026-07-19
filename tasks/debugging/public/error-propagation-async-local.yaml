@@ -1,0 +1,228 @@
+id: error-propagation-async-local
+version: 1.1.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: Asynchronous Fulfillment Turns an Expected Inventory Conflict Into a Generic Server Error
+summary: >-
+  A checkout job receives a structured OUT_OF_STOCK result from inventory, yet the API returns a
+  generic 500 — but only for deferred jobs. Given the request-context bootstrap, queue dispatcher,
+  job contract, fulfillment handler, error adapter, gateway formatter, an event trace, and a
+  candidate-fix list, identify the true origin, trace the error and its context across each hop,
+  rule out the red herrings, and select the safe fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (request-context, queue-dispatcher,
+  job-contract, fulfillment-handler, error-adapter, gateway-formatter, event-trace, fixes). Cite
+  the artifact id(s) for every claim. Use this vocabulary for verdicts: root-cause, red-herring,
+  adequate-fix, shallow-fix.
+
+  Checkout accepts a fulfillment request, schedules it on an in-process worker, and returns the
+  worker result through the API. An expected inventory conflict should yield a tenant-safe 409 with
+  code OUT_OF_STOCK. Instead, it becomes a generic 500 only for deferred jobs. The underlying
+  domain error is correct. Trace both the structured error and its required request context through
+  the asynchronous boundary.
+
+  1. TRUE ORIGIN. Name the single defect that first loses the AsyncLocalStorage context. Cite the
+     exact artifact and code location, and explain the mechanism by which the scope is unavailable
+     when the job actually executes.
+  2. ERROR AND CONTEXT CHAIN. From event-trace, trace the job from request scope through the queue
+     dispatcher, fulfillment handler, error adapter, and gateway response. At each hop, state
+     whether the structured DomainError and request scope are preserved, lost, or transformed.
+  3. RED HERRING: INVENTORY CLIENT AND TIMEOUT. Explain why inventory-client behavior is not the
+     origin, citing fulfillment-handler and event-trace. State why OUT_OF_STOCK is an expected
+     structured result and why the observed latency is not a timeout.
+  4. RED HERRING: GATEWAY FORMATTER AND ERROR ADAPTER. Explain why the formatter is not stripping
+     a usable public error, citing gateway-formatter. Explain why error-adapter is where generic
+     output is produced but not where the missing context originates.
+  5. ADEQUATE FIX. From fixes, name the one option that restores context at the worker execution
+     boundary without cross-tenant leakage. State the invariant it enforces for every deferred job.
+  6. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is shallow or harmful,
+     naming the data-leak, context, or error-propagation failure it leaves behind.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: request-context
+    type: code
+    label: HTTP request context bootstrap and scope contract
+    content: |
+      import { AsyncLocalStorage } from 'node:async_hooks';
+
+      export type RequestScope = {
+        requestId: string;
+        tenantId: string;
+        actorId: string;
+      };
+
+      export const requestContext = new AsyncLocalStorage<RequestScope>();
+
+      export async function withRequestScope(req: Request, next: () => Promise<Response>) {
+        const scope: RequestScope = {
+          requestId: req.headers.get('x-request-id')!,
+          tenantId: req.auth.tenantId,
+          actorId: req.auth.userId,
+        };
+        return requestContext.run(scope, next);
+      }
+
+      // Scope contract: every asynchronous fulfillment operation for a request must execute with
+      // the original { requestId, tenantId, actorId }. Error handling uses tenantId to verify which
+      // public error template may be exposed and requestId for audit attribution. A missing scope
+      // must fail closed; borrowing another request's scope is prohibited.
+  - id: queue-dispatcher
+    type: code
+    label: deferred fulfillment scheduler integration complete
+    content: |
+      // This is the COMPLETE deferred-job dispatch path. scheduler.drain() is registered once at
+      // process boot, before any HTTP request scope exists. It invokes queued callbacks later.
+
+      type DeferredJob = { id: string; payload: FulfillmentInput; scope: RequestScope };
+      const callbacks = new Map<string, () => Promise<void>>();
+
+      export function enqueueFulfillment(input: FulfillmentInput): Promise<FulfillmentResult> {
+        const scope = requestContext.getStore();
+        if (!scope) throw new Error('enqueueFulfillment requires request scope');
+
+        const job: DeferredJob = { id: createId(), payload: input, scope };
+        return new Promise((resolve, reject) => {
+          const deferred = requestContext.run(scope, () => async () => {
+            try {
+              resolve(await runFulfillment(job));
+            } catch (error) {
+              reject(toPublicError(error));
+            }
+          });
+
+          callbacks.set(job.id, deferred);
+          scheduler.enqueue(job.id);
+        });
+      }
+
+      scheduler.drain(async (jobId: string) => {
+        await callbacks.get(jobId)!();
+        callbacks.delete(jobId);
+      });
+  - id: job-contract
+    type: spec
+    label: deferred fulfillment job contract and scheduler semantics
+    content: |
+      DeferredJob fields:
+        id: generated job identifier
+        payload: fulfillment input
+        scope: exact immutable RequestScope snapshot from the originating HTTP request
+
+      Scheduler semantics:
+        - scheduler.drain is registered at process boot outside every requestContext.run scope.
+        - enqueue stores a function and drain invokes that function in the scheduler's own async
+          resource, not in the async resource that produced the function.
+        - A closure created while AsyncLocalStorage.run(scope, factory) executes does not capture
+          the active store lexically. The store is available only while factory and asynchronous
+          work it starts execute. A later caller must explicitly run or bind the callback to scope.
+
+      Complete execution boundary: job.scope is available at drain time for every queued job. No
+      network worker, serializer, retry process, or second queue implementation participates.
+  - id: fulfillment-handler
+    type: code
+    label: fulfillment worker and inventory error propagation complete
+    content: |
+      export async function runFulfillment(job: DeferredJob): Promise<FulfillmentResult> {
+        const reservation = await inventoryClient.reserve(job.payload.sku, job.payload.quantity);
+        return { orderId: job.payload.orderId, reservationId: reservation.id };
+      }
+
+      export const inventoryClient = {
+        async reserve(sku: string, quantity: number) {
+          const response = await http.post('/inventory/reservations', { sku, quantity }, { timeout: 1500 });
+          if (response.status === 409 && response.body.code === 'OUT_OF_STOCK') {
+            throw new DomainError({
+              code: 'OUT_OF_STOCK',
+              publicMessage: 'This item is no longer available in the requested quantity.',
+              tenantVisible: true,
+              httpStatus: 409,
+            });
+          }
+          return response.body;
+        },
+      };
+  - id: error-adapter
+    type: code
+    label: tenant-safe conversion from domain errors to public API errors
+    content: |
+      export function toPublicError(error: unknown): PublicError {
+        const scope = requestContext.getStore();
+
+        if (!scope) {
+          // Fail closed: without a tenant and request ID, this layer cannot audit or authorize
+          // tenant-specific public messaging.
+          return new PublicError('Internal Server Error', 'INTERNAL_SERVER_ERROR', 500);
+        }
+
+        if (error instanceof DomainError && error.tenantVisible) {
+          audit.log({ requestId: scope.requestId, tenantId: scope.tenantId, code: error.code });
+          return new PublicError(error.publicMessage, error.code, error.httpStatus);
+        }
+
+        return new PublicError('Internal Server Error', 'INTERNAL_SERVER_ERROR', 500);
+      }
+  - id: gateway-formatter
+    type: code
+    label: API gateway public-error formatter complete
+    content: |
+      export function formatApiError(error: PublicError) {
+        return {
+          status: error.httpStatus,
+          body: {
+            error: {
+              code: error.code,
+              message: error.message,
+            },
+          },
+        };
+      }
+  - id: event-trace
+    type: log
+    label: trace of one out-of-stock fulfillment job
+    content: |
+      14:00:00.000  HTTP checkout request req-901 tenant=tenant-amber actor=u-7
+                     requestContext.run({requestId:req-901, tenantId:tenant-amber, actorId:u-7})
+      14:00:00.001  enqueueFulfillment reads scope -> {req-901, tenant-amber, u-7}
+      14:00:00.002  queue-dispatcher creates deferred callback inside run(scope), then returns it
+      14:00:00.003  scheduler.enqueue job=job-77
+
+      14:00:00.020  scheduler.drain boot-time callback invokes deferred job-77
+                     requestContext.getStore() -> undefined
+      14:00:00.038  inventory service -> HTTP 409 { code: OUT_OF_STOCK }
+      14:00:00.039  inventoryClient throws DomainError {
+                       code: OUT_OF_STOCK, httpStatus: 409, tenantVisible: true
+                     }
+      14:00:00.040  queue-dispatcher catch invokes toPublicError(DomainError)
+                     adapter scope -> undefined
+                     adapter returns PublicError { code: INTERNAL_SERVER_ERROR, status: 500 }
+      14:00:00.041  gateway formatter returns HTTP 500 Internal Server Error
+  - id: fixes
+    type: note
+    label: candidate fixes for deferred request context propagation
+    content: |
+      F1: At scheduler execution time, run the job under its stored immutable scope:
+            scheduler.drain(async (job) => {
+              await requestContext.run(job.scope, () => runFulfillmentAndAdapt(job));
+            });
+          Move the try/catch and toPublicError call inside runFulfillmentAndAdapt. Delete the
+          factory-time run call.
+
+      F2: When error-adapter has no scope, use a process-global `lastRequestScope` as a fallback.
+
+      F3: Change gateway-formatter to convert every INTERNAL_SERVER_ERROR produced by fulfillment
+          into OUT_OF_STOCK with HTTP 409.
+
+      F4: Call requestContext.enterWith(scope) during enqueueFulfillment and keep the current
+          boot-time scheduler callback unchanged.
+
+      F5: Increase the inventory HTTP timeout from 1500ms to 5000ms.
+
+      Constraints:
+        - No job may use another request's tenant, actor, or audit identifier.
+        - Expected tenant-visible DomainErrors must preserve their status and code; unknown errors
+          must still fail closed.
+        - The repair must work for every asynchronously scheduled job, not only for callbacks that
+          happen to run before the originating request completes.
+tags: [debugging, error-propagation, async-local-storage, async-context, queue, structured-errors]

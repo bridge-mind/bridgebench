@@ -1,9 +1,9 @@
 id: synthesis-permission-migration
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: multi-artifact-synthesis
 difficulty: expert
-title: Explicit-Grant Lockout Where the Backfill Ran but the Read Model Was Never Rebuilt
+title: Explicit-Grant Migration Locks Out Legacy Editors and Viewers While Admins Keep Working
 summary: A role-to-grants authorization migration locked out every legacy editor and viewer while admins kept working. The obvious story (backfill never ran, or enforcement shipped first) is contradicted by the artifacts because the backfill completed and the source grants exist. Reconcile both models, the authz check, the rollout plan, and the audit evidence to find the real gap, reject three decoys, and specify a recovery that restores access without broadening it.
 prompt: |
   After cutover to explicit grants, legacy editors and viewers are denied document.read while admins
@@ -104,7 +104,7 @@ artifacts:
       5     backfill grants from legacy roles                    direct SQL       data-eng    complete
       6     rebuild grant_view from backfilled grants rows       projector rerun  data-eng    NOT STARTED (scheduled)
       # Steps 1-5 are all COMPLETE. Step 6 (the read-model rebuild after the direct-SQL backfill)
-      # was scheduled as a separate job and has not run. It is the only incomplete step.
+      # was scheduled as a separate job and has not run.
   - id: backfill-script
     type: code
     label: backfill script (deploy step 5)
@@ -185,6 +185,4 @@ artifacts:
       # Every subject provisioned via direct-SQL backfill has source rows but 0 view rows and is denied.
       # Every subject provisioned through the grants API has matching source and view rows and is allowed.
       # svc-88 was created via the grants API after cutover and works, isolating the projector path.
-      # The ONLY variable that predicts DENY is provisioned_via = backfill (SQL); role is not predictive
-      # (both admins and editors have source rows; only the API-written ones reached grant_view).
 tags: [authorization, migration, read-model, projection, multi-artifact-synthesis]
