@@ -5,7 +5,14 @@ import { describe, expect, it } from 'vitest';
 
 import { ArenaRunner } from '../src/arena.js';
 import { SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
-import { decideSpeedMatch, isLiveResponse, speedMetricFor, speedWinner } from '../src/speed.js';
+import {
+  decideSpeedMatch,
+  isLiveResponse,
+  medianTrialResponse,
+  speedMetricFor,
+  speedWinner,
+  SPEED_TRIALS,
+} from '../src/speed.js';
 import { MatchResultSchema, type MatchResult } from '../src/types.js';
 import { verifyJournal } from '../src/verification.js';
 import {
@@ -58,26 +65,40 @@ describe('speed decision rule', () => {
     );
   });
 
-  it('breaks an exact tie deterministically toward modelA', () => {
+  it('voids an exact millisecond tie instead of awarding seat A', () => {
     const a = makeSuccess('model/a', 'done', { ttftMs: 100, totalMs: 500, outputTokens: 40 });
     const b = makeSuccess('model/b', 'done', { ttftMs: 100, totalMs: 500, outputTokens: 40 });
-    expect(decideSpeedMatch(a, b, 'model/a', 'model/b').winnerModelId).toBe('model/a');
-    expect(speedWinner({ a: speedMetricFor(a), b: speedMetricFor(b) }, 'model/a', 'model/b')).toBe(
-      'model/a',
-    );
+    const decision = decideSpeedMatch(a, b, 'model/a', 'model/b');
+    expect(decision.outcome).toBe('no-contest');
+    expect(decision.winnerModelId).toBeNull();
+    // The tie is still evidenced by journaled metrics.
+    expect(decision.speedMetrics?.a.totalMs).toBe(500);
+    expect(decision.speedMetrics?.b.totalMs).toBe(500);
+    expect(
+      speedWinner({ a: speedMetricFor(a), b: speedMetricFor(b) }, 'model/a', 'model/b'),
+    ).toBeNull();
   });
 
-  it('forfeits to the live competitor when the other errors', () => {
+  it('journals the median-total trial', () => {
+    const trial = (totalMs: number) =>
+      makeSuccess('model/a', `answer ${totalMs}`, { ttftMs: 50, totalMs, outputTokens: 40 });
+    expect(medianTrialResponse([trial(900), trial(300), trial(600)]).totalMs).toBe(600);
+    // Even count: the lower-middle trial wins deterministically.
+    expect(medianTrialResponse([trial(900), trial(300)]).totalMs).toBe(300);
+    expect(() => medianTrialResponse([])).toThrow(/at least one trial/);
+  });
+
+  it('voids the match when one competitor errors — an outage is not a slowness signal', () => {
     const live = makeSuccess('model/a', 'done', { ttftMs: 80, totalMs: 400, outputTokens: 30 });
     const dead = makeFailure('model/b', 'competitor exhausted');
     expect(decideSpeedMatch(live, dead, 'model/a', 'model/b')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/a',
+      outcome: 'no-contest',
+      winnerModelId: null,
       speedMetrics: null,
     });
     expect(decideSpeedMatch(dead, live, 'model/b', 'model/a')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/a',
+      outcome: 'no-contest',
+      winnerModelId: null,
       speedMetrics: null,
     });
   });
@@ -92,8 +113,8 @@ describe('speed decision rule', () => {
     expect(isLiveResponse(empty)).toBe(false);
     expect(isLiveResponse(live)).toBe(true);
     expect(decideSpeedMatch(empty, live, 'model/a', 'model/b')).toMatchObject({
-      outcome: 'forfeit',
-      winnerModelId: 'model/b',
+      outcome: 'no-contest',
+      winnerModelId: null,
     });
   });
 
@@ -134,10 +155,52 @@ describe('speed arena runner', () => {
       expect(match!.pointAwarded).toBe(true);
       expect(match!.speedMetrics).not.toBeNull();
       expect(gateway.requests.filter((request) => request.model.role === 'judge')).toHaveLength(0);
+      // Median-of-N paired trials: each competitor answers SPEED_TRIALS times.
+      expect(gateway.requests).toHaveLength(SPEED_TRIALS * 2);
     }, 'speed');
   });
 
-  it('forfeits to the surviving competitor without judging', async () => {
+  it('journals each side\u2019s median trial and sums the cost of all trials', async () => {
+    await withTempStore(async (store) => {
+      // Per-side trial timings: SOL's median (500) beats FABLE's (700) even
+      // though FABLE produced the single fastest trial (200) — an outlier
+      // burst no longer decides the match.
+      const timings: Record<string, number[]> = {
+        [SOL]: [900, 500, 400],
+        [FABLE]: [200, 800, 700],
+      };
+      const seen: Record<string, number> = {};
+      const gateway = new FixtureGateway((request) => {
+        if (request.model.role === 'judge') throw new Error('no judges in speed');
+        const trialIndex = seen[request.model.id] ?? 0;
+        seen[request.model.id] = trialIndex + 1;
+        const totalMs = timings[request.model.id]![trialIndex]!;
+        return makeCompletion(`trial ${trialIndex} from ${request.model.id}`, {
+          ttftMs: 100,
+          totalMs,
+          latencyMs: totalMs,
+          outputTokens: 40,
+          costUsd: 0.01,
+        });
+      });
+      await new ArenaRunner(gateway, store).run(speedConfig('median-decides'), [speedTask()]);
+      const [match] = store.readAll();
+      expect(match!.outcome).toBe('speed-decided');
+      expect(match!.winnerModelId).toBe(SOL);
+      const solSeat = match!.competitors.modelA === SOL ? 'a' : 'b';
+      const fableSeat = solSeat === 'a' ? 'b' : 'a';
+      expect(match!.speedMetrics![solSeat].totalMs).toBe(500);
+      expect(match!.speedMetrics![fableSeat].totalMs).toBe(700);
+      // Journaled cost covers every trial, and stays the verifiable sum of
+      // the two journaled responses' own costUsd.
+      expect(match!.matchCostUsd).toBeCloseTo(0.01 * SPEED_TRIALS * 2, 9);
+      const { responseA, responseB } = match!.competitors;
+      expect(responseA.success && responseA.costUsd).toBeCloseTo(0.01 * SPEED_TRIALS, 9);
+      expect(responseB.success && responseB.costUsd).toBeCloseTo(0.01 * SPEED_TRIALS, 9);
+    }, 'speed');
+  });
+
+  it('voids the match for the surviving competitor without judging or Elo movement', async () => {
     await withTempStore(async (store) => {
       const gateway = new FixtureGateway((request) => {
         if (request.model.role === 'judge') throw new Error('no judges in speed');
@@ -155,8 +218,10 @@ describe('speed arena runner', () => {
         [speedTask()],
       );
       const [match] = store.readAll();
-      expect(match!.outcome).toBe('forfeit');
-      expect(match!.winnerModelId).toBe(SOL);
+      expect(match!.outcome).toBe('no-contest');
+      expect(match!.winnerModelId).toBeNull();
+      expect(match!.pointAwarded).toBe(false);
+      expect(match!.eloAfter).toEqual(match!.eloBefore);
       expect(match!.speedMetrics ?? null).toBeNull();
       expect(match!.panel).toBeNull();
     }, 'speed');

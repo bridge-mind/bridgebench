@@ -1,0 +1,178 @@
+id: synthesis-rate-limit-matrix
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Effective API Rate-Limit Matrix Across Routes, Contracts, Credentials, and Counter Scope
+summary: >-
+  Derive each API request's effective cap and counter key by synthesizing route scope, tier limits,
+  per-workspace contracts, credential ceilings, and fixed-window behavior. Then replay an ordered
+  traffic slice whose apparently inconsistent accepts and 429s are all correct under the matrix.
+prompt: |
+  QuotaMesh is investigating rate-limit behavior during the fixed UTC window 10:42:00–10:43:00. No
+  single artifact contains an effective limit: route class/scope, workspace tier, optional contract
+  cap, optional credential ceiling, and counter identity must all be reconciled. The eight artifacts
+  are complete for this task; [analyst-note] is non-authoritative.
+
+  1. Effective matrix. For each of these contexts, give route class, counter scope/key shape, and
+     effective cap: (a) `key-ci-orchid` on `r-build-read`; (b) `key-ci-orchid` on `r-build-write`;
+     (c) `key-import-orchid` on `r-build-import`; (d) `key-other-orchid` on `r-build-import`;
+     (e) either orchid credential with no compute override on `r-agent-run`; (f) `key-bulk-ember` on
+     `r-build-write`; and (g) `key-web-ember` on `r-build-write`.
+  2. Ordered traffic adjudication. For every row T1–T11 in [traffic-log], state ALLOW or 429, the
+     applicable cap, the counter value after the row, and Retry-After for each 429. Apply rows in
+     order; a 429 does not increment its counter.
+  3. Shared-counter explanation. Explain why T3 is allowed at workspace-write count 151 while T4 from
+     the restricted bulk credential is rejected, and why T10 can raise orchid's shared write counter
+     above the CI credential's cap before T11 arrives.
+  4. Scoped increase review. Pick the only candidate in [proposed-change] that makes every
+     `ws-orchid` compute request use cap 120 without altering any other workspace, route class, or
+     counter scope. State the resulting cap and why the two alternatives fail.
+  5. Claim review. Classify each numbered statement in [analyst-note] as correct or incorrect and give
+     the specific artifact rule or traffic row that decides it.
+artifacts:
+  - id: route-manifest
+    type: config
+    label: Gateway route classes and counter scopes
+    content: |
+      route id         | HTTP method | path                  | rate class | counter scope
+      r-build-read     | GET         | /v1/builds            | read       | workspace
+      r-build-write    | POST        | /v1/builds            | write      | workspace
+      r-build-import   | POST        | /v1/builds/import     | import     | token
+      r-agent-run      | POST        | /v1/agents/run        | compute    | workspace
+
+      This manifest is exhaustive. The route id, not a path prefix, selects both class and scope.
+      In particular, import is its own token-scoped class and is not a write-scoped route.
+  - id: tier-caps
+    type: table
+    label: Base fixed-window caps by billing tier
+    content: |
+      tier       | read | write | import | compute
+      free       | 100  | 10    | 3      | 5
+      pro        | 1000 | 100   | 20     | 60
+      enterprise | 3000 | 300   | 100    | 240
+
+      Every value is requests per fixed 60-second UTC window. These are base caps only; apply
+      [contract-entitlements] and [credential-overrides] according to [limiter-semantics].
+  - id: contract-entitlements
+    type: config
+    label: Workspace tiers and contract replacements
+    content: |
+      workspaces:
+        ws-orchid:
+          tier: pro
+          contractCaps:
+            compute: 90
+        ws-ember:
+          tier: enterprise
+          contractCaps:
+            write: 180
+        ws-slate:
+          tier: pro
+          contractCaps: {}
+
+      A listed contractCaps value is intentional and current. No workspace has any unlisted contract
+      cap, and no credential can change a workspace's billing tier.
+  - id: credential-overrides
+    type: config
+    label: Credential membership and per-credential ceilings
+    content: |
+      credentials:
+        key-ci-orchid:
+          workspace: ws-orchid
+          credentialCaps: { write: 12 }
+        key-web-orchid:
+          workspace: ws-orchid
+          credentialCaps: {}
+        key-import-orchid:
+          workspace: ws-orchid
+          credentialCaps: { import: 8 }
+        key-other-orchid:
+          workspace: ws-orchid
+          credentialCaps: {}
+        key-bulk-ember:
+          workspace: ws-ember
+          credentialCaps: { write: 150 }
+        key-web-ember:
+          workspace: ws-ember
+          credentialCaps: {}
+
+      A credential cap applies only to that exact credential and exact rate class. There are no
+      inheritance rules, role caps, hidden overrides, or per-user counters.
+  - id: limiter-semantics
+    type: spec
+    label: Complete effective-cap and fixed-window algorithm
+    content: |
+      For a request:
+        1. Get (rateClass, counterScope) from [route-manifest].
+        2. Set baseCap = [tier-caps][workspace tier][rateClass].
+        3. If the workspace has contractCaps[rateClass], REPLACE baseCap with that contract value.
+           A contract cap is neither added to nor minned with the tier cap.
+        4. If the credential has credentialCaps[rateClass], effectiveCap = min(baseCap, credential cap).
+           Otherwise effectiveCap = baseCap.
+        5. Build the counter key for the current fixed UTC minute:
+             workspace scope -> workspaceId + ":" + rateClass + ":" + minute
+             token scope     -> credentialId + ":" + rateClass + ":" + minute
+           A credential ceiling does NOT change a route's counter scope. Thus two workspace-scoped
+           credentials share a counter even if only one has a credential-specific effective cap.
+        6. Let count be the counter before this request. If count < effectiveCap, ALLOW and increment
+           it once. Otherwise return 429 and do not increment it.
+
+      Retry-After for a 429 is the number of whole seconds remaining until the next minute boundary.
+      All traffic in [traffic-log] occurs in minute 10:42, so use 60 minus the seconds component.
+  - id: traffic-log
+    type: log
+    label: Ordered raw traffic slice for 10:42 UTC
+    content: |
+      Initial counters before T1:
+        ws-ember:write:10:42 = 148
+        ws-orchid:compute:10:42 = 89
+        ws-orchid:write:10:42 = 11
+        key-import-orchid:import:10:42 = 7
+        key-other-orchid:import:10:42 = 0
+
+      # No outcomes are shown. Apply in this exact order.
+      row | timestamp | credential         | route id
+      T1  | 10:42:05 | key-web-ember      | r-build-write
+      T2  | 10:42:08 | key-bulk-ember     | r-build-write
+      T3  | 10:42:10 | key-web-ember      | r-build-write
+      T4  | 10:42:12 | key-bulk-ember     | r-build-write
+      T5  | 10:42:16 | key-ci-orchid      | r-agent-run
+      T6  | 10:42:19 | key-web-orchid     | r-agent-run
+      T7  | 10:42:22 | key-import-orchid  | r-build-import
+      T8  | 10:42:23 | key-other-orchid   | r-build-import
+      T9  | 10:42:25 | key-ci-orchid      | r-build-write
+      T10 | 10:42:27 | key-web-orchid     | r-build-write
+      T11 | 10:42:29 | key-ci-orchid      | r-build-write
+
+      The initial-counter list is complete for all keys touched by the rows. No unlisted traffic
+      changes any of these counters during this minute.
+  - id: proposed-change
+    type: diff
+    label: Candidate scoped increases for orchid compute
+    content: |
+      Goal: make every ws-orchid request to r-agent-run use effective cap 120, without changing any
+      other workspace, route class, or counter scope.
+
+      Candidate A — add one credential ceiling:
+        credentials.key-ci-orchid.credentialCaps.compute: 120
+
+      Candidate B — raise the global Pro base:
+        tier-caps.pro.compute: 60 -> 120
+
+      Candidate C — update only the orchid contract:
+        workspaces.ws-orchid.contractCaps.compute: 90 -> 120
+
+      All other fields and the effective-cap algorithm remain unchanged. Evaluate the goal literally:
+      both existing and future orchid credentials on r-agent-run must receive the new cap.
+  - id: analyst-note
+    type: note
+    label: Unverified dashboard comments
+    content: |
+      1. "Because key-bulk-ember has a write cap of 150, every ws-ember write must 429 after count 150."
+      2. "A 429 increments the fixed-window counter, so T4 changes the count before later requests."
+      3. "The ws-orchid contract cap of 90 should be combined with the Pro compute cap of 60 by taking
+          the smaller number, so compute is limited to 60."
+      4. "Both import keys in ws-orchid must share one import counter because they are in one workspace."
+      5. "Candidate B is a scoped solution because ws-orchid's contract will inherit the new Pro cap."
+tags: [rate-limits, api-gateway, entitlements, fixed-window, multi-artifact-synthesis]

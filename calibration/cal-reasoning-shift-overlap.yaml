@@ -1,0 +1,56 @@
+id: cal-reasoning-shift-overlap
+task:
+  public:
+    id: cal-reasoning-shift-overlap
+    version: 1.0.0
+    category: reasoning
+    cluster: constraint-reconciliation
+    difficulty: hard
+    title: Feasible on-call schedule under overlapping constraints
+    summary: Decide whether a three-person on-call rotation can satisfy every stated constraint.
+    prompt: |
+      Using only the artifacts, decide:
+      1. Is any assignment of Ana, Ben, and Cal to the three shifts feasible? If yes, give one; if no,
+         name the exact pair of constraints that conflict.
+      2. State which constraint eliminates Ben from the night shift.
+    artifacts:
+      - id: shift-constraints
+        type: spec
+        label: Rotation constraints
+        content: |
+          Shifts: morning, evening, night. Each person takes exactly one shift.
+          C1: Ana cannot take morning (school run).
+          C2: Ben cannot take night (on-call cap reached last cycle).
+          C3: Cal must take evening (handover with the EU team).
+          C4: The night shift must be covered.
+  private:
+    id: cal-reasoning-shift-overlap
+    version: 1.0.0
+    expectedResolution: |
+      1. Feasible: Ana=night, Ben=morning, Cal=evening. C3 pins Cal to evening; C2 bars Ben from
+         night, so night must be Ana (C4), leaving Ben the morning — which no constraint forbids.
+      2. C2 eliminates Ben from night.
+    requiredEvidence:
+      - shift-constraints
+    disqualifyingErrors:
+      - Declaring the schedule infeasible.
+      - Assigning Ana to morning (violates C1) or Ben to night (violates C2).
+    rubric:
+      correctness: The assignment must satisfy all four constraints, or the conflict must be real.
+      evidenceGrounding: Each assignment step must cite the constraint that forces it.
+      constraintHandling: All four constraints checked; none silently dropped.
+      completeness: Both deliverables answered.
+strongResponse: |
+  1. Feasible. C3 forces Cal=evening. C4 requires night coverage, and C2 removes Ben from night,
+     so Ana=night. That leaves Ben=morning, which no constraint forbids (C1 only restricts Ana).
+     Assignment: Ana=night, Ben=morning, Cal=evening — all of C1-C4 hold.
+  2. C2 (Ben's on-call cap) eliminates Ben from the night shift.
+weakResponse: |
+  1. Infeasible. Cal is pinned to evening by C3, and since Ana cannot take morning (C1), Ana must
+     take evening too — but evening is taken, so the constraints C1 and C3 conflict and no valid
+     assignment exists.
+  2. C1 eliminates Ben from the night shift.
+knownDifference: >
+  The weak response drops the night shift as an option for Ana: C1 only bars morning, leaving night
+  open, so the schedule is feasible. It also attributes Ben's night exclusion to the wrong constraint
+  (C1 instead of C2).

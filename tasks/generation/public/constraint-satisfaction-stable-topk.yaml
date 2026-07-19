@@ -1,0 +1,139 @@
+id: constraint-satisfaction-stable-topk
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: Select Stable Top-K Records From a One-Shot Stream Under O(k) Memory
+summary: >-
+  A top-k selector must consume a one-shot iterable exactly once, use O(k) auxiliary memory,
+  preserve original references, and resolve score ties by encounter order. Four implementations
+  return plausible samples, but only one meets both semantic and complexity constraints.
+prompt: |
+  Use only selector-contract, stream-cases, heap-semantics, candidates, and candidate-manifest.
+  Cite artifact ids. Classify with conforms / violates; semantic output alone is insufficient.
+
+  1. Classify candidate-a through candidate-d against K1..K7.
+  2. For every violation, name the exact semantic or non-functional clause and a stream-case or
+     asymptotic witness.
+  3. Identify the unique conforming candidate and trace its heap after every record in S2.
+  4. Give the exact reference-identity output sequence for S3.
+  5. Explain why sorting only the retained k wrappers is allowed but materializing all n inputs is
+     not.
+  6. Evaluate whether replacing the heap root on an equal score preserves encounter-order ties.
+artifacts:
+  - id: selector-contract
+    type: spec
+    label: Complete stableTopK contract
+    content: |
+      stableTopK(records: Iterable<Record>, k: number): Record[]
+      Record is { id:string, score:number }. score is finite. Records may share ids and are distinct
+      by object identity. k is a positive safe integer. The complete requirements are:
+
+      K1 Consume records exactly once with one forward iterator. The iterable may be a generator
+         that throws if iteration is requested twice.
+      K2 Return min(k,n) original Record references; never clone or mutate a record.
+      K3 Higher score ranks before lower score.
+      K4 Equal scores rank by earlier encounter before later encounter, including equal ids.
+      K5 Output is ordered by K3 then K4.
+      K6 Auxiliary memory is O(k), independent of n. Retaining at most k wrappers containing
+         {record,index} is allowed. Materializing all records is forbidden.
+      K7 Runtime is O(n log k + k log k) or better. Sorting the retained k wrappers is allowed;
+         sorting n records is not.
+  - id: stream-cases
+    type: table
+    label: Identity-sensitive and one-shot witnesses
+    content: |
+      Labels denote object identities, not ids.
+
+      S1 k=2: A{id:a,score:5}, B{id:b,score:1}, C{id:c,score:4}
+         output [A,C].
+      S2 k=3: A{a,4}, B{b,9}, C{c,4}, D{d,7}, E{e,4}, F{f,10}
+         output [F,B,D]. The equal-score records never enter the final top three.
+      S3 k=3: A{x,8}, B{x,8}, C{y,7}, D{z,8}
+         output references [A,B,D], in that order. Duplicate id x does not deduplicate.
+      S4 k=5: A{a,2}, B{b,2}
+         output [A,B].
+      S5 is a one-shot generator yielding S2. A second Symbol.iterator request throws
+         Error('iterated twice'); a single ordinary for-of is valid.
+      S6 has n=10,000,000 and k=4. Any retained collection whose size grows with n violates K6,
+         even if its final returned values are correct.
+      S7 k=2: A{a,8}, B{b,7}, C{c,7}
+         output [A,B]. The later equal-score C must not replace the earlier B.
+  - id: heap-semantics
+    type: spec
+    label: Frozen bounded-heap helper contract
+    content: |
+      A Wrapper is { record, index }. better(a,b) is true exactly when a should appear before b:
+        a.record.score > b.record.score, or scores equal and a.index < b.index.
+
+      worse(a,b) is the inverse ranking: lower score is worse; for equal scores, the later index is
+      worse. A WorstHeap has its worst retained wrapper at root().
+
+      push, replaceRoot, and pop are O(log heap-size), root is O(1), size is O(1). sortBetter(array)
+      sorts only the supplied wrappers by better and is O(m log m). A heap stores only its current
+      array; no history is retained. Helpers never clone or mutate records.
+  - id: candidates
+    type: code
+    label: Four complete stableTopK implementations
+    content: |
+      // candidate-a
+      function candidateA(records, k) {
+        const heap = new WorstHeap();
+        let index = 0;
+        for (const record of records) {
+          const item = { record, index: index++ };
+          if (heap.size() < k) heap.push(item);
+          else if (better(item, heap.root())) heap.replaceRoot(item);
+        }
+        return sortBetter(heap.items()).map((item) => item.record);
+      }
+
+      // candidate-b: simple full materialization.
+      function candidateB(records, k) {
+        return [...records]
+          .map((record, index) => ({ record, index }))
+          .sort((a, b) => b.record.score - a.record.score || a.index - b.index)
+          .slice(0, k)
+          .map((item) => item.record);
+      }
+
+      // candidate-c: equal scores replace the earlier retained record.
+      function candidateC(records, k) {
+        const heap = new WorstHeap();
+        let index = 0;
+        for (const record of records) {
+          const item = { record, index: index++ };
+          if (heap.size() < k) heap.push(item);
+          else if (item.record.score >= heap.root().record.score) heap.replaceRoot(item);
+        }
+        return sortBetter(heap.items()).map((item) => item.record);
+      }
+
+      // candidate-d: requests one iterator to count and a second to select.
+      function candidateD(records, k) {
+        let n = 0;
+        for (const ignored of records) n++;
+        if (n <= k) return Array.from(records);
+        const heap = new WorstHeap();
+        let index = 0;
+        for (const record of records) {
+          const item = { record, index: index++ };
+          if (heap.size() < k) heap.push(item);
+          else if (better(item, heap.root())) heap.replaceRoot(item);
+        }
+        return sortBetter(heap.items()).map((item) => item.record);
+      }
+  - id: candidate-manifest
+    type: note
+    label: Complete candidate inventory and reviewer questions
+    content: |
+      candidate-a through candidate-d are the only submissions. WorstHeap and helpers are exactly as
+      specified. heap.items returns the heap's current at-most-k wrapper array; sortBetter mutates
+      that wrapper array only after input iteration has ended.
+
+      Reviewer Teo says candidate-b is acceptable because modern sort is fast and its output is
+      stable. The acceptance gate includes K6 and K7, not output alone.
+
+      Reviewer Rue says replacing on >= is harmless because equal scores are interchangeable. K2
+      and K4 make object identity and encounter order observable.
+tags: [generation, constraint-satisfaction, streaming, heap, complexity]

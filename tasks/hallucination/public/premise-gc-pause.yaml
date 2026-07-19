@@ -1,0 +1,85 @@
+id: premise-gc-pause
+version: 1.0.0
+category: hallucination
+cluster: false-premise
+difficulty: expert
+title: Correct a Postmortem That Attributes a Queue Stall to a Full GC That Never Occurred
+summary: Reject a GC-pause premise by aligning monotonic and wall clocks, runtime pause logs, scheduler code, queue partitions, and a rollout diff that exposes the actual blocking operation.
+prompt: |
+  Review [draft] as an adversarial postmortem. Correct unsupported premises before diagnosing the
+  stall; all timestamps can be reconciled using [clock-contract].
+
+  1. Enumerate every false or unsupported premise in the draft with direct contradictory evidence.
+  2. Build the exact 16:20:00-16:20:12 timeline on monotonic time, including queue progress and runtime
+     pauses.
+  3. Identify the root software defect, trigger, and blast-radius mechanism. Cite the deployed lines.
+  4. Explain why partition p3 continued while p2 stalled and why the 11.2-second wall-clock gap is not
+     evidence of an 11.2-second GC pause.
+  5. Evaluate fixes A-D and select the change that preserves ordering without blocking the event-loop
+     dispatcher.
+  6. Rewrite the causal paragraph and define two regressions with exact heartbeat, partition, and
+     output-order assertions.
+artifacts:
+  - id: clock-contract
+    type: spec
+    label: Clock alignment and runtime logging
+    content: |
+      wall = processStartWall + monotonic. Runtime GC events record monotonic start and duration from
+      the same clock as event-loop heartbeats. Logs are exhaustive for pauses >=1ms. Queue partitions
+      preserve per-partition order and run in dedicated worker processes with independent dispatchers.
+  - id: deployed-code
+    type: code
+    label: Release R31 p2 handler
+    content: |
+      async function handle(msg) {
+        const parsed = ReportJob.parse(msg);               // L1 validated path contract below
+        const output = childProcess.execFileSync(          // L2
+          "/usr/local/bin/render-report",                 // L3 fixed executable, no shell
+          ["--", parsed.path],                             // L4 option terminator + separate argv
+          { timeout: 30_000 });                            // L5 blocks dispatcher thread
+        await publish(output);                             // L6
+      }
+
+      ReportJob requires `path` to match `^[a-z0-9][a-z0-9/_-]{0,127}$`, resolves it beneath the fixed
+      report-input root, and rejects absolute paths, `..` components, and symlinks escaping that root.
+      R30 used awaited `execFile` callback API. The fixed executable, separate argv, `--`, and path
+      validation rule out shell/option/path injection in this incident. The defect is synchronous
+      blocking.
+  - id: aligned-log
+    type: table
+    label: Exhaustive aligned events
+    content: |
+      monotonic | wall         | event
+      800.000   | 16:20:00.000 | p2 starts report m44
+      800.003   | 16:20:00.003 | execFileSync child starts
+      800.010   | 16:20:00.010 | p3 worker heartbeat and consumes m90
+      803.000   | 16:20:03.000 | p3 consumes m91
+      811.200   | 16:20:11.200 | p2 child exits; m44 publishes
+      811.205   | 16:20:11.205 | p2 consumes m45
+
+      p2 heartbeat is emitted by its dispatcher; none can execute while execFileSync blocks.
+  - id: gc-log
+    type: log
+    label: Exhaustive runtime pauses
+    content: |
+      mono=799.500 kind=minor duration=2.1ms
+      mono=812.000 kind=minor duration=1.7ms
+      full_gc_count window=0
+      max_stop_the_world_ms=2.1
+  - id: draft
+    type: note
+    label: Proposed postmortem
+    content: |
+      "At 16:20 a full GC froze the entire process for 11.2 seconds because unvalidated path input was
+      passed to a shell. Both p2 and p3 stopped. The child timeout fired at 10 seconds, so m44 failed
+      and m45 was processed first. Raising heap size will prevent recurrence."
+  - id: fixes
+    type: diff
+    label: Candidate changes
+    content: |
+      A. Restore nonblocking `execFile` with `["--", parsed.path]`, await completion per p2, and retain
+         validation and timeout.
+      B. Double V8 heap limit.
+      C. Use `exec("render-report " + path)` asynchronously.
+      D. Run m45 before m44 whenever rendering exceeds one second.
+tags: [false-premise, garbage-collection, event-loop, queue-ordering, subprocess]

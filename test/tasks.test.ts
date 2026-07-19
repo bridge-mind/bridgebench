@@ -10,7 +10,12 @@ import {
   TASKS_PER_CLUSTER,
   validatePublicTaskFile,
 } from '../src/tasks.js';
-import { CATEGORIES, CATEGORY_CLUSTERS, TaskPublicSchema } from '../src/types.js';
+import {
+  CATEGORIES,
+  CATEGORY_CLUSTERS,
+  TaskPrivateSchema,
+  TaskPublicSchema,
+} from '../src/types.js';
 import { makePrivateTask, makePublicTask, withTempDir } from './helpers.js';
 
 describe.each(CATEGORIES)('%s task pack', (category) => {
@@ -102,6 +107,38 @@ describe('single-task validation', () => {
         field,
       ).toBe(false);
     }
+  });
+
+  it('validates structured deliverables on the private overlay', () => {
+    const publicTask = makePublicTask();
+    const deliverable = {
+      id: 'd1',
+      classification: 'determinable' as const,
+      expectedAnswer: 'The supported conclusion is alpha.',
+      evidenceArtifactIds: [publicTask.artifacts[0]!.id],
+      disqualifiers: ['Claiming beta.'],
+      weight: 1,
+    };
+    const withDeliverables = makePrivateTask(publicTask, {
+      deliverables: [deliverable],
+    });
+    expect(TaskPrivateSchema.safeParse(withDeliverables).success).toBe(true);
+    // Prose-only tasks remain valid while packs migrate.
+    expect(TaskPrivateSchema.safeParse(makePrivateTask(publicTask)).success).toBe(true);
+    expect(
+      TaskPrivateSchema.safeParse(
+        makePrivateTask(publicTask, {
+          deliverables: [{ ...deliverable, classification: 'not-a-label' as never }],
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      TaskPrivateSchema.safeParse(
+        makePrivateTask(publicTask, {
+          deliverables: [{ ...deliverable, evidenceArtifactIds: [] }],
+        }),
+      ).success,
+    ).toBe(false);
   });
 
   it('rejects rendered competitor prompts over the transport limit', async () => {

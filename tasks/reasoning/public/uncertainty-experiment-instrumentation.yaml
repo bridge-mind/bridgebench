@@ -1,9 +1,9 @@
 id: uncertainty-experiment-instrumentation
-version: 1.0.0
+version: 1.1.0
 category: reasoning
 cluster: uncertainty-adversarial
 difficulty: expert
-title: An A/B Conversion Drop That Is a Client-Side Measurement Artifact, Not a Worse Redesign
+title: A Checkout Redesign A/B Test Shows an Alarming Treatment Conversion Drop
 summary: >-
   A checkout redesign's treatment arm shows a large conversion drop on the analytics dashboard and the
   team wants to roll it back, but several signals are unreliable and the server-side order data tells a
@@ -91,8 +91,7 @@ artifacts:
       arm       | sessions_k | paid_orders | paid_rate_pct
       control   | 50.1       | 3106        | 6.2
       treatment | 49.9       | 3044        | 6.1
-      # Actual paid conversion is essentially EQUAL across arms (6.2% vs 6.1%). The money says the two
-      # checkouts convert the same; only the analytics-dashboard number for treatment is low.
+      # Actual paid conversion is essentially EQUAL across arms (6.2% vs 6.1%).
   - id: event-pipeline
     type: spec
     label: How purchase_completed is emitted per arm
@@ -133,21 +132,14 @@ artifacts:
       Safari / US     | 21%                | 3.1          | 6.1
       Chrome / EU     | 26%                | 4.2          | 6.0
       Firefox / EU    | 19%                | 2.4          | 6.1
-      # In the ONE segment where the beacon is delivered (Chrome/US, CSP tolerant, consented), treatment
-      # measured (6.1) matches server (6.2) and control. In every segment where CSP/consent/tracking-
-      # protection blocks the beacon, measured falls far below server, while server stays ~6.0-6.2
-      # everywhere. Real conversion is uniform across segments; only the MEASURED value tracks whether
-      # the beacon got through.
   - id: randomization-note
     type: note
     label: Assignment, timing, and error checks
     content: |
       - Sample ratio: control got 50.1% of sessions, treatment 49.9% (server-orders sessions_k). This
-        is within the expected 50/50; there is no sample-ratio mismatch and assignment is not broken.
-      - Timing: both arms ran concurrently in the same window today (experiment-config), so any
-        time-of-day or seasonal effect hits both arms equally and cannot explain an arm difference.
+        is within the expected 50/50.
+      - Timing: both arms ran concurrently in the same window today (experiment-config).
       - Payment errors: checkout-api returned 3 HTTP 500s in the window, split ~evenly across arms
         (2 control, 1 treatment), matching the pre-experiment baseline. Not an arm-specific failure.
-      - The traffic mix (browser/region shares) is the same across arms; treatment is not receiving
-        "worse" traffic.
+      - The traffic mix (browser/region shares) is the same across arms.
 tags: [experimentation, ab-testing, instrumentation, csp, telemetry, uncertainty]

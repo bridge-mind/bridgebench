@@ -1,5 +1,5 @@
 id: constraint-capacity-allocation
-version: 2.1.0
+version: 2.2.0
 category: reasoning
 cluster: constraint-reconciliation
 difficulty: expert
@@ -63,13 +63,6 @@ artifacts:
            [allocation-policy] until every org-wide cap holds. The reduced allocation is the optimum.
         4. Verify the unit-test floors (d) and the multiple-of-4 rule after any reduction. When
            several allocations tie at the maximum total, [allocation-policy] selects the unique one.
-
-      WHY BOTH ORG-WIDE CAPS CAN BIND AT ONCE: the org-wide runner-slot cap limits total admitted, while
-      the org-wide e2e cap limits total e2e = total/4 under the ratio. If the sum of local maxima exceeds
-      the runner-slot cap by X admitted, it simultaneously exceeds the e2e cap by X/4 e2e whenever the
-      e2e cap is set to (runner-slot cap)/4. When both caps are tight against the same reduction, both
-      bind — the single reduction that fixes one fixes the other. Do not assume only one org-wide cap can
-      be binding; check both against the sum of local maxima.
 
       COMMON MISTAKES (each is a distinct wrong answer):
         - Reporting the sum of the per-pool local maxima as the optimum without applying the org-wide

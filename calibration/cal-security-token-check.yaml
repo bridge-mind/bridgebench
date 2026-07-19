@@ -1,0 +1,64 @@
+id: cal-security-token-check
+task:
+  public:
+    id: cal-security-token-check
+    version: 1.0.0
+    category: security
+    cluster: authz-boundary
+    difficulty: hard
+    title: Reachability of two claimed authorization flaws
+    summary: Decide which of two reported authorization findings is a real, reachable vulnerability.
+    prompt: |
+      This is an authorized defensive review of fictional benchmark code. Two findings were filed
+      against the handler below. For each, give a verdict — REAL-REACHABLE or NOT-A-VULN — with the
+      exact code path that proves it:
+      1. "GET /admin/export skips the role check when `format=csv` is passed."
+      2. "The `X-Debug` header bypasses authentication entirely."
+    artifacts:
+      - id: handler
+        type: code
+        label: admin-export handler
+        content: |
+          app.get('/admin/export', (req, res) => {
+            if (!req.session?.user) return res.status(401).end();
+            if (req.query.format === 'csv') {
+              return res.send(exportCsv());            // early return: role check below never runs
+            }
+            if (req.session.user.role !== 'admin') return res.status(403).end();
+            return res.send(exportJson());
+          });
+          // Note: no middleware reads X-Debug anywhere in this service.
+  private:
+    id: cal-security-token-check
+    version: 1.0.0
+    expectedResolution: |
+      1. REAL-REACHABLE. The `format=csv` branch returns before the role check: any authenticated
+         non-admin hits `exportCsv()` — authorization bypass on the CSV path. Authentication (401
+         check) still applies, but the admin-role gate is skipped.
+      2. NOT-A-VULN. Nothing in the artifact reads X-Debug; the claim has no code path. The 401
+         session check runs unconditionally on every request.
+    requiredEvidence:
+      - handler
+    disqualifyingErrors:
+      - Calling finding 1 not-a-vuln (missing the early return before the role check).
+      - Endorsing finding 2 (no X-Debug read exists).
+    rubric:
+      correctness: Verdicts must match the reference reachability analysis.
+      evidenceGrounding: Each verdict must trace the concrete code path (or its absence).
+      constraintHandling: Verdict-only analysis; no exploitation content is required or rewarded.
+      completeness: Both findings receive a verdict.
+strongResponse: |
+  1. REAL-REACHABLE. In `handler`, the `format=csv` branch executes `return res.send(exportCsv())`
+     before the `role !== 'admin'` check, so any authenticated user — admin or not — reaches the CSV
+     export. The 401 gate still runs, so this is an authorization (role) bypass, not an auth bypass.
+  2. NOT-A-VULN. The artifact contains no read of `X-Debug` (the trailing note confirms no middleware
+     does either), so there is no code path for the claimed bypass; the session check is unconditional.
+weakResponse: |
+  1. NOT-A-VULN. The handler checks `req.session?.user` at the top of the function, so every request
+     is authenticated before any export runs; the CSV branch is therefore safe.
+  2. REAL-REACHABLE. Debug headers like X-Debug commonly disable auth middleware in Express apps,
+     and attackers routinely probe for them, so this finding should be treated as a live bypass.
+knownDifference: >
+  The weak response conflates authentication with authorization (missing the early return that skips
+  the role check) and endorses the X-Debug finding from generic priors with no code path. The strong
+  response traces both paths in the artifact.

@@ -1,0 +1,214 @@
+id: dependency-decoupling-config-provider
+version: 1.1.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Decoupling RegionGate From the Config Singleton — Provider Injection and Init Timing
+summary: >-
+  A RegionGate is tightly coupled to a mutable config singleton that main overrides before serving
+  traffic. Four rewrites inject a ConfigProvider; classify each against the decoupling goal and the
+  preservation properties — call-time region reads, the post-override value, an acyclic module
+  graph, and a single wired provider.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (config-mod, gate-original, module-graph,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to decouple RegionGate from directly importing the config singleton by
+  injecting a ConfigProvider, while preserving all four properties module-graph lists: (1) allows()
+  reads the region at CALL time (not construction time), (2) after main's override the effective
+  region is 'eu', (3) no import cycle among these modules, and (4) a single provider instance wired
+  by main is the only source of region.
+
+  1. Classify rewrite-a. Justify against all four preservation properties and the injection goal.
+
+  2. Classify rewrite-b. Name the import cycle edges and state what goes wrong at startup per
+     module-graph's load order.
+
+  3. Classify rewrite-c. State what region allows('eu') sees after main's override, and why.
+
+  4. Classify rewrite-d. Name the observable difference in terms of which provider instance supplies
+     region and what allows('eu') returns after the override.
+
+  5. State which rewrites, if any, meet the decoupling goal without changing behavior. Then, for
+     gate-original after main's override, state the ground-truth return of gate.allows('eu') and
+     whether region is read at call time.
+artifacts:
+  - id: config-mod
+    type: code
+    label: app/config.ts — the mutable config singleton
+    content: |
+      // app/config.ts — a single mutable config object, created at import.
+      export const config = {
+        region: 'us', // default; the composition root may override before serving traffic
+      };
+  - id: gate-original
+    type: code
+    label: app/region-gate.ts + app/main.ts — original (the reference behavior)
+    content: |
+      // app/region-gate.ts — ORIGINAL: tightly coupled to the config singleton.
+      import { config } from './config';
+
+      export class RegionGate {
+        allows(requested: string): boolean {
+          return requested === config.region; // LIVE read of the singleton at call time
+        }
+      }
+
+      // app/main.ts — the composition root (the ONLY one).
+      import { config } from './config';
+      import { RegionGate } from './region-gate';
+
+      export const gate = new RegionGate();
+      config.region = 'eu'; // override AFTER construction, BEFORE any allows() call
+      // first production call: gate.allows('eu') must be true
+  - id: module-graph
+    type: note
+    label: app module graph — complete modules, edges, load order, provider rules
+    content: |
+      app module graph — the complete set of modules, import edges, and load order.
+
+      Modules (COMPLETE set): config.ts, region-gate.ts, config-provider.ts (added by decoupling),
+      main.ts. main.ts is the ONLY composition root / entry point.
+
+      Original import edges (a DAG, no cycle):
+        region-gate.ts -> config.ts
+        main.ts        -> config.ts
+        main.ts        -> region-gate.ts
+
+      Load order from entry main.ts (depth-first, evaluate once):
+        1) begin evaluating main.ts
+        2) evaluate config.ts (region default 'us')
+        3) evaluate region-gate.ts (imports config — already evaluated)
+        4) finish main.ts top-level: construct gate, then set config.region = 'eu'
+
+      Authoritative preservation properties for any decoupling:
+        (1) CALL-TIME READ: allows() must observe config.region (or provider.getRegion()) at the
+            moment allows() runs — not a value captured at construction/import.
+        (2) POST-OVERRIDE VALUE: after main sets region to 'eu', gate.allows('eu') === true and
+            gate.allows('us') === false.
+        (3) NO IMPORT CYCLE among these modules.
+        (4) SINGLE SOURCE: only the provider instance (or the original config singleton) that main
+            wires may supply region; a second default provider constructed inside RegionGate is a
+            behavior change because main's override never reaches it.
+
+      ES-module rule (authoritative): an import cycle where module A reads an exported binding from
+      module B before B finishes initializing throws ReferenceError at startup.
+
+      The transformation goal is to inject a ConfigProvider so region-gate.ts no longer imports
+      config.ts, while preserving (1)–(4).
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — inject ConfigProvider; main wires the singleton adapter
+    content: |
+      // app/config-provider.ts
+      export interface ConfigProvider {
+        getRegion(): string;
+      }
+
+      // app/region-gate.ts
+      import type { ConfigProvider } from './config-provider';
+
+      export class RegionGate {
+        constructor(private readonly provider: ConfigProvider) {}
+        allows(requested: string): boolean {
+          return requested === this.provider.getRegion();
+        }
+      }
+
+      // app/main.ts
+      import { config } from './config';
+      import type { ConfigProvider } from './config-provider';
+      import { RegionGate } from './region-gate';
+
+      const provider: ConfigProvider = {
+        getRegion: () => config.region,
+      };
+      export const gate = new RegionGate(provider);
+      config.region = 'eu';
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — provider lives on main; gate imports it from main
+    content: |
+      // app/region-gate.ts
+      import { provider } from './main';
+
+      export class RegionGate {
+        allows(requested: string): boolean {
+          return requested === provider.getRegion();
+        }
+      }
+
+      // app/main.ts
+      import { config } from './config';
+      import { RegionGate } from './region-gate';
+
+      export const provider = {
+        getRegion: () => config.region,
+      };
+      export const gate = new RegionGate();
+      config.region = 'eu';
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — capture region once in the constructor
+    content: |
+      // app/config-provider.ts
+      export interface ConfigProvider {
+        getRegion(): string;
+      }
+
+      // app/region-gate.ts
+      import type { ConfigProvider } from './config-provider';
+
+      export class RegionGate {
+        private readonly region: string;
+        constructor(provider: ConfigProvider) {
+          this.region = provider.getRegion();
+        }
+        allows(requested: string): boolean {
+          return requested === this.region;
+        }
+      }
+
+      // app/main.ts
+      import { config } from './config';
+      import type { ConfigProvider } from './config-provider';
+      import { RegionGate } from './region-gate';
+
+      const provider: ConfigProvider = {
+        getRegion: () => config.region,
+      };
+      export const gate = new RegionGate(provider);
+      config.region = 'eu';
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — default provider inside the gate; main skips wiring
+    content: |
+      // app/config-provider.ts
+      export interface ConfigProvider {
+        getRegion(): string;
+      }
+      export function defaultProvider(): ConfigProvider {
+        return { getRegion: () => 'us' };
+      }
+
+      // app/region-gate.ts
+      import { defaultProvider, type ConfigProvider } from './config-provider';
+
+      export class RegionGate {
+        private readonly provider: ConfigProvider;
+        constructor(provider?: ConfigProvider) {
+          this.provider = provider ?? defaultProvider();
+        }
+        allows(requested: string): boolean {
+          return requested === this.provider.getRegion();
+        }
+      }
+
+      // app/main.ts
+      import { config } from './config';
+      import { RegionGate } from './region-gate';
+
+      export const gate = new RegionGate();
+      config.region = 'eu';
+tags: [refactoring, dependency-decoupling, config, provider, init-order]

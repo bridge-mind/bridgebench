@@ -1,0 +1,80 @@
+id: speed-ci-cache-incident-synthesis
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: expert
+title: Synthesize a CI Cache-Poisoning Incident Review
+summary: Reconcile workflow permissions, cache keys, fork provenance, logs, and a fix diff into a concise evidence-grounded incident verdict.
+prompt: |
+  Review all artifacts and output exactly:
+
+  1. A six-sentence incident narrative from entry point through affected job.
+  2. A table `Boundary | Evidence | Exploitability | Required repair` with one row for cache
+     write, cache restore, token permissions, and release execution.
+  3. Exactly three immediate containment bullets and three durable remediation bullets.
+  4. Final line `SEVERITY: critical|high|medium|low — <one sentence>`.
+artifacts:
+  - id: workflow-before
+    type: config
+    label: Workflow active during incident
+    content: |
+      on:
+        pull_request_target:
+          types: [opened, synchronize, reopened, closed]
+      permissions: write-all
+      jobs:
+        test:
+          steps:
+            - uses: actions/checkout@pinned-checkout-sha
+              with: { ref: "${{ github.event.pull_request.head.sha }}" }
+            - uses: actions/cache@pinned-cache-sha
+              with:
+                path: node_modules
+                key: npm-${{ github.event.pull_request.head.sha }}
+            - run: npm install && npm test
+        release:
+          if: github.event.action == 'closed'
+          needs: test
+          steps:
+            - uses: actions/checkout@pinned-checkout-sha
+            - uses: actions/cache@pinned-cache-sha
+              with: { path: node_modules, key: npm-${{ github.event.pull_request.head.sha }} }
+            - run: npm run build && npm publish
+              env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+  - id: provenance
+    type: table
+    label: Fork and cache provenance
+    content: |
+      PR 991 head sha=f00d came from an untrusted fork and was closed without merge.
+      The closed-event test job explicitly checked out f00d. Its test script replaced
+      node_modules/.bin/build-helper with an attacker program, returned exit 0, and left the
+      replacement on disk. The base branch at beef was unchanged and its package.json maps
+      `npm run build` to `build-helper`.
+      Cache audit: node_modules under exact key npm-f00d was saved by that test job at 10:14.
+      release job at 10:31 restored exact key npm-f00d, hit=true
+      The release checkout resolved to base main@beef but did not reinstall dependencies.
+  - id: execution-log
+    type: log
+    label: Release job excerpt
+    content: |
+      cache restored npm-f00d
+      build-helper: outbound request to attacker.example token_length=36
+      npm publish package=bridge-widget version=4.8.0 result=success
+      token audit: NPM_TOKEN used from runner at 10:31; scope publish bridge-widget
+  - id: fix-diff
+    type: diff
+    label: Proposed workflow repair
+    content: |
+      - on: pull_request_target
+      - permissions: write-all
+      + on: pull_request
+      + permissions: { contents: read }
+      - path: node_modules
+      + path: ~/.npm
+      - key: npm-${{ github.event.pull_request.head.sha }}
+      + key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      Release moved to a separate workflow triggered by a signed v* tag, with environment
+      approval, contents:read, id-token:write, npm trusted publishing, a clean dependency
+      install, and no PR cache restore.
+tags: [ci, github-actions, cache-poisoning, supply-chain, synthesis]

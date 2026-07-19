@@ -19,6 +19,15 @@ export interface ModelRegistryEntry {
   role: ModelRole;
   enabled: boolean;
   request: ModelRequestPolicy;
+  /**
+   * Set on a competitor that also sits on the judge panel (dual role).
+   * Judge-side calls use this policy instead of `request`. Since
+   * arena-v0.4.0 seating (seating.ts), a dual-role model never judges its
+   * own matches or any match involving a same-vendor competitor; when
+   * seated elsewhere it judges under the standard blind protocol:
+   * anonymized sides, identity redaction, per-judge permutation.
+   */
+  judgeRequest?: ModelRequestPolicy;
 }
 
 export const ModelCompletionSchema = z.object({

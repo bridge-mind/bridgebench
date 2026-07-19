@@ -1,0 +1,339 @@
+id: interface-compatibility-serde-version
+version: 1.1.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: parseConfig — Version-Compatible JSON Serialization and Upgrade Resolver
+summary: A configuration parser upgrades legacy schemas (v1, v2) into a unified, validated v3 interface. The contract defines exact key conversions, defaults, nested transformations, type coercions, and a strict rule rejecting unrecognized top-level properties. Five candidate functions are proposed. Classify all five against the contract, pointing out the exact input and outcome for any violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (serde-contract, dataset, candidate-a,
+  candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite the artifact id(s) for
+  every claim. Do not execute anything — trace each candidate by hand against the dataset.
+
+  Verdict vocabulary: a candidate CONFORMS if it is a valid upgrade resolver that handles all three
+  versions according to serde-contract (it enforces strict key whitelisting, defaults missing fields,
+  converts types, and handles structure transformations correctly); it VIOLATES otherwise.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or violates. State the
+     verdict for all five.
+
+  2. For every candidate you mark VIOLATES, name the specific contract clause (one of U1..U5) it breaks,
+     and give the concrete output or error it returns versus the spec-correct behavior for a specific
+     dataset item.
+
+  3. Identify the candidate that violates v1's features list splitting when no features are declared
+     and state what incorrect list it produces on the v1 default input.
+
+  4. Explain why candidate-d fails on version 2 payloads containing a string port (e.g., "8080"), and
+     state what returned object it produces versus the correct v3 object.
+
+  5. State the complete set of conforming candidates.
+artifacts:
+  - id: serde-contract
+    type: spec
+    label: system config upgrade and serialization contract (complete)
+    content: |
+      FUNCTION parseConfig(raw)
+
+      This function standardizes a raw configuration object of any supported version (v1, v2, or v3) into
+      the uniform, validated ConfigV3 schema. If any validation or version upgrade rule is broken, the
+      function must throw an error string.
+
+      The TARGET ConfigV3 structure is:
+        interface ConfigV3 {
+          version: 3;
+          server: {
+            host: string;   // default "localhost"
+            port: number;   // default 8080
+          };
+          features: string[]; // default []
+          timeoutMs: number;  // default 30000 (30 seconds)
+        }
+
+      Upgrade and Validation Rules (complete contract):
+
+      U1  VERSION 1 UPGRADE. If `raw` has no `version` field, or `version === 1`:
+            - Server host and port are mapped from top-level keys `host` and `port`.
+            - `feature_list` is a comma-separated string (default ""). It must be split by comma, and any
+              empty feature strings must be filtered out. (e.g. "auth,,logger" -> ["auth", "logger"];
+              an empty string "" must map to the empty array []).
+            - `timeout` is top-level in seconds. It must be converted to milliseconds `timeoutMs` (multiplied
+              by 1000, default 30000).
+
+      U2  VERSION 2 UPGRADE. If `version === 2`:
+            - `server` is already nested as { host, port }. `port` might be passed as a string and must be
+              coerced to a number using `Number()`.
+            - `features` is already an array of strings (default []).
+            - `timeoutMs` is top-level (default 30000).
+
+      U3  VERSION 3 DIRECT. If `version === 3`, parse and validate directly, ensuring types are correct and
+          applying defaults for any missing properties.
+
+      U4  EXTRA KEYS PROTECTION. To prevent configuration drift, any raw input containing unrecognized
+          top-level keys for its declared or inferred version must throw the error string "unrecognized_key".
+            - v1 permitted top-level keys: `version`, `host`, `port`, `feature_list`, `timeout`.
+            - v2 permitted top-level keys: `version`, `server`, `features`, `timeoutMs`.
+            - v3 permitted top-level keys: `version`, `server`, `features`, `timeoutMs`.
+            - Any other top-level keys must immediately throw "unrecognized_key".
+
+      U5  VALUE VALIDATION. The output port must be a valid integer between 1 and 65535, and timeoutMs must
+          be a positive number. If any field fails type/value validation, throw "invalid_value".
+  - id: dataset
+    type: table
+    label: test configuration inputs and expected outputs
+    content: |
+      Test configurations to verify the upgrade resolver.
+
+      D1 (v1 default/minimal):
+        Input: { host: "127.0.0.1" }
+        Output: { version: 3, server: { host: "127.0.0.1", port: 8080 }, features: [], timeoutMs: 30000 }
+
+      D2 (v1 with list and timeout):
+        Input: { host: "127.0.0.1", port: 3000, feature_list: "auth,metrics", timeout: 15 }
+        Output: { version: 3, server: { host: "127.0.0.1", port: 3000 }, features: ["auth", "metrics"], timeoutMs: 15000 }
+
+      D3 (v2 with string port):
+        Input: { version: 2, server: { host: "api.io", port: "9000" }, features: ["cache"] }
+        Output: { version: 3, server: { host: "api.io", port: 9000 }, features: ["cache"], timeoutMs: 30000 }
+
+      D4 (v3 direct):
+        Input: { version: 3, server: { host: "localhost", port: 8080 }, features: [], timeoutMs: 45000 }
+        Output: { version: 3, server: { host: "localhost", port: 8080 }, features: [], timeoutMs: 45000 }
+
+      D5 (unrecognized key in v2):
+        Input: { version: 2, server: { host: "localhost", port: 80 }, analytics: true }
+        Output: Throws error "unrecognized_key" (analytics is unrecognized in v2)
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function parseConfig(raw) {
+        const ver = raw.version || 1;
+
+        const v1Keys = ['version', 'host', 'port', 'feature_list', 'timeout'];
+        const v23Keys = ['version', 'server', 'features', 'timeoutMs'];
+        const allowed = ver === 1 ? v1Keys : v23Keys;
+        for (const k of Object.keys(raw)) {
+          if (!allowed.includes(k)) throw 'unrecognized_key';
+        }
+
+        const out = {
+          version: 3,
+          server: { host: 'localhost', port: 8080 },
+          features: [],
+          timeoutMs: 30000
+        };
+
+        if (ver === 1) {
+          if (raw.host !== undefined) out.server.host = raw.host;
+          if (raw.port !== undefined) out.server.port = Number(raw.port);
+          if (raw.timeout !== undefined) out.timeoutMs = raw.timeout * 1000;
+          if (raw.feature_list !== undefined && raw.feature_list !== '') {
+            out.features = raw.feature_list.split(',').filter(f => f !== '');
+          }
+        } else if (ver === 2 || ver === 3) {
+          if (raw.server) {
+            if (raw.server.host !== undefined) out.server.host = raw.server.host;
+            if (raw.server.port !== undefined) out.server.port = Number(raw.server.port);
+          }
+          if (raw.features !== undefined) out.features = raw.features;
+          if (raw.timeoutMs !== undefined) out.timeoutMs = raw.timeoutMs;
+        } else {
+          throw 'invalid_value';
+        }
+
+        if (typeof out.server.host !== 'string') throw 'invalid_value';
+        if (!Number.isInteger(out.server.port) || out.server.port < 1 || out.server.port > 65535) throw 'invalid_value';
+        if (typeof out.timeoutMs !== 'number' || out.timeoutMs <= 0) throw 'invalid_value';
+        if (!Array.isArray(out.features) || out.features.some(f => typeof f !== 'string')) throw 'invalid_value';
+
+        return out;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function parseConfig(raw) {
+        const ver = raw.version || 1;
+
+        const v1Keys = ['version', 'host', 'port', 'feature_list', 'timeout'];
+        const v23Keys = ['version', 'server', 'features', 'timeoutMs'];
+        const allowed = ver === 1 ? v1Keys : v23Keys;
+        for (const k of Object.keys(raw)) {
+          if (!allowed.includes(k)) throw 'unrecognized_key';
+        }
+
+        const out = {
+          version: 3,
+          server: { host: 'localhost', port: 8080 },
+          features: [],
+          timeoutMs: 30000
+        };
+
+        if (ver === 1) {
+          if (raw.host !== undefined) out.server.host = raw.host;
+          if (raw.port !== undefined) out.server.port = Number(raw.port);
+          if (raw.timeout !== undefined) out.timeoutMs = raw.timeout * 1000;
+          if (raw.feature_list !== undefined) {
+            out.features = raw.feature_list.split(',');
+          }
+        } else if (ver === 2 || ver === 3) {
+          if (raw.server) {
+            if (raw.server.host !== undefined) out.server.host = raw.server.host;
+            if (raw.server.port !== undefined) out.server.port = Number(raw.server.port);
+          }
+          if (raw.features !== undefined) out.features = raw.features;
+          if (raw.timeoutMs !== undefined) out.timeoutMs = raw.timeoutMs;
+        }
+
+        if (typeof out.server.host !== 'string') throw 'invalid_value';
+        if (!Number.isInteger(out.server.port) || out.server.port < 1 || out.server.port > 65535) throw 'invalid_value';
+        if (typeof out.timeoutMs !== 'number' || out.timeoutMs <= 0) throw 'invalid_value';
+
+        return out;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function parseConfig(raw) {
+        const ver = raw.version || 1;
+
+        const out = {
+          version: 3,
+          server: { host: 'localhost', port: 8080 },
+          features: [],
+          timeoutMs: 30000
+        };
+
+        if (ver === 1) {
+          if (raw.host !== undefined) out.server.host = raw.host;
+          if (raw.port !== undefined) out.server.port = Number(raw.port);
+          if (raw.timeout !== undefined) out.timeoutMs = raw.timeout * 1000;
+          if (raw.feature_list !== undefined && raw.feature_list !== '') {
+            out.features = raw.feature_list.split(',').filter(f => f !== '');
+          }
+        } else if (ver === 2 || ver === 3) {
+          if (raw.server) {
+            if (raw.server.host !== undefined) out.server.host = raw.server.host;
+            if (raw.server.port !== undefined) out.server.port = Number(raw.server.port);
+          }
+          if (raw.features !== undefined) out.features = raw.features;
+          if (raw.timeoutMs !== undefined) out.timeoutMs = raw.timeoutMs;
+        }
+
+        if (typeof out.server.host !== 'string') throw 'invalid_value';
+        if (!Number.isInteger(out.server.port) || out.server.port < 1 || out.server.port > 65535) throw 'invalid_value';
+        if (typeof out.timeoutMs !== 'number' || out.timeoutMs <= 0) throw 'invalid_value';
+
+        return out;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function parseConfig(raw) {
+        const ver = raw.version || 1;
+
+        const v1Keys = ['version', 'host', 'port', 'feature_list', 'timeout'];
+        const v23Keys = ['version', 'server', 'features', 'timeoutMs'];
+        const allowed = ver === 1 ? v1Keys : v23Keys;
+        for (const k of Object.keys(raw)) {
+          if (!allowed.includes(k)) throw 'unrecognized_key';
+        }
+
+        const out = {
+          version: 3,
+          server: { host: 'localhost', port: 8080 },
+          features: [],
+          timeoutMs: 30000
+        };
+
+        if (ver === 1) {
+          if (raw.host !== undefined) out.server.host = raw.host;
+          if (raw.port !== undefined) out.server.port = Number(raw.port);
+          if (raw.timeout !== undefined) out.timeoutMs = raw.timeout * 1000;
+          if (raw.feature_list !== undefined && raw.feature_list !== '') {
+            out.features = raw.feature_list.split(',').filter(f => f !== '');
+          }
+        } else if (ver === 2 || ver === 3) {
+          if (raw.server) {
+            if (raw.server.host !== undefined) out.server.host = raw.server.host;
+            if (raw.server.port !== undefined) out.server.port = raw.server.port;
+          }
+          if (raw.features !== undefined) out.features = raw.features;
+          if (raw.timeoutMs !== undefined) out.timeoutMs = raw.timeoutMs;
+        }
+
+        if (typeof out.server.host !== 'string') throw 'invalid_value';
+        if (!Number.isInteger(out.server.port) || out.server.port < 1 || out.server.port > 65535) throw 'invalid_value';
+        if (typeof out.timeoutMs !== 'number' || out.timeoutMs <= 0) throw 'invalid_value';
+
+        return out;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function parseConfig(raw) {
+        const ver = raw.version || 1;
+        const valid = {
+          1: new Set(['version', 'host', 'port', 'feature_list', 'timeout']),
+          2: new Set(['version', 'server', 'features', 'timeoutMs']),
+          3: new Set(['version', 'server', 'features', 'timeoutMs'])
+        };
+
+        const keys = valid[ver];
+        if (!keys) throw 'invalid_value';
+        for (const k of Object.keys(raw)) {
+          if (!keys.has(k)) throw 'unrecognized_key';
+        }
+
+        const res = { version: 3, server: { host: 'localhost', port: 8080 }, features: [], timeoutMs: 30000 };
+
+        switch (ver) {
+          case 1:
+            if ('host' in raw) res.server.host = raw.host;
+            if ('port' in raw) res.server.port = Number(raw.port);
+            if ('timeout' in raw) res.timeoutMs = raw.timeout * 1000;
+            if ('feature_list' in raw && raw.feature_list !== '') {
+              res.features = raw.feature_list.split(',').filter(x => x !== '');
+            }
+            break;
+          case 2:
+          case 3:
+            if (raw.server) {
+              if ('host' in raw.server) res.server.host = raw.server.host;
+              if ('port' in raw.server) res.server.port = Number(raw.server.port);
+            }
+            if ('features' in raw) res.features = raw.features;
+            if ('timeoutMs' in raw) res.timeoutMs = raw.timeoutMs;
+            break;
+        }
+
+        if (typeof res.server.host !== 'string') throw 'invalid_value';
+        if (!Number.isInteger(res.server.port) || res.server.port < 1 || res.server.port > 65535) throw 'invalid_value';
+        if (typeof res.timeoutMs !== 'number' || res.timeoutMs <= 0) throw 'invalid_value';
+        if (!Array.isArray(res.features) || res.features.some(f => typeof f !== 'string')) throw 'invalid_value';
+
+        return res;
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (config mapping and validation rules)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of proposals.
+
+      Validation details:
+        - U1: An empty feature_list string "" or undefined must resolve to []. But `split(",")` on an empty string
+          returns `[""]` (an array containing an empty string), which is incorrect and violates the feature list specification.
+        - U2: If `version === 2`, the port can be a string and must be coerced. Under Javascript, `Number.isInteger("8080")` is
+          false, so any candidate that fails to run a conversion like `Number()` will throw "invalid_value" on valid string ports.
+        - U4: Unrecognized top-level keys must be actively blocked. If a candidate accepts an input with an unknown key
+          and returns a config object instead of throwing "unrecognized_key", it violates the schema-drift protection.
+tags: [interface-compatibility, configuration, schema-upgrade, serialization, validation, generation]

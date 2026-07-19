@@ -1,0 +1,128 @@
+id: state-corruption-saga-generation
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Delayed Compensation from an Old Saga Deletes a New Reservation Generation
+summary: >-
+  An order retry creates a new inventory reservation under the same order id after the first saga times
+  out. The old saga's delayed compensation increments available stock and deletes by order id alone,
+  removing the newer generation. Trace reservation generations, idempotency keys, payment events, and SQL
+  transactions to identify the first corrupting compensation and an atomic generation-fenced repair.
+prompt: |
+  Diagnose the fictional CartWeave saga using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State inventory conservation, reservation generation, compensation ownership, payment idempotency,
+     status monotonicity, and transaction invariants.
+  2. Trace T0 through T11. Track available quantity, reservation row generation/state/qty, saga status,
+     payment key, and order status after each commit.
+  3. Identify the first corrupting SQL operation and exact missing predicates. Separate a valid delayed
+     message from the consumer's failure to prove it still owns the state being compensated.
+  4. Explain why queue deduplication, payment idempotency, row locking inside each transaction, and using a
+     unique order id do not fence one saga generation from another.
+  5. Classify P1 through P4 and select the adequate fix. Trace old compensation, current compensation,
+     duplicate compensation, and capture-after-timeout through it.
+  6. Give barrier-based tests for retry-before-old-compensation, old-before-retry, concurrent reserve/release,
+     duplicate messages, payment callback reorder, insufficient stock, and reconciliation.
+
+  The writer inventory is exhaustive. Every command carries immutable saga_generation even though HEAD
+  compensation ignores it.
+artifacts:
+  - id: schema-and-invariants
+    type: spec
+    label: inventory schema and authoritative conservation rule
+    content: |
+      inventory(sku primary key, total, available, version)
+      reservations(order_id primary key, saga_generation, sku, qty, state, payment_key)
+      orders(id primary key, saga_generation, status)
+
+      For each sku: available + sum(qty of active/captured reservations) = total. A command for generation g
+      may mutate only reservation/order generation g. Reservation/release and their inventory delta must be
+      one transaction. Current generation status is monotonic: pending -> reserved -> paid OR cancelled.
+      Duplicate command for the same generation is a no-op. A stale generation is acknowledged but fenced.
+  - id: saga-code
+    type: code
+    label: reservation and compensation handlers
+    content: |
+      reserve(cmd): transaction {
+        prior = SELECT * FROM reservations WHERE order_id=cmd.orderId FOR UPDATE;
+        if (prior != null && prior.saga_generation < cmd.generation && prior.state == 'active') {
+          UPDATE inventory SET available=available+prior.qty, version=version+1 WHERE sku=prior.sku;
+        }
+        UPDATE inventory SET available=available-cmd.qty, version=version+1
+          WHERE sku=cmd.sku AND available>=cmd.qty;
+        INSERT INTO reservations(order_id,saga_generation,sku,qty,state,payment_key)
+          VALUES(cmd.orderId,cmd.generation,cmd.sku,cmd.qty,'active',cmd.paymentKey)
+          ON CONFLICT(order_id) DO UPDATE SET saga_generation=EXCLUDED.saga_generation,
+            sku=EXCLUDED.sku, qty=EXCLUDED.qty, state='active', payment_key=EXCLUDED.payment_key;
+      }
+
+      reserve requires the debit UPDATE to affect exactly one row; otherwise it aborts and rolls back the
+      prior-generation credit. It updates the matching order generation to reserved in the same transaction.
+
+      compensate(cmd): transaction {
+        r = SELECT * FROM reservations WHERE order_id=cmd.orderId FOR UPDATE;
+        UPDATE inventory SET available=available+r.qty, version=version+1 WHERE sku=r.sku;
+        DELETE FROM reservations WHERE order_id=cmd.orderId;
+        UPDATE orders SET status='cancelled' WHERE id=cmd.orderId;
+      }
+      compensate never compares cmd.generation, reservation generation/state, or current order generation.
+  - id: payment-contract
+    type: spec
+    label: payment and retry behavior
+    content: |
+      payment_key is unique per (order,generation); capture is idempotent per key. A timed-out saga may be
+      cancelled and retried as generation+1 only after payment status for the old key is resolved void/failed.
+      Queue is at-least-once and may delay/reorder commands across generations. Every message has a unique
+      message id plus immutable order id and generation. Message-id dedupe prevents exact duplicate processing
+      but not a distinct delayed compensation from an older generation.
+  - id: corruption-schedule
+    type: log
+    label: deterministic old-compensation/new-reservation interleaving
+    content: |
+      T0 SKU-X total=10 available=10; order O generation=1 pending
+      T1 reserve O/g1 qty=3 -> available=7; reservation(O,g1,active); order reserved
+      T2 payment g1 resolves failed; compensation message C1 delayed in queue
+      T3 coordinator marks g1 cancelled logically and starts authorized retry g2 with payment key P2
+      T4 reserve O/g2 locks g1 row, credits old active g1 qty -> available=10, debits g2 qty -> available=7,
+         then upsert replaces row with reservation(O,g2,active); conservation holds
+      T5 g2 reservation is visible to readers; no compensation has run yet
+      T6 payment P2 captures; order O/g2 status=paid; reservation g2 state=captured
+      T7 delayed C1 runs, SELECT by order returns g2 captured row
+      T8 C1 credits r.qty=3 -> available=10; deletes g2 row; sets order cancelled without generation predicate
+      T9 payment remains captured; order says cancelled, no reservation, available=10
+      T10 new sale consumes all 10; physical committed demand includes paid O/g2 qty3 -> oversold by 3
+      T11 reconciliation reports total invariant mismatch. The first invariant violation is C1's T8 commit.
+  - id: writer-inventory
+    type: note
+    label: complete writers and transaction observations
+    content: |
+      reserve, compensate, and capture handler are the only writers. Capture updates reservation/order only
+      when their generation and payment_key match. Reserve's prior-generation credit and new debit are in the
+      same locked transaction. Every individual transaction commits without lost updates. The first invariant
+      violation is compensate's T8 commit.
+  - id: candidate-patches
+    type: diff
+    label: proposed saga repairs
+    content: |
+      P1: Ignore compensation messages older than five minutes. A delayed current-generation compensation
+          can be valid, and an old one may arrive sooner.
+      P2: SELECT generation, release lock, then if equal call the existing compensation transaction. Generation
+          can change between the check and mutation.
+      P3: In one transaction lock reservation and order by id; require both saga_generation=cmd.generation and
+          reservation state='active' plus cancellable order state. Atomically transition that exact row to
+          released (retain it for idempotency), increment its sku inventory once, and cancel only the matching
+          order generation. Zero matching rows means duplicate/stale/fenced and performs no inventory delta.
+          Reserve replacement must atomically close/credit prior active generation before debiting the new one.
+      P4: Make order_id globally unique. It already is; generations intentionally reuse the order id.
+  - id: expected-matrix
+    type: table
+    label: required compensation outcomes after adequate fencing
+    content: |
+      current g2 active + compensate g2 -> release once, available +qty, g2 cancelled
+      current g2 captured + compensate g2 -> reject/alert; no inventory or order mutation
+      current g2 any state + compensate g1 -> acknowledge stale; no mutation
+      released g2 + duplicate compensate g2 -> no-op
+      no reservation + compensate g1 -> no-op without fabricating qty
+tags: [debugging, state-corruption, saga, compensation, generation-fencing]

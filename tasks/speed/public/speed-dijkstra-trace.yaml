@@ -1,0 +1,44 @@
+id: speed-dijkstra-trace
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: hard
+title: Implement Dijkstra's Algorithm and Trace Shortest Path
+summary: >-
+  Implement Dijkstra's shortest path algorithm in TypeScript, then trace the step-by-step state transitions
+  over a five-node weighted graph to find the shortest path from node A to node E.
+prompt: |
+  Using [dijkstra-spec] and [graph-definition], implement the algorithm and trace the shortest path.
+
+  1. Implement `dijkstra(nodes: string[], edges: { from: string; to: string; weight: number }[], start: string): Record<string, number>` in TypeScript.
+  2. Trace the execution step-by-step starting from node `A`. For each step, show:
+     - The node chosen from the unvisited set.
+     - The updated shortest distances to all unvisited nodes.
+     - The final shortest path and total cost from `A` to `E`.
+artifacts:
+  - id: dijkstra-spec
+    type: spec
+    label: Dijkstra Algorithm Contract
+    content: |
+      - Initialize distances to all nodes as infinity, except the start node which is 0.
+      - Maintain a set of unvisited nodes.
+      - In each step, choose the unvisited node with the smallest tentative distance.
+      - Tie-break rule: If multiple unvisited nodes have the same smallest distance, choose the node that is lexicographically smallest (e.g., 'B' before 'C').
+      - For the chosen node, calculate the distance to each of its unvisited neighbors through it. If the new distance is smaller than the current recorded distance, update it.
+      - Mark the chosen node as visited (remove from unvisited set).
+      - Terminate when all nodes are visited or the smallest tentative distance among unvisited nodes is infinity.
+  - id: graph-definition
+    type: table
+    label: Weighted Directed Graph
+    content: |
+      nodes: A, B, C, D, E
+      edges and weights:
+        A -> B : 4
+        A -> C : 2
+        B -> C : 3
+        B -> D : 2
+        C -> B : 1
+        C -> D : 4
+        C -> E : 5
+        D -> E : 1
+tags: [algorithms, graphs, typescript, dijkstra]

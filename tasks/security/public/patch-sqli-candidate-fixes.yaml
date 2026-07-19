@@ -1,5 +1,5 @@
 id: patch-sqli-candidate-fixes
-version: 1.1.0
+version: 1.2.0
 category: security
 cluster: patch-verification
 difficulty: expert
@@ -70,7 +70,7 @@ prompt: |
 artifacts:
   - id: original-search
     type: code
-    label: Quarry catalog search handler (vulnerable original)
+    label: Quarry catalog search handler (original)
     content: |
       // quarry/catalog/search.ts — GET /catalog/search handler (Quarry 2.x).
       // Builds a single SQL string and runs it via db.query(sql). No ORM, no bound
@@ -184,7 +184,6 @@ artifacts:
            `WHERE name ILIKE '%${q}%' ` +
            `ORDER BY ${sort} ASC ` +
            `LIMIT ${limit}`;
-      // q, sort, and limit are still concatenated raw into the SQL string.
   - id: patch-c
     type: diff
     label: Patch C — neutralize the search injection by escaping single quotes
@@ -200,8 +199,8 @@ artifacts:
            `FROM catalog_items ` +
       -    `WHERE name ILIKE '%${q}%' ` +
       +    `WHERE name ILIKE '%${qEsc}%' ` +
-           `ORDER BY ${sort} ASC ` +   // sort still concatenated raw
-           `LIMIT ${limit}`;           // limit still concatenated raw
+           `ORDER BY ${sort} ASC ` +
+           `LIMIT ${limit}`;
   - id: patch-d
     type: diff
     label: Patch D — coerce the LIMIT input to an integer
@@ -213,7 +212,7 @@ artifacts:
       -  const limit = String(req.query.limit ?? '20'); // page size
       +  const n = parseInt(String(req.query.limit ?? '20'), 10);
       +  const limit = String(Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20); // integer only
-      @@ (SQL string unchanged; q and sort still concatenated as before)
+      @@ handler body
          const sql =
            `SELECT id, name, sku, price ` +
            `FROM catalog_items ` +

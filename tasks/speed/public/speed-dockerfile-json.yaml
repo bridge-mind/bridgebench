@@ -1,0 +1,70 @@
+id: speed-dockerfile-json
+version: 1.0.0
+category: speed
+cluster: structured-output
+difficulty: hard
+title: Convert a Multi-Stage Dockerfile Into Structured JSON
+summary: >-
+  Read a Dockerfile and emit a strictly shaped JSON summary of each stage, preserving instruction order
+  for run/copy commands and normalizing ENV, EXPOSE, and CMD fields into deterministic structures.
+prompt: |
+  Convert [dockerfile] into the JSON object defined by [output-schema]. Emit JSON only.
+
+  1. Include every stage in encounter order with the exact stage names and base images.
+  2. Preserve instruction order inside `runs` and `copies` arrays.
+  3. For `copies`, represent regular copies with `"from": null` and cross-stage copies with the
+     referenced stage name.
+artifacts:
+  - id: output-schema
+    type: spec
+    label: Required JSON shape
+    content: |
+      {
+        "stages": [
+          {
+            "name": "string",
+            "from": "string",
+            "workdir": "string | null",
+            "env": { "KEY": "value", "...": "..." },
+            "runs": ["RUN payload string in order"],
+            "copies": [
+              { "from": "string | null", "src": "string", "dest": "string" }
+            ],
+            "expose": [integer, ...],
+            "cmd": ["arg0", "arg1", "..."] | null
+          }
+        ]
+      }
+
+      Rules:
+      - "name" is the stage alias from `AS <name>`.
+      - "from" is the image after FROM (before AS).
+      - "workdir" is the final WORKDIR in that stage, else null.
+      - "env" includes KEY=VALUE pairs from ENV lines in that stage.
+      - "runs" stores only the text after RUN.
+      - "copies" stores one object per COPY line:
+          - COPY src dest -> {"from": null, "src": "src", "dest": "dest"}
+          - COPY --from=builder /a /b -> {"from":"builder","src":"/a","dest":"/b"}
+      - "expose" lists EXPOSE ports as integers in encounter order.
+      - "cmd" is the JSON-array form from CMD, or null if no CMD in that stage.
+  - id: dockerfile
+    type: config
+    label: Dockerfile to convert
+    content: |
+      FROM node:20-alpine AS builder
+      WORKDIR /app
+      ENV NODE_ENV=production
+      COPY package.json package-lock.json ./
+      RUN npm ci
+      COPY src ./src
+      RUN npm run build
+
+      FROM node:20-alpine AS runtime
+      WORKDIR /app
+      ENV NODE_ENV=production PORT=8080
+      COPY package.json package-lock.json ./
+      RUN npm ci --omit=dev
+      COPY --from=builder /app/dist ./dist
+      EXPOSE 8080
+      CMD ["node", "dist/server.js"]
+tags: [docker, json, structured-output]

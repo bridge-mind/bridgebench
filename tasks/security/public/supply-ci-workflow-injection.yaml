@@ -1,5 +1,5 @@
 id: supply-ci-workflow-injection
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: supply-chain
 difficulty: expert
@@ -181,18 +181,15 @@ artifacts:
       Arclight CI change notes (maintainer-authored, for this PR).
 
       - The `test` job was moved from push to pull_request so external contributions get
-        CI on fork PRs. It intentionally holds no secrets and uses a read-only token — per
-        the trust model, running fork code there is safe.
-      - The `build` job's setup-node pin was upgraded from a 7-char short SHA to the full
-        40-char commit SHA of the same release — a hardening step, per actions-policy.
-      - `publish` uses arclight-ci/release, our FIRST-PARTY release action (actions-policy),
-        pinned by release tag as approved; it runs only on main pushes.
+        CI on fork PRs. It holds no secrets and uses a read-only token.
+      - The `build` job's setup-node pin was changed from a 7-char short SHA to the full
+        40-char commit SHA of the same release.
+      - `publish` uses arclight-ci/release, an action in the arclight-ci org
+        (see actions-policy), pinned by release tag; it runs only on main pushes.
       - `deploy` uses OIDC (id-token: write) and is gated to main-branch pushes; no
         long-lived secret is stored.
-      - The `integration` job was added late in the PR. It is the change to scrutinize:
-        confirm its trigger, what ref it checks out, and whether it exposes any secret,
-        against ci-trust-model. Do not assume it is fine because the checkout action itself
-        is SHA-pinned — pinning the action does not make the checked-out CODE trusted.
+      - The `integration` job was added late in the PR. Its trigger, checkout ref, and
+        secret access are recorded in workflow-diff and change-map.
 
       Provenance authority: ci-trust-model states the trigger/privilege rules and
       actions-policy states the pinning rules. Anything conflicting with them is the anomaly.

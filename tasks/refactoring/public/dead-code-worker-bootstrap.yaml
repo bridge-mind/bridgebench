@@ -1,0 +1,136 @@
+id: dead-code-worker-bootstrap
+version: 1.0.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Remove Worker Bootstrap Dead Code Across Config and Dynamic Export Entrypoints
+summary: >-
+  A worker bootstrap contains impossible modes, selectable-but-idle drivers, a CI cron entry, an
+  externally loaded health export, and truly orphaned helpers. Four cleanups disagree on
+  reachability; one alone removes exactly the dead set while preserving every exhaustive entry.
+prompt: |
+  Use only bootstrap-source, entry-manifest, deployment-matrix, rewrites, and review-record. Cite
+  artifacts. Report behavior-preserving / changes-behavior and meets-goal / fails-goal.
+
+  1. Classify rewrite-a through rewrite-d.
+  2. For every behavior change, give the exact entrypoint/config witness and original versus
+     rewritten observable.
+  3. Identify the unique rewrite that removes all and only dead code.
+  4. List the complete live and dead function/branch sets in bootstrap-source.
+  5. Trace why startMemory and healthProbe are live despite having no ordinary call in the active
+     production worker path.
+  6. Evaluate the claims that test-only and dynamic-import-only exports are dead.
+artifacts:
+  - id: bootstrap-source
+    type: code
+    label: Existing worker bootstrap and all private helpers
+    content: |
+      const queueStarts = [];
+
+      export function boot(config) {
+        if (config.mode === 'http') return startHttp(config.port);
+        if (config.mode === 'queue') {
+          if (config.driver === 'redis') return startRedis(config.queue);
+          if (config.driver === 'memory') return startMemory(config.queue);
+        }
+        if (config.mode === 'cron') return startCron(config.schedule);
+        if (config.mode === 'repl') return startRepl();
+        return startLegacy(config);
+      }
+
+      export function healthProbe() {
+        return { ok: true, started: queueStarts.length };
+      }
+
+      function startHttp(port) { return { kind: 'http', port }; }
+      function startRedis(queue) {
+        queueStarts.push(queue); return { kind: 'redis', queue };
+      }
+      function startMemory(queue) {
+        queueStarts.push(queue); return { kind: 'memory', queue };
+      }
+      function startCron(schedule) { return { kind: 'cron', schedule }; }
+      function startRepl() { return { kind: 'repl', parser: oldParser() }; }
+      function startLegacy(config) { return { kind: 'legacy', config, parser: oldParser() }; }
+      function oldParser() { return 'legacy-parser'; }
+      function orphanCanary() { return { kind: 'canary' }; }
+  - id: entry-manifest
+    type: spec
+    label: Exhaustive runtime and reflective entry surface
+    content: |
+      This manifest is complete.
+
+      E1 boot is called only after validateConfig. validateConfig accepts mode exactly http, queue,
+         or cron. Other strings, missing mode, and mode repl abort before boot.
+      E2 For mode queue, driver is exactly redis or memory; queue is a non-empty string. For other
+         modes driver is absent. There is no direct unvalidated caller.
+      E3 integration-main calls boot({mode:'queue',driver:'memory',queue:'test'}).
+      E4 cron-check calls boot({mode:'cron',schedule:'* * * * *'}).
+      E5 monitor-host dynamically imports './bootstrap.js', looks up the exact declared export name
+         healthProbe, and calls it. This dynamic export inventory contains no other names.
+      E6 There is no eval, arbitrary reflection, function-name lookup, or private helper import.
+         Only boot and healthProbe are exported.
+
+      Goal: delete every branch and private function unreachable from E1..E6, retain every reachable
+      branch/function/export, and do not otherwise change behavior.
+  - id: deployment-matrix
+    type: config
+    label: Complete active and selectable deployment inventory
+    content: |
+      active:
+        - {entry: worker-main, mode: http, port: 8080}
+        - {entry: worker-main, mode: queue, driver: redis, queue: jobs}
+        - {entry: cron-check, mode: cron, schedule: '* * * * *'}
+        - {entry: integration-main, mode: queue, driver: memory, queue: test}
+
+      operator-selectable-without-code-change:
+        - queue driver may switch redis <-> memory in worker-main
+
+      No deployment may select repl or bypass validateConfig. CI and monitor-host entries are part of
+      reachability, not historical documentation.
+  - id: rewrites
+    type: code
+    label: Four proposed cleanup summaries
+    content: |
+      // rewrite-a retains:
+      export function boot(config) {
+        if (config.mode === 'http') return startHttp(config.port);
+        if (config.mode === 'queue') {
+          if (config.driver === 'redis') return startRedis(config.queue);
+          return startMemory(config.queue);
+        }
+        return startCron(config.schedule);
+      }
+      export function healthProbe() {
+        return { ok: true, started: queueStarts.length };
+      }
+      // retains startHttp, startRedis, startMemory, startCron.
+      // deletes repl branch, fallback branch, startRepl, startLegacy, oldParser, orphanCanary.
+
+      // rewrite-b is rewrite-a except queue is collapsed:
+      if (config.mode === 'queue') return startRedis(config.queue);
+      // startMemory is deleted.
+
+      // rewrite-c is rewrite-a except healthProbe and its export are deleted because no static
+      // reference to healthProbe appears in this module or worker-main.
+
+      // rewrite-d deletes only orphanCanary. Every original branch and all other original helpers
+      // remain byte-for-byte unchanged.
+  - id: review-record
+    type: note
+    label: Exhaustive reachability analysis and disputed claims
+    content: |
+      Candidate rewrites are exactly rewrite-a through rewrite-d. There are no generated entrypoints.
+
+      Reachability facts:
+      - startHttp, startRedis, startMemory, and startCron are reached by declared entries.
+      - healthProbe is reached by the exhaustive dynamic export name in E5.
+      - config.mode cannot be repl and cannot be an unknown value at boot. Thus the repl and fallback
+        branches are dead; startRepl and startLegacy are dead; oldParser is dead because those are
+        its only callers.
+      - orphanCanary has no caller or export and is dead.
+
+      Reviewer Wen calls startMemory test-only and therefore removable. The goal includes all
+      declared entries and selectable deployments, not only production traffic. Reviewer Ivo calls
+      healthProbe unreferenced; E5 is a real, closed-world dynamic entry.
+tags: [refactoring, dead-code-elimination, reachability, dynamic-import, worker]

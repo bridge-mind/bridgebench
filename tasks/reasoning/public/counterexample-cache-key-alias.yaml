@@ -1,0 +1,140 @@
+id: counterexample-cache-key-alias
+version: 1.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Constructive Counterexamples to a Claimed Tenant-Safe Cache Key
+summary: Disprove tenant isolation and invalidation claims by constructing minimal legal tenant/path pairs and an exact request schedule that collide after hyphen removal, case folding, and trailing-slash normalization.
+prompt: |
+  Review the cache-key proof in [design-claim] against the complete input domain and shipped code.
+  Counterexamples must use only legal inputs from [input-domain]. Do not rely on hash collisions,
+  concurrency, expiry, or unspecified framework behavior.
+
+  1. Give the lexicographically first pair in [candidate-pairs] that disproves key injectivity. Show
+     every normalization step and the final equal key while proving the original requests differ.
+  2. Replay [request-schedule] under the shipped code. Give each operation's cache key, HIT/MISS or
+     deletion result, returned body, and final cache contents.
+  3. State the smallest sequence prefix that violates tenant isolation and write the violated invariant
+     as a quantified statement plus the concrete witness.
+  4. Give a separate legal counterexample showing that invalidating `/Reports/` may evict an entry
+     populated through `/reports`, even within one tenant. Explain whether this is a collision or an
+     intentional equivalence under the route contract.
+  5. Evaluate fixes A-D against both required properties: tenant isolation and route-equivalent
+     invalidation. Select the minimal correct fix and provide a counterexample for each rejected fix.
+  6. Classify every proof step P1-P5 in [design-claim] as valid or invalid; identify the earliest invalid
+     implication, not merely the final false conclusion.
+artifacts:
+  - id: input-domain
+    type: spec
+    label: Complete legal request and route domain
+    content: |
+      Tenant IDs are exactly four characters matching `[a-z][a-z-]{2}[a-z]`; adjacent hyphens are
+      forbidden, but a single hyphen may occur at position 2 or 3. Distinct tenant strings identify
+      distinct security principals.
+
+      Paths are one of `/Docs`, `/docs`, `/Reports`, `/Reports/`, `/reports`, `/reports/`. The router
+      intentionally defines paths case-insensitively and ignores one trailing slash: `/Reports/` and
+      `/reports` name the same route resource. Tenant IDs are never case-folded or hyphen-normalized by
+      the identity system.
+
+      Values stored in the schedule never expire. Cache operations are sequential and atomic. The
+      candidate list is ordered lexicographically by `(tenantA,pathA,tenantB,pathB)` and is exhaustive
+      for deliverable 1's nominated candidates.
+  - id: cache-code
+    type: code
+    label: Shipped cache key, read-through, and invalidation
+    content: |
+      function cacheKey(tenantId: string, path: string): string {
+        const tenantPart = tenantId.replaceAll("-", "");
+        const routePart = path.toLowerCase().replace(/\/$/, "");
+        return `${tenantPart}:${routePart}`;
+      }
+
+      async function getPage(tenant, path) {
+        const key = cacheKey(tenant, path);
+        if (cache.has(key)) return {kind:"HIT", body:cache.get(key)};
+        const body = await origin.fetch(tenant, path);
+        cache.set(key, body);
+        return {kind:"MISS", body};
+      }
+
+      function invalidate(tenant, path) {
+        return cache.delete(cacheKey(tenant, path));
+      }
+  - id: design-claim
+    type: note
+    label: Claimed proof of tenant-safe keying
+    content: |
+      P1. The colon separates tenant and route, so equality of full keys implies equality of the
+          normalized tenant part and normalized route part.
+      P2. Removing hyphens from a legal four-character tenant ID is injective because tenant IDs have
+          fixed length.
+      P3. Lowercasing and removing a trailing slash maps exactly the paths the router considers equal.
+      P4. Therefore equal keys imply the same tenant principal and same route resource.
+      P5. Consequently neither reads nor invalidations can cross tenant boundaries.
+
+      The proof claims both: (I) distinct tenants never share a key, and (R) paths equivalent under the
+      route contract do share a key for correct invalidation.
+  - id: candidate-pairs
+    type: table
+    label: Ordered proposed witnesses for injectivity review
+    content: |
+      pair | tenantA | pathA  | tenantB | pathB
+      A    | a-bc    | /Docs  | ab-c    | /docs
+      B    | a-bc    | /Docs  | ab-c    | /Reports
+      C    | a-cd    | /docs  | ac-d    | /Docs
+      D    | b-cd    | /reports | bc-d  | /Reports/
+
+      All tenants and paths are legal. "Lexicographically first" refers to this already ordered table,
+      not to an unstated search over other strings.
+  - id: request-schedule
+    type: log
+    label: Exhaustive sequential cache operations
+    content: |
+      Initial cache is empty.
+      Origin responses are fixed:
+        origin(a-bc,/Docs) = "A_PRIVATE_DOCS"
+        origin(ab-c,/docs) = "B_PRIVATE_DOCS"
+        origin(a-bc,/reports) = "A_REPORTS"
+
+      seq | operation  | tenant | path
+      1   | GET        | a-bc  | /Docs
+      2   | GET        | ab-c  | /docs
+      3   | INVALIDATE | ab-c  | /Docs
+      4   | GET        | a-bc  | /Docs
+      5   | GET        | a-bc  | /reports
+      6   | INVALIDATE | a-bc  | /Reports/
+      7   | GET        | a-bc  | /reports
+
+      If a GET misses, use its listed origin response. Sequence 4 uses A_PRIVATE_DOCS and sequence 7
+      uses A_REPORTS if they reach origin. No other request mutates the cache.
+  - id: candidate-fixes
+    type: diff
+    label: Candidate key repairs
+    content: |
+      A. `${tenantId}:${normalizeRoute(path)}`
+         (preserve tenant ID exactly; keep lowercase + one-trailing-slash route normalization)
+
+      B. `${tenantId.replaceAll("-", "")}:${path}`
+         (preserve path spelling; still remove tenant hyphens)
+
+      C. `${tenantId}:${path}`
+         (preserve both strings exactly; equivalent route spellings get different keys)
+
+      D. `${tenantId.length}${tenantId.replaceAll("-", "")}:${normalizeRoute(path)}`
+         (prefix original length but discard hyphen positions; all legal tenant IDs already length 4)
+
+      A-D are the complete candidates. `normalizeRoute` is the shipped route normalization only.
+  - id: expected-properties
+    type: spec
+    label: Required key properties
+    content: |
+      Isolation: for any legal tenants t1 != t2 and any legal paths p1,p2, keys must differ even when
+      p1 and p2 identify the same route resource.
+
+      Route-equivalent invalidation: for one tenant t, if routerEquivalent(p1,p2), then a value stored
+      under GET(t,p1) must be removed by INVALIDATE(t,p2).
+
+      No requirement exists for different route resources to share keys. The minimal accepted repair
+      is the candidate that satisfies both properties without changing cache value semantics.
+tags: [formal-counterexample, cache-key, tenant-isolation, normalization, witness]

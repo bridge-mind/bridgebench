@@ -1,5 +1,5 @@
 id: triage-dependency-advisories
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: finding-triage
 difficulty: expert
@@ -8,7 +8,7 @@ summary: >-
   A fictional dependency auditor "Ferroscan" reported 5 advisories against a lockfile by matching
   the caret ranges in package.json instead of the resolved versions. Classify each advisory as
   applicable-and-reachable or not-applicable, using the authoritative lockfile version versus the
-  advisory's affected range AND the exhaustive usage map. Only two are genuinely actionable.
+  advisory's affected range AND the exhaustive usage map.
   "Patch everything, all critical" is scored as an error.
 prompt: |
   You are triaging an automated dependency scan for the Fernwood storefront API. The auditor
@@ -125,13 +125,6 @@ artifacts:
       sablewire     | yes              | slugify                   | src/catalog/slug.ts
       mica-json     | yes              | parse                     | src/http/body-parser.ts  (see hot-path)
       borealis-xml  | yes              | parseDocument             | src/webhooks/supplier.ts (see handler)
-
-      Notes:
-        - sablewire.renderMarkdown is NOT imported anywhere in production; only sablewire.slugify
-          is used.
-        - figtree-cli is imported only by the build script and a test spec; per the lockfile it is
-          dev: true and is pruned from the production image.
-        - quillparse.parse IS imported in production (src/orders/import.ts).
   - id: hot-path
     type: code
     label: src/http/body-parser.ts — global JSON body middleware (A4)

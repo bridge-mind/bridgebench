@@ -1,0 +1,123 @@
+id: state-corruption-projection-revision
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Delayed Order Event Rolls a Materialized Projection Backward
+summary: >-
+  An order detail page shows PAID, then reverts to PENDING after a delayed older event arrives. The API,
+  cache invalidator, and reconciliation job all observe the bad row, while one projector upsert first
+  violates the monotonic-revision invariant. Trace the first corrupting write and select an atomic fix
+  that rejects stale events without dropping legitimate retries.
+prompt: |
+  Diagnose the fictional ParcelPilot projection using ONLY the supplied artifacts. Cite artifact ids for
+  every claim. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State the materialized-view invariants and the complete set of writers to order_view.
+  2. Identify the first corrupting operation in event-trace, including before/after revision and status.
+     Name the exact SQL clause that permits the invariant violation.
+  3. Classify the API reader, cache invalidator, reconciliation job, and broker redelivery as root cause or
+     red herring. Separate the out-of-order input condition from the writer defect that accepts it.
+  4. Explain why event-id deduplication does not reject E-10 after E-11 and why E-11 retry is harmless.
+  5. Classify P1 through P4 and choose the adequate fix. Explain the atomicity needed when two revisions
+     race rather than proposing a read-then-write check.
+  6. Give regression schedules for newer-then-older, older-then-newer, concurrent revisions, exact retry,
+     and same-revision/different-event conflict.
+
+  The writer inventory and event ordering facts are exhaustive; one writer first corrupts state.
+artifacts:
+  - id: projection-contract
+    type: spec
+    label: authoritative order projection invariants
+    content: |
+      V1: order_view.revision is monotonic per order; a committed row may be replaced only by an event
+      with a strictly greater revision.
+      V2: status and total_cents must come from the same accepted event as revision and last_event_id.
+      V3: an exact retry of an already processed event id is a no-op.
+      V4: two different event ids for the same order and revision indicate producer corruption; reject
+      and alert rather than selecting one nondeterministically.
+      Events are at-least-once and may arrive out of order across retry partitions. Producers assign
+      increasing revisions per order. Consumers must enforce V1-V4; broker ordering is not guaranteed.
+  - id: schema-and-writers
+    type: config
+    label: order_view schema and exhaustive writer inventory
+    content: |
+      CREATE TABLE order_view(
+        order_id uuid PRIMARY KEY,
+        revision bigint NOT NULL,
+        status text NOT NULL,
+        total_cents bigint NOT NULL,
+        last_event_id uuid NOT NULL
+      );
+      CREATE TABLE processed_events(event_id uuid PRIMARY KEY, processed_at timestamptz NOT NULL);
+
+      COMPLETE WRITER SET:
+      - projectOrderEvent is the only function that INSERTs or UPDATEs order_view.
+      - API handlers, cache invalidator, and reconciliation job are read-only for order_view.
+      - There are no triggers, manual SQL jobs, repair scripts, or other database roles with write access.
+  - id: projector-code
+    type: code
+    label: projector/project-order.ts — current complete transaction
+    content: |
+      async function projectOrderEvent(event) {
+        await db.transaction(async tx => {
+          const fresh = await tx.processed_events.insert({ event_id: event.id, processed_at: now() })
+            .onConflictDoNothing().returning('event_id');
+          if (fresh.length === 0) return; // exact event-id retry
+
+          await tx.execute(sql`
+            INSERT INTO order_view(order_id, revision, status, total_cents, last_event_id)
+            VALUES (${event.orderId}, ${event.revision}, ${event.status},
+                    ${event.totalCents}, ${event.id})
+            ON CONFLICT (order_id) DO UPDATE SET
+              revision = EXCLUDED.revision,
+              status = EXCLUDED.status,
+              total_cents = EXCLUDED.total_cents,
+              last_event_id = EXCLUDED.last_event_id
+          `);
+        });
+      }
+      // The upsert has no revision predicate. The transaction makes processed_events and order_view
+      // atomic for one event but does not compare event revision with the current row.
+  - id: event-trace
+    type: log
+    label: order O-8 event delivery and projection trace
+    content: |
+      09:00 E-9  order=O-8 revision=9  status=PENDING total=4200 -> commit view(r9,PENDING,E-9)
+      09:01 E-11 order=O-8 revision=11 status=PAID    total=4200 -> commit view(r11,PAID,E-11)
+      09:02 API read -> r11 PAID; cache stores r11 PAID
+      09:03 E-11 retry -> processed_events conflict -> no-op; view remains r11 PAID
+      09:04 E-10 delayed from retry partition: revision=10 status=PENDING total=4200
+            processed_events insert succeeds (E-10 is a distinct, previously unseen id)
+            unconditional ON CONFLICT UPDATE commits view(r10,PENDING,E-10)
+      09:04 cache invalidation reads changed row and evicts cached r11
+      09:05 API read -> database r10 PENDING; response shows PENDING
+      09:10 reconciliation compares producer watermark=11 to view revision=10 and alerts
+      The event bodies and database commits above are complete; no transaction rolled back.
+  - id: observers
+    type: code
+    label: downstream read-only components
+    content: |
+      GET /orders/:id -> SELECT * FROM order_view WHERE order_id=$1; cache by order_id/revision.
+      Invalidation worker -> on row-change notification, delete cache key; never writes order_view.
+      Reconciler -> SELECT revision FROM order_view; compare with producer watermark; emit alert only.
+      The broker delivered E-10 late as allowed by projection-contract. Redelivery cannot directly mutate
+      SQL state; only projectOrderEvent can. These are the complete downstream paths.
+  - id: candidate-fixes
+    type: diff
+    label: proposed projection patches
+    content: |
+      P1: Add `WHERE order_view.revision < EXCLUDED.revision` to ON CONFLICT DO UPDATE. If equal revision
+          has a different last_event_id, raise an integrity alert and roll back processed_events insert;
+          if lower, leave view unchanged while recording the stale event as consumed.
+
+      P2: Before the transaction, SELECT revision; return early when event.revision <= observed revision;
+          otherwise execute the existing unconditional upsert.
+
+      P3: Configure the cache to keep the numerically highest revision it has seen; leave database writer
+          unchanged.
+
+      P4: Increase broker retry delay so E-10 is more likely to arrive before E-11.
+      Requirement: the database row itself must enforce V1-V4 under concurrent delivery; API and
+      reconciler must observe the same accepted state.
+tags: [debugging, state-corruption, event-ordering, projection, sql]

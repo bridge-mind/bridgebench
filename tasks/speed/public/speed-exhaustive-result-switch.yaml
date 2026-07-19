@@ -1,0 +1,32 @@
+id: speed-exhaustive-result-switch
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Implement an Exhaustive Result-to-HTTP Mapper
+summary: Write a compact TypeScript function that maps a discriminated union to an HTTP response while preserving exhaustiveness and an exact retry header.
+prompt: |
+  Implement `toHttp` from [result-contract]. Output only the `HttpResponse` type and the
+  function. The switch must be compile-time exhaustive without a `default` that silently
+  accepts future variants.
+artifacts:
+  - id: result-contract
+    type: spec
+    label: Complete mapping contract
+    content: |
+      type Result =
+        | { kind: "ok"; value: unknown }
+        | { kind: "missing"; resource: string }
+        | { kind: "conflict"; version: number }
+        | { kind: "throttled"; retryAfterMs: number };
+
+      HttpResponse = { status: number; body: unknown; headers?: Record<string, string> }.
+      Mappings:
+      - ok -> 200, body is value
+      - missing -> 404, body { error: `missing ${resource}` }
+      - conflict -> 409, body { error: "version conflict", version }
+      - throttled -> 429, body { error: "throttled" }, Retry-After header containing
+        ceiling(retryAfterMs / 1000) as a base-10 string
+      Use `assertNever(value: never): never` or an equivalent never assignment to prove
+      exhaustiveness. No `any`, type assertion, or mutation of the input is allowed.
+tags: [typescript, discriminated-union, exhaustive-switch]

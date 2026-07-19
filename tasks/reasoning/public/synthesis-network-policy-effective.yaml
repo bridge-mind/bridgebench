@@ -1,0 +1,90 @@
+id: synthesis-network-policy-effective
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: Effective Kubernetes Connectivity Across Additive Policies, Namespace Labels, and DNS Egress
+summary: Combine pod labels, namespace labels, ingress and egress policy unions, ports, and observed flows to derive the exact connectivity matrix and a least-privilege repair.
+prompt: |
+  Compute the effective connectivity in this fictional cluster under [policy-semantics]. Policies and
+  inventories are exhaustive; evaluate TCP connections by source pod, destination pod, and port.
+
+  1. State which pods are ingress-isolated and egress-isolated and list the selecting policy names.
+  2. Produce ALLOW/DENY for every flow F1-F10 with the exact source-egress and destination-ingress
+     rule(s) that decide it.
+  3. Explain why `checkout` can resolve DNS but cannot reach `payments:8443`, while `admin` can reach
+     one payments port but not the other.
+  4. Identify every misleading statement in [operator-notes], correcting it from the supplied policy
+     semantics.
+  5. Design the minimal additive policy set that allows only checkout-to-payments TCP/8443 without
+     enabling checkout-to-ledger or any new namespace. State why one namespaced policy is insufficient.
+  6. Give three policy regression probes, including DNS, intended allow, and lateral-movement deny,
+     with source, destination, port, and expected result.
+artifacts:
+  - id: policy-semantics
+    type: spec
+    label: Complete NetworkPolicy model
+    content: |
+      A pod is direction-isolated if any policy with that policyType selects it. Allowed connections
+      are the union of selecting policies for that direction. A connection succeeds only if source
+      egress (when isolated) AND destination ingress (when isolated) allow it. `podSelector` in a peer
+      without `namespaceSelector` selects same-namespace pods. With both selectors, both must match.
+      Empty `{}` namespaceSelector matches every namespace. Ports not listed are denied by that rule.
+  - id: inventory
+    type: table
+    label: Complete namespaces and pods
+    content: |
+      namespace(labels)            | pod(labels)                         | IP
+      shop(team=store)              | checkout(app=checkout,tier=web)     | 10.1.0.4
+      shop(team=store)              | admin(app=admin,tier=ops)           | 10.1.0.5
+      money(team=finance)           | payments(app=payments,tier=api)     | 10.2.0.7
+      money(team=finance)           | ledger(app=ledger,tier=db)          | 10.2.0.8
+      kube-system(system=true)      | dns(k8s-app=kube-dns)               | 10.3.0.10
+  - id: policies
+    type: config
+    label: Exhaustive installed policies
+    content: |
+      shop/default-egress: podSelector {}, types [Egress], egress []
+      shop/dns-egress: podSelector {}, Egress to namespace system=true + pod k8s-app=kube-dns,
+        ports UDP/53,TCP/53
+      shop/admin-finance: podSelector app=admin, Egress to namespace team=finance, ports TCP/443
+
+      money/default-ingress: podSelector {}, types [Ingress], ingress []
+      money/payments-admin: podSelector app=payments, Ingress from namespace team=store +
+        pod app=admin, ports TCP/443
+      money/payments-checkout-old: podSelector app=payments, Ingress from same-namespace
+        pod app=checkout, ports TCP/8443
+
+      kube-system has no policies. There are no service-mesh authorizers.
+  - id: flows
+    type: table
+    label: Connectivity matrix inputs
+    content: |
+      F1 checkout -> dns UDP/53
+      F2 checkout -> payments TCP/8443
+      F3 checkout -> payments TCP/443
+      F4 checkout -> ledger TCP/5432
+      F5 admin -> payments TCP/443
+      F6 admin -> payments TCP/8443
+      F7 admin -> ledger TCP/443
+      F8 payments -> ledger TCP/5432
+      F9 ledger -> payments TCP/443
+      F10 dns -> checkout TCP/8080
+  - id: observations
+    type: log
+    label: Probe output
+    content: |
+      checkout: dig payments.money.svc -> 10.2.0.7 SUCCESS
+      checkout: connect 10.2.0.7:8443 -> TIMEOUT
+      admin: connect 10.2.0.7:443 -> SUCCESS
+      admin: connect 10.2.0.7:8443 -> TIMEOUT
+      payments: connect 10.2.0.8:5432 -> TIMEOUT
+  - id: operator-notes
+    type: note
+    label: Unverified explanations
+    content: |
+      - "The empty default egress policy overrides every other egress policy."
+      - "payments-checkout-old matches checkout across namespaces because pod labels match."
+      - "If destination ingress allows a flow, source egress does not matter."
+      - "An empty namespaceSelector would mean only the policy namespace."
+tags: [kubernetes, network-policy, authorization, synthesis, zero-trust]

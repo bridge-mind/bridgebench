@@ -1,0 +1,131 @@
+id: uncertainty-failover-readiness
+version: 1.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Regional Failover Decision Under Retry-Masked Errors and a Misrouted Synthetic Probe
+summary: Weigh app telemetry, edge retry behavior, route-aware probes, stale dashboards, and a strict decision policy to determine whether cobalt is unhealthy enough to fail over without treating noisy or invalid signals as equal votes.
+prompt: |
+  At decision time 16:05:00, decide whether to fail traffic from region `cobalt` to `amber` under the
+  complete policy in [decision-policy]. Signals must be evaluated for scope, freshness, independence,
+  and whether they measure the customer write path. A green signal is not automatically valid and a
+  low edge error rate may be retry-masked.
+
+  1. Classify every numbered signal S1-S8 in [signal-table] as qualifying-positive,
+     qualifying-negative, corroborating-only, or invalid. Cite the policy clause and configuration or
+     log fact that decides it.
+  2. Apply the quorum rule and give the one supported action at 16:05:00: fail over or hold. Name the
+     exact independent qualifying signals and affected scope.
+  3. Reconcile S1's low customer-visible 5xx rate with S2/S4's write failures using the edge retry
+     configuration and request trace. Explain why this is not a logical contradiction.
+  4. Explain why the green synthetic result S3 cannot veto the decision, and identify the exact path,
+     region, and method it actually tested.
+  5. Rule out CPU saturation, a global database failure, and client-version skew as primary causes.
+     State what the evidence does and does not establish about the underlying cobalt fault.
+  6. Evaluate counterfactuals C1-C3 in [counterfactuals] independently and state whether the policy
+     outcome changes, showing the qualifying-signal count each time.
+artifacts:
+  - id: decision-policy
+    type: spec
+    label: Complete regional write-failover decision policy
+    content: |
+      Evaluate at decision time T for POST `/v2/orders` in one region.
+
+      Q1. A signal qualifies only if sampled within the last 5 minutes, scoped to the named region and
+          POST `/v2/orders`, and based on at least 100 attempts in its window.
+      Q2. A qualifying positive is either: application terminal failure rate >=5%; OR a route-aware
+          external probe with >=3 consecutive failures. A qualifying negative is the corresponding
+          metric below threshold or >=3 consecutive successes.
+      Q3. Edge customer-visible 5xx after cross-region retries is corroborating-only: it can understate
+          regional terminal failures and neither establishes nor vetoes quorum.
+      Q4. Two qualifying positives from independent sources are required to fail over. Application
+          transaction metrics and route-aware external probes are independent. Two dashboards derived
+          from the same application counter are one source.
+      Q5. A probe is invalid if configured region, method, or path differs from the decision scope.
+      Q6. Host CPU, queue depth, chat reports, and data older than 5 minutes are corroborating-only.
+      Q7. A qualifying negative from the same source supersedes its older positive. With quorum, fail
+          over even if invalid or corroborating signals look green. Without quorum, hold.
+
+      This policy chooses the action; it does not require identifying the exact internal software bug.
+  - id: signal-table
+    type: table
+    label: Signals available at 16:05:00
+    content: |
+      S1 | 16:04:30 | edge dashboard | cobalt POST /v2/orders | 4,200 client requests, 0.8% final 5xx
+      S2 | 16:04:40 | app tx counter | cobalt POST /v2/orders | 3,910 attempts, 8.4% terminal db_timeout
+      S3 | 16:04:45 | synthetic summary | label says cobalt orders | 5 consecutive successes
+      S4 | 16:04:50 | external route probe P-write-c | cobalt POST /v2/orders | 4 consecutive failures
+      S5 | 16:04:20 | app-errors dashboard | cobalt POST /v2/orders | 8.4% (derived from S2 counter)
+      S6 | 16:04:55 | host metrics | cobalt order pods | CPU 41%, queue depth 7
+      S7 | 15:56:00 | app tx counter | cobalt POST /v2/orders | 6.1% across 2,000 attempts
+      S8 | 16:04:35 | app tx counter | amber POST /v2/orders | 0.2% across 3,800 attempts
+
+      Timestamps are collection completion times. No later qualifying sample exists before decision.
+  - id: probe-config
+    type: config
+    label: Complete synthetic and route-probe configuration
+    content: |
+      probes:
+        dashboard-green-orders:
+          displayLabel: "cobalt orders"
+          region: amber
+          method: GET
+          path: /v2/orders/health
+          resultSignal: S3
+        P-write-c:
+          displayLabel: "cobalt write transaction"
+          region: cobalt
+          method: POST
+          path: /v2/orders
+          resultSignal: S4
+          attemptsPerRun: 120
+
+      Each S4 failure run contains 120 attempts. S3 contains 200 attempts but targets amber GET health,
+      not cobalt POST writes. This is the exhaustive configuration for signals S3 and S4.
+  - id: edge-config
+    type: config
+    label: Edge retry and final-response behavior
+    content: |
+      route: POST /v2/orders
+      firstAttemptRegion: nearest-region
+      onRegionalStatus: [503]
+      retryOnceInRegion: amber
+      returnToClient: retry response if retry attempted
+      preserveIdempotencyKey: true
+
+      Regional app metric S2 counts the terminal result of first attempts inside cobalt before any
+      edge retry. S1 counts only the final response returned to clients after optional amber retry.
+  - id: request-trace
+    type: log
+    label: Representative retry-masked request traces
+    content: |
+      16:04:31 req=q81 POST /v2/orders idem=i81 cobalt -> 503 db_timeout
+      16:04:31 req=q81 retry same idem=i81 amber -> 201; client final=201
+      16:04:32 req=q82 POST /v2/orders idem=i82 cobalt -> 503 db_timeout
+      16:04:32 req=q82 retry same idem=i82 amber -> 201; client final=201
+      16:04:33 req=q83 POST /v2/orders idem=i83 cobalt -> 201; no retry
+
+      Aggregation note: these traces illustrate the configured mechanism; S1 and S2 contain the full
+      attempt populations. No evidence shows idempotency failures.
+  - id: scope-evidence
+    type: log
+    label: Region comparison and deployment facts
+    content: |
+      16:04 cobalt POST /v2/orders terminal db_timeout=8.4%; reads=0.3%; CPU=41%
+      16:04 amber  POST /v2/orders terminal db_timeout=0.2%; reads=0.2%; CPU=46%
+      16:04 cobalt database connection acquisition p95=2.8s; exact cause not yet isolated
+      16:04 all client versions show proportional cobalt failures; no version-specific concentration
+      15:40 last deploy completed identically in cobalt and amber
+
+      The evidence supports a cobalt write-path impairment and amber health. It does not distinguish
+      database network loss, pool starvation, or database admission control inside cobalt.
+  - id: counterfactuals
+    type: note
+    label: Independent policy counterfactuals
+    content: |
+      C1. S4 has only 2 consecutive failures (all else unchanged).
+      C2. S2 is 4.9% instead of 8.4%, while S4 remains 4 consecutive failures.
+      C3. S3 is corrected to cobalt POST /v2/orders with 200 attempts and 5 consecutive successes at
+          16:04:45; S2 and S4 remain as recorded. Treat that corrected S3 as the same external-probe
+          source family as S4, so its newer negative supersedes S4 under Q7.
+tags: [uncertainty, failover, telemetry, retries, probes, evidence-quality]

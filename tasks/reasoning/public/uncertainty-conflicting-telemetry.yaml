@@ -1,5 +1,5 @@
 id: uncertainty-conflicting-telemetry
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: uncertainty-adversarial
 difficulty: expert
@@ -130,8 +130,6 @@ artifacts:
 
       Before 14:04 only sub-60 ms minor collections. Several ~1.7-1.8 s stop-the-world Full GCs
       occur inside the spike window (14:05-14:07), each freeing old-gen space that quickly refills.
-      The Full GC timestamps line up second-for-second with the per-second p99 spikes in
-      api-latency (14:05:07, 14:05:41, ...), on the same api-host clock.
   - id: trace-sample
     type: log
     label: Distributed trace samples (api-host clock; head-sampled at 1%)
@@ -158,15 +156,11 @@ artifacts:
         span serialize.response  0.001s
 
       In every slow trace the db.query and auth.verify spans are normal (~40 ms and ~24 ms); the
-      extra ~1.6-1.7 s is on-CPU/runnable-stalled time inside the handler, and its start aligns with
-      a Full GC timestamp in gc-log. Normal requests in the same window are ~56 ms end to end.
+      extra ~1.6-1.7 s is on-CPU/runnable-stalled time inside the handler. Normal requests in the
+      same window are ~56 ms end to end.
 
       On the sampling limitation: 1% head sampling and the loss of >2 s timed-out requests mean this
-      set understates HOW MANY and HOW SLOW the worst requests were. It does not bias WHERE the time
-      is spent within a captured slow request: the db and auth spans are measured directly and are
-      small, and a stall that lived inside the db or auth call would have shown up as a large db.query
-      or auth.verify span, which it does not. So the sample is unusable for counting the tail but
-      valid for attributing it.
+      set understates HOW MANY and HOW SLOW the worst requests were.
   - id: db-metrics
     type: table
     label: Database query latency (database-host clock; see clock-note)
@@ -191,9 +185,7 @@ artifacts:
         14:09  | 37          | 260          | 33
 
       A batch job report_rollup ran on the analytics schema from 14:06:40 to 14:09:30 (database-host
-      clock). Because the pooled p95 is one percentile computed over ALL schemas' queries together,
-      the heavy analytics batch dominates the pooled tail. The checkout schema's own p95 stayed
-      ~37-44 ms throughout, and the sessions schema was flat too.
+      clock).
   - id: clock-note
     type: note
     label: Time synchronization status
@@ -208,12 +200,6 @@ artifacts:
       api-host timeline; the database dashboard's "14:07" is not the api host's 14:07. The
       per-schema decomposition WITHIN the database host is still internally valid, because it
       compares schemas measured on the same (skewed) clock at the same instants.
-
-      Practical consequence: any argument of the form "the database spiked at 14:07 and the API
-      spiked at 14:05-14:08, so they line up" is unsound, because the database "14:07" is really
-      ~14:04 true time, and the alignment is an artifact of comparing two clocks that are three
-      minutes apart. Cross-host causality here needs synchronized timestamps or shared trace IDs,
-      neither of which exists for the database path in this window.
   - id: auth-dependency
     type: table
     label: Auth service latency and errors (auth-host clock, NTP healthy)

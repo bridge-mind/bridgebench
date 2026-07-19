@@ -44,10 +44,16 @@ export interface ArenaEventDataMap {
     matchId: string;
     judges: string[];
   };
+  /** The primary panel could not settle the match; reserve judges are being seated. */
+  'judging.escalated': {
+    matchId: string;
+    reserves: string[];
+    reason: string;
+  };
   'judge.completed': {
     matchId: string;
     judgeModelId: string;
-    anonymousWinner: 'MODEL_A' | 'MODEL_B' | null;
+    anonymousWinner: 'MODEL_A' | 'MODEL_B' | 'TIE' | 'ABSTAIN' | null;
     votedFor: string | null;
     confidence: number | null;
     valid: boolean;
@@ -69,6 +75,12 @@ export interface ArenaEventDataMap {
     costUsd: number;
     maxCostUsd: number;
   };
+  'run.health-stopped': {
+    runId: string;
+    completed: number;
+    matchesWithFailures: number;
+    failureRate: number;
+  };
   'run.cancellation-requested': {
     runId: string;
     completed: number;
@@ -84,6 +96,8 @@ export interface ArenaEventDataMap {
     completed: number;
     costUsd: number;
     stoppedForBudget: boolean;
+    /** Optional for wire-compat with pre-health-stop runners. */
+    stoppedForHealth?: boolean;
   };
   'run.failed': {
     error: string;

@@ -1,0 +1,165 @@
+id: uncertainty-canary-signals
+version: 1.1.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: Canary Search Failures Hidden by a Green Aggregate Dashboard and Non-Covering Synthetic
+summary: >-
+  Decide whether to halt a canary when aggregate sample size is inconclusive, a synthetic remains
+  green, and shared database latency is elevated. Weigh the decision policy against request-level
+  controls, the deployed diff, and the API contract to isolate the one supported defect and scope.
+prompt: |
+  RecordSearch v7.4 is a 5% canary. During its first ten minutes, the global dashboard is not yet
+  statistically actionable, the database p99 is elevated but under its alert threshold, and all
+  synthetics pass. At the same time, some request-level evidence is alarming. Use the evidence
+  hierarchy and stop rules in [decision-policy], not the confidence expressed in [analyst-note].
+
+  1. Deployment decision. State whether to continue, hold, or roll back v7.4 now. Cite the exact
+     decision-policy rule and facts that meet or fail it; distinguish the direct stop rule from the
+     aggregate statistical rule.
+  2. Best-supported cause. Name the exact defect, file/expression, and API-contract shape that trigger
+     it. Explain the causal chain from a valid request to its 500 without blaming an unstated system.
+  3. Affected scope. State precisely which version, endpoint, and request shapes are affected, and
+     which neighboring request shape is safe under the shown code. Explain why stable controls are safe.
+  4. Signal adjudication. Classify request evidence, aggregate metrics, database telemetry, and
+     synthetics as decisive, inconclusive, contextual, or non-covering, respectively. Explain why the
+     green synthetic and database p99 do not overturn the best-supported conclusion.
+  5. Remediation. Give the immediate rollout action and the minimal code/test remediation. State why
+     defaulting an absent filter value to `""` is not an acceptable fix under the contract.
+artifacts:
+  - id: decision-policy
+    type: spec
+    label: Canary evidence hierarchy and stop rules
+    content: |
+      EVIDENCE HIERARCHY (highest to lowest):
+        1. Version-tagged request traces paired with a same-shape stable control, plus a matching
+           deployed stack frame or code diff.
+        2. Aggregate per-version metrics with adequate sample size.
+        3. Shared infrastructure telemetry.
+        4. Synthetic checks, but only for the exact request shape they execute.
+
+      AGGREGATE RULE:
+        - A global error-rate comparison may independently trigger rollback only when EACH version has
+          at least 200 requests in the observation window. Below that threshold, aggregate percentage
+          differences are inconclusive; this does not override another stop rule.
+
+      ROUTE-COHORT STOP RULE:
+        - Roll back an active canary immediately when, within 15 minutes, at least five UNIQUE
+          correlation IDs for one endpoint plus one contract-valid request shape return 5xx on the
+          canary, matching stable controls for that same shape return 2xx, and the canary trace/diff
+          identifies a common code path. This rule applies regardless of global sample size.
+
+      A "hold" is allowed only when neither stop rule is met and no higher-ranked evidence isolates a
+      canary-specific defect.
+  - id: rollout-record
+    type: config
+    label: v7.4 canary deployment record
+    content: |
+      rollout:
+        stableVersion: v7.3
+        canaryVersion: v7.4
+        canaryTrafficPercent: 5
+        startUtc: "2026-07-16T10:00:00Z"
+        databaseMigration: none
+        databaseConnectionPool: unchanged
+      flags:
+        filter-normalization-v2:
+          v7.3: false
+          v7.4: true
+
+      No other application release, database migration, feature flag, or infrastructure configuration
+      changed between 09:45 and 10:10 UTC. Traffic is deterministically version-tagged in the logs.
+  - id: search-api-contract
+    type: spec
+    label: Complete filter payload contract for GET /v1/records/search
+    content: |
+      Request shape:
+        GET /v1/records/search?filter=<JSON>
+
+      `filter` has exactly these relevant forms:
+        - { field: <non-empty string>, operator: "equals", value: <non-empty string> }
+        - { field: <non-empty string>, operator: "exists" }       # value MUST be omitted
+        - { field: <non-empty string>, operator: "missing" }      # value MUST be omitted
+
+      `exists` means the selected field is present; `missing` means it is absent. An empty string is a
+      value and is NOT equivalent to an omitted value for either operator. All three forms above are
+      contract-valid and must return a normal 2xx search response when the service is healthy.
+  - id: filter-normalization-diff
+    type: diff
+    label: v7.3 to v7.4 filter normalization change
+    content: |
+      // src/search/normalize-filter.ts
+      export function normalizeFilter(filter: SearchFilter): SearchFilter {
+      -  if (filter.operator === "equals") {
+      -    return { ...filter, value: filter.value.trim() };
+      -  }
+      -  return filter;
+      +  return { ...filter, value: filter.value.trim() };
+      }
+
+      // v7.4 enables this code path only when filter-normalization-v2 is true.
+      // JavaScript throws TypeError if `value` is undefined and `.trim()` is evaluated.
+  - id: request-evidence
+    type: log
+    label: Version-tagged canary failures and matched stable controls
+    content: |
+      # Each correlation ID below is unique. All payloads are contract-valid under [search-api-contract].
+      time      version route                    correlation | filter                         | status | result
+      10:02:11  v7.4    /v1/records/search       c-701       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+      10:02:37  v7.4    /v1/records/search       c-702       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+      10:03:04  v7.4    /v1/records/search       c-703       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+      10:03:41  v7.4    /v1/records/search       c-704       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+      10:04:19  v7.4    /v1/records/search       c-705       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+      10:05:02  v7.4    /v1/records/search       c-706       | {field:"archivedAt",operator:"exists"}  | 500 | TypeError: cannot read properties of undefined (reading 'trim') at normalize-filter.ts:4
+
+      10:02:18  v7.3    /v1/records/search       s-801       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+      10:02:44  v7.3    /v1/records/search       s-802       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+      10:03:11  v7.3    /v1/records/search       s-803       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+      10:03:55  v7.3    /v1/records/search       s-804       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+      10:04:31  v7.3    /v1/records/search       s-805       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+      10:05:17  v7.3    /v1/records/search       s-806       | {field:"archivedAt",operator:"exists"}  | 200 | normal search response
+
+      Matching controls use the same endpoint, operator/field shape, and ten-minute observation window;
+      only their stable version differs. No canary `equals` request with a non-empty value failed.
+  - id: telemetry
+    type: table
+    label: Aggregate metrics and shared database observations
+    content: |
+      observation 10:00-10:10 UTC
+      signal                                      | v7.3 / shared value | v7.4 value
+      total requests                              | 12,400              | 72
+      global 5xx                                  | 4 (0.03%)           | 6 (8.33%)
+      /v1/records/search 5xx with equals value    | 0 / 94              | 0 / 4
+      database query p99                          | 218 ms shared       | 218 ms
+      database connection errors                  | 0 shared            | 0 shared
+      database CPU                                | 61% shared          | 61% shared
+
+      The database is shared by both versions. The database p99 alert threshold is 350 ms and the
+      database CPU capacity alert fires at 85%. These numbers include all endpoints and filter shapes
+      except where a row explicitly narrows the population.
+  - id: synthetic-suite
+    type: config
+    label: Passing synthetic coverage
+    content: |
+      synthetic: search-equals-smoke
+      cadence: every 30 seconds
+      target: both v7.3 and v7.4
+      request:
+        GET /v1/records/search
+        filter: { field: "state", operator: "equals", value: "active" }
+      observed 10:00-10:10:
+        v7.3: 20/20 200
+        v7.4: 20/20 200
+
+      This suite executes no `exists` or `missing` filter and no request with an omitted value. Its
+      declared coverage is limited to the exact equals shape shown above.
+  - id: analyst-note
+    type: note
+    label: Unverified incident-room conclusions
+    content: |
+      1. "Continue the canary because v7.4 has only 72 requests, below the 200-request rule."
+      2. "The shared 218 ms database p99 probably explains the canary-only 500s, so add capacity first."
+      3. "The green search synthetic proves filter normalization is healthy for every operator."
+      4. "Make missing values safe by replacing undefined filter.value with an empty string."
+      5. "All RecordSearch traffic is affected, including equals requests with normal values."
+tags: [canary, observability, uncertainty, request-traces, api-contracts, adversarial-signals]

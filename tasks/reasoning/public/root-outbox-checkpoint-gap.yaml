@@ -1,0 +1,137 @@
+id: root-outbox-checkpoint-gap
+version: 1.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: Missing Billing Event After Consumer Checkpoint Advances Before Outbox Commit
+summary: Trace a single lost invoice event across broker offsets, a database transaction, an outbox relay, crash recovery, and red-herring retry telemetry to isolate the checkpoint-ordering defect and select the only lossless fix.
+prompt: |
+  An invoice was committed in the broker but never appeared in the billing outbox. Reconstruct the
+  incident using the complete contracts and evidence below. Separate the crash trigger from the
+  software defect that permits permanent loss. There are no hidden consumers, database writers, or
+  relay filters beyond the artifacts.
+
+  1. Name the single root-cause defect, cite the exact deployed lines, and state the invariant they
+     violate.
+  2. Trace broker record `(partition=2,offset=8841)` from fetch through crash and restart, explaining
+     why it is neither reprocessed nor present in `invoices`/`outbox`.
+  3. Rule out all four incident-room theories: outbox relay lag, duplicate-key rejection, schema
+     validation, and consumer-group rebalance.
+  4. Evaluate fixes A-D. Select the only fix that prevents both loss and duplicate external billing
+     side effects under the stated contracts, and explain each rejected fix's first failure mode.
+  5. Give the exact recovery action for offset 8841 now that the checkpoint is already 8842. State
+     which immutable input is needed and how idempotency is preserved.
+  6. Define two regression tests, including the crash point and required assertions, that distinguish
+     the correct fix from the deployed behavior and from fix C.
+artifacts:
+  - id: processing-contract
+    type: spec
+    label: Invoice consumer and outbox invariants
+    content: |
+      Broker offsets are next-to-read checkpoints: checkpoint 8842 means offsets <=8841 will not be
+      delivered again to that consumer group. `commitCheckpoint` is durable and is not rolled back by
+      a database transaction.
+
+      Correct processing invariant:
+        1. In one database transaction insert `invoices(event_id unique, ...)` and
+           `outbox(event_id unique, payload, published_at null)`.
+        2. Commit that database transaction.
+        3. Only then advance the broker checkpoint to offset+1.
+
+      The outbox relay publishes committed outbox rows and marks them published. The billing API
+      deduplicates on event_id. Reprocessing the same broker record is therefore safe: unique inserts
+      become a no-op and the external request carries the same idempotency key. A checkpoint may lag a
+      committed transaction (causing replay), but must never lead it (causing loss).
+  - id: deployed-code
+    type: code
+    label: Deployed invoice consumer
+    content: |
+      async function onInvoice(record: BrokerRecord) {
+        const event = InvoiceEvent.parse(record.value);                  // L1
+        await broker.commitCheckpoint(record.partition, record.offset+1); // L2
+        await db.transaction(async tx => {                                // L3
+          await tx.invoices.insert({ eventId: event.id, total: event.total });
+          crashpoint("after-invoice-before-outbox");                       // L5
+          await tx.outbox.insert({ eventId: event.id, payload: event });   // L6
+        });                                                               // commit after L6
+      }
+
+      The transaction rolls back both inserts on throw or process death before commit. L2 is outside
+      the database and remains durable. This is the only consumer for topic `invoice.created`.
+  - id: ordered-log
+    type: log
+    label: Consumer, broker, and database timeline
+    content: |
+      09:14:02.100 broker   fetched p2/o8841 event_id=inv_e7 schema=InvoiceEvent/v2
+      09:14:02.104 parser   InvoiceEvent.parse success event_id=inv_e7 total=4200
+      09:14:02.109 broker   durable checkpoint p2: 8841 -> 8842
+      09:14:02.114 db       BEGIN tx=tx91
+      09:14:02.119 db       INSERT invoices(event_id=inv_e7) pending in tx91
+      09:14:02.120 process  SIGKILL at crashpoint after-invoice-before-outbox
+      09:14:02.121 db       connection lost; ROLLBACK tx91 (2 statements, 0 committed rows)
+      09:14:07.000 consumer restarted group=billing checkpoint p2=8842
+      09:14:07.010 broker   next delivery p2/o8842 event_id=inv_f1
+      09:14:08.000 relay    scan committed outbox rows: 0 rows for event_id=inv_e7
+      09:15:00.000 monitor  invoice_missing event_id=inv_e7; parser_errors=0 duplicate_errors=0
+
+      No rebalance occurred from 09:00 through 09:30. The checkpoint and transaction messages above
+      are complete for offset 8841.
+  - id: database-snapshot
+    type: table
+    label: Committed state after restart
+    content: |
+      table     | event_id | rows | relevant values
+      invoices  | inv_e7   | 0    | —
+      outbox    | inv_e7   | 0    | —
+      invoices  | inv_f1   | 1    | total=1700
+      outbox    | inv_f1   | 1    | published_at=09:14:09
+
+      Constraints: invoices.event_id UNIQUE; outbox.event_id UNIQUE. Database audit confirms tx91
+      rolled back and no other writer attempted inv_e7.
+  - id: relay-config
+    type: config
+    label: Outbox relay and broker health
+    content: |
+      relayPollIntervalMs: 1000
+      relayOldestUnpublishedAgeMs: 0
+      relayFailedPublishesForInvE7: 0
+      billingApiIdempotencyHeader: "Invoice-Event-Id"
+      brokerPartition2UnderReplicated: false
+      brokerConsumerGroupRebalancesDuringIncident: 0
+
+      The relay can only publish committed rows. It does not reconstruct missing outbox rows from the
+      broker and cannot seek consumer checkpoints.
+  - id: candidate-fixes
+    type: diff
+    label: Candidate remediation designs
+    content: |
+      Fix A: move `commitCheckpoint(offset+1)` to immediately after the database transaction commits.
+             On replay, transaction inserts use ON CONFLICT(event_id) DO NOTHING; relay keeps the
+             stable event_id as the billing idempotency key.
+
+      Fix B: keep checkpoint first; change relayPollIntervalMs from 1000 to 100.
+
+      Fix C: move checkpoint after `tx.invoices.insert` but still inside the transaction callback,
+             before `tx.outbox.insert` and before commit.
+
+      Fix D: remove unique constraints, commit the DB transaction before checkpoint, and generate a
+             fresh random billing idempotency key on every relay attempt.
+  - id: recovery-record
+    type: note
+    label: Immutable broker archive and recovery procedure
+    content: |
+      Compliance archive contains the exact immutable value and headers for p2/o8841, including
+      event_id=inv_e7. Approved recovery is to republish that archived record to the recovery topic,
+      whose consumer calls the same corrected transaction with event_id uniqueness, then uses
+      Invoice-Event-Id=inv_e7. Manually inventing an invoice body or rewinding the whole production
+      partition is not approved.
+  - id: incident-chat
+    type: note
+    label: Unverified theories
+    content: |
+      - "The relay's one-second polling interval lost the row."
+      - "The invoice insert committed, so the outbox unique key rejected the second insert."
+      - "InvoiceEvent/v2 probably failed validation."
+      - "A rebalance skipped the record."
+      - "The SIGKILL itself is the root cause; ordering does not matter."
+tags: [outbox, broker-offsets, transactions, crash-consistency, root-cause]

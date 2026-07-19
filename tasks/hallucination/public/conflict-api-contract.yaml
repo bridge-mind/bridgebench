@@ -1,5 +1,5 @@
 id: conflict-api-contract
-version: 1.0.0
+version: 1.1.0
 category: hallucination
 cluster: conflicting-sources
 difficulty: expert
@@ -176,14 +176,13 @@ artifacts:
          by DATED changelog "added the value" entries. The spec's static list alone is not the
          complete set once the changelog has added values.
 
-      4. RATE LIMITS: enforced by the gateway infrastructure config, which is NOT included in these
-         artifacts. No source here is authoritative for the rate-limit number, and the docs and the
-         support macro are known to disagree. Do not pick or average; report each with its source.
+      4. RATE LIMITS: enforced by the gateway infrastructure config. Only the gateway
+         infrastructure config is authoritative for rate-limit numbers; developer docs and support
+         materials are not authorities for rate limits.
 
-      5. DEPRECATION status is governed by the API lifecycle registry, which is not part of these
-         artifacts and is not included here. Neither the spec's silence nor a docs "deprecated"
-         banner is authoritative for deprecation, and they disagree, so the status cannot be stated
-         as a single answer from the material provided.
+      5. DEPRECATION status is governed by the API lifecycle registry. Only the lifecycle registry
+         is authoritative for deprecation; neither an OpenAPI operation marker (or its absence) nor
+         a docs banner is an authority for deprecation status.
 
       6. The support-macro is a convenience canned reply, not an authority for any fact.
 tags: [api-contract, conflicting-sources, openapi, versioning, hallucination]

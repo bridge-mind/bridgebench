@@ -1,0 +1,110 @@
+id: spec-conformance-pkce-s256
+version: 1.0.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: Verify PKCE S256 Challenges With Exact Syntax and Constant-Time Comparison
+summary: >-
+  Four authorization-server verifiers differ on ASCII validation, SHA-256 representation,
+  base64url padding, method policy, and comparison behavior. The frozen PKCE profile makes one
+  implementation conform across both valid and adversarial requests.
+prompt: |
+  Use only pkce-profile, crypto-api, request-vectors, verifiers, and manifest. Cite artifact ids.
+  Verdicts are conforms / violates.
+
+  1. Classify verifier-a through verifier-d against K1..K9.
+  2. For every violation, cite the first R1..R7 request and exact error/result or leaked behavior.
+  3. Identify the unique conforming verifier and trace R2 from syntax checks through comparison.
+  4. State the exact transformation from verifier bytes to challenge characters.
+  5. Explain why stripping '=' after ordinary base64 is insufficient.
+  6. Evaluate reviewer Lia's proposal to retain plain for confidential clients.
+artifacts:
+  - id: pkce-profile
+    type: spec
+    label: Complete authorization-server PKCE profile
+    content: |
+      Stored transaction fields are {challenge:string, method:'S256', clientId:string, used:boolean}.
+      Presented fields are transactionId and code_verifier.
+
+      K1 authenticate the client and load its own transaction before inspecting verifier; a missing,
+         foreign, or used transaction returns InvalidGrant with no hash work.
+      K2 this deployment accepts only method S256 for every client; any other stored method is
+         InvalidGrant. There is no plain compatibility mode.
+      K3 code_verifier length is 43..128 ASCII characters.
+      K4 every verifier character is ALPHA / DIGIT / '-' / '.' / '_' / '~'; Unicode lookalikes,
+         whitespace, '=' and percent-encoding are invalid.
+      K5 challenge = BASE64URL-NO-PAD(SHA256(ASCII(code_verifier))). SHA-256 bytes are encoded
+         directly, not their hexadecimal text.
+      K6 valid stored challenge is exactly 43 unpadded base64url characters using A-Z a-z 0-9 - _.
+      K7 compare 32 decoded challenge bytes with computed 32 hash bytes using constant-time equality.
+      K8 syntax/hash mismatch returns the same InvalidGrant response; no reason detail is exposed.
+      K9 only after a match, atomically mark the transaction used and issue the code; concurrent
+         matches yield one success and one InvalidGrant.
+  - id: crypto-api
+    type: spec
+    label: Frozen helpers and side effects
+    content: |
+      asciiBytes(s) returns bytes only after K3/K4 pass. sha256(bytes) returns 32 raw bytes.
+      base64urlNoPad(bytes) replaces '+'->'-', '/'->'_', and removes all trailing '='.
+      decodeBase64url43(s) strictly enforces K6 and returns 32 bytes or InvalidGrant.
+      timingSafeEqual(a,b) executes a fixed 32-byte comparison; it requires equal-length arrays.
+      store.consumeIfUnused(id,clientId) is one atomic compare-and-set. issueCode is called only when
+      it returns true. Error mapping is frozen to InvalidGrant.
+  - id: request-vectors
+    type: table
+    label: Authoritative PKCE witnesses
+    content: |
+      Let V be "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".
+      Its S256 challenge is "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".
+      R1 foreign transaction with V -> InvalidGrant before hashing.
+      R2 own unused S256 transaction with that challenge and V -> one issued code, then used=true.
+      R3 same as R2 but verifier ends '=' -> InvalidGrant.
+      R4 43 characters containing Unicode fullwidth Ａ -> InvalidGrant before ASCII conversion.
+      R5 stored challenge is ordinary base64 "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw+cM=" -> InvalidGrant.
+      R6 stored method plain with challenge=V -> InvalidGrant for every client type.
+      R7 two concurrent valid R2 requests -> exactly one issueCode call; other InvalidGrant.
+  - id: verifiers
+    type: code
+    label: Four complete verifier submissions
+    content: |
+      verifier-a:
+        authenticate/load own unused transaction; require method S256
+        validate verifier with /^[A-Za-z0-9._~-]{43,128}$/ using ASCII-length equality
+        expected = decodeBase64url43(stored challenge)
+        actual = sha256(asciiBytes(verifier)); timingSafeEqual(expected,actual)
+        on match consumeIfUnused then issue; every failure InvalidGrant
+
+      verifier-b:
+        same transaction and syntax flow
+        actualText = hex(sha256(asciiBytes(verifier)))
+        compare stored challenge === base64urlNoPad(asciiBytes(actualText)) with string equality
+
+      verifier-c:
+        same raw SHA-256 calculation as a
+        expected text = stored challenge.replace(/-/g,'+').replace(/_/g,'/').replace(/=+$/,'')
+        actual text = standardBase64(actual).replace(/=+$/,'')
+        compare strings with ===; consume atomically on match
+
+      verifier-d:
+        authenticate/load transaction; if method plain compare challenge===verifier
+        otherwise compute S256 exactly as a; comparisons use timingSafeEqual
+        consume atomically on match
+  - id: clause-map
+    type: table
+    label: Frozen candidate distinction map
+    content: |
+      verifier-a uses raw hash bytes, strict stored syntax, fixed-length compare, and atomic consume.
+      verifier-b hashes correctly but encodes 64 ASCII hex characters rather than 32 hash bytes.
+      verifier-c converts to ordinary base64 text but fails strict stored base64url syntax and uses a
+      variable-time string comparison.
+      verifier-d supports forbidden plain method, even though its S256 branch is otherwise exact.
+  - id: manifest
+    type: note
+    label: Complete security assumptions and review claim
+    content: |
+      verifier-a through verifier-d are complete. Authentication itself is correct in all. No logs
+      expose verifier values. Regex execution is bounded by 128 checked ASCII characters.
+
+      Lia's client-type exception is not in this deployment profile. K2 intentionally requires S256
+      uniformly; accepting plain is a downgrade and violates the public contract.
+tags: [generation, spec-conformance, oauth, pkce, cryptography]

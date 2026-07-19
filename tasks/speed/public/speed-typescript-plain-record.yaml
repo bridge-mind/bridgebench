@@ -1,0 +1,24 @@
+id: speed-typescript-plain-record
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: expert
+title: Implement a Cross-Realm Plain-Record Guard
+summary: Write a concise TypeScript type guard that accepts ordinary and null-prototype records while rejecting arrays, instances, and spoofed tags.
+prompt: |
+  Implement `isPlainRecord` exactly as [guard-contract]. Output only the function. Explain
+  nothing outside the code.
+artifacts:
+  - id: guard-contract
+    type: spec
+    label: Complete type-guard contract
+    content: |
+      Signature: `function isPlainRecord(value: unknown): value is Record<PropertyKey, unknown>`.
+      Accept non-null objects whose immediate prototype is either null or an object whose
+      own prototype is null and which owns a function-valued `constructor` named `Object`.
+      This admits ordinary objects from another realm without comparing against the local
+      `Object.prototype`. Reject arrays, Date, Map, class instances, functions, boxed
+      primitives, and objects that only spoof `Symbol.toStringTag`. Use prototype/own-property
+      inspection only; do not call a candidate constructor, stringify, mutate, use `any`,
+      or rely on `Object.prototype.toString`.
+tags: [typescript, type-guard, cross-realm, prototypes]

@@ -1,0 +1,79 @@
+id: constraint-ci-test-sharding
+version: 1.0.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Deterministic CI Test Sharding With Fixtures, Licenses, Isolation, and a Fifteen-Minute Deadline
+summary: Assign eight suites to three heterogeneous runners while reconciling exclusivity, fixture affinity, license capacity, architecture, and wall-clock constraints.
+prompt: |
+  Assign every suite exactly once to runners R1-R3. Suites on a runner execute sequentially in the
+  listed order you choose; runners run in parallel. Find the lexicographically smallest valid
+  assignment under [tie-break].
+
+  1. Give each runner's ordered suite list, duration, capabilities used, and total wall clock.
+  2. Show all fixture-affinity, architecture, license, isolation, and capacity constraints are met.
+  3. Prove no schedule can finish below the stated lower bound and whether the chosen schedule reaches
+     it.
+  4. Evaluate proposals P1-P4, naming the first violated constraint or confirming validity.
+  5. If R2 becomes unavailable, determine whether any valid <=15-minute schedule exists and prove the
+     answer.
+  6. Emit a deterministic JSON sharding manifest and four validation assertions suitable for CI.
+artifacts:
+  - id: suites
+    type: table
+    label: Complete suite catalog
+    content: |
+      suite | minutes | requirements
+      A     | 6       | x86, fixture-red
+      B     | 5       | any, fixture-red
+      C     | 7       | arm
+      D     | 4       | x86, license-db
+      E     | 3       | any, license-db
+      F     | 5       | any, isolated
+      G     | 2       | arm
+      H     | 4       | any
+  - id: runners
+    type: table
+    label: Runner capabilities
+    content: |
+      R1 | x86 | fixture-red | license-db | max 3 suites
+      R2 | x86 | fixture-red | no license | max 3 suites
+      R3 | arm | no fixture  | license-db | max 4 suites
+
+      `any` runs on either architecture. Total deadline is 15 minutes.
+  - id: constraints
+    type: spec
+    label: Exhaustive scheduling contract
+    content: |
+      A and B must run on the same fixture-red runner, A before B. C and G require R3. D and E each
+      require a license-db runner, but the single floating license means they may not overlap in wall
+      time across runners. F must be the only suite on its runner while it executes; since suites on a
+      runner are sequential, other suites may occur before or after F. Every runner starts at t=0 and
+      executes its assigned order without idle time unless delaying D or E is necessary for license.
+  - id: tie-break
+    type: spec
+    label: Optimization and deterministic ordering
+    content: |
+      Minimize makespan. Then compare assignments by the tuple of suite-name strings on R1, R2, R3,
+      each string formed by its execution order; choose lexicographically smallest tuple. Empty string
+      sorts first. Within an otherwise unconstrained runner, alphabetical order is required.
+  - id: proposals
+    type: config
+    label: Candidate schedules
+    content: |
+      P1 R1=[A,B,D], R2=[F,H], R3=[C,E,G]
+      P2 R1=[A,B], R2=[F,D], R3=[C,E,G,H]
+      P3 R1=[D,E,H], R2=[A,B,F], R3=[C,G]
+      P4 R1=[A,B,E], R2=[F,H], R3=[C,G,D]
+
+      Entries are execution order; absent suites make a proposal incomplete.
+  - id: scheduler-code
+    type: code
+    label: Manifest shape
+    content: |
+      type Manifest = {
+        deadlineMinutes: 15;
+        runners: Array<{ id: "R1"|"R2"|"R3"; suites: string[] }>;
+      };
+      // Validator recomputes requirements and timing; do not encode inferred capabilities.
+tags: [ci, scheduling, constraints, sharding, optimization]

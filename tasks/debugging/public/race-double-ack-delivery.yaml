@@ -1,0 +1,179 @@
+id: race-double-ack-delivery
+version: 1.1.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Webhook Delivery System Sends Duplicate Events Despite Claimed Exactly-Once Semantics
+summary: >-
+  A webhook delivery system sends duplicate events despite exactly-once guarantees — the same event
+  delivered twice to the same endpoint, seconds apart, by two different workers. A network retry,
+  customer idempotency, worker scaling, and replication lag all look guilty. Reconcile the worker
+  code, DB trace, and delivery logs to isolate the concurrency defect and pick the fix that holds.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (worker-code, delivery-log, db-trace,
+  worker-config, event-schema, idempotency-note, fixes). Cite the artifact id(s) for every claim.
+  Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  The webhook delivery system guarantees each event is delivered exactly once. Customer dashboards
+  show occasional duplicate deliveries — the same event_id delivered to the same endpoint twice,
+  seconds apart, by two different workers. Do not stop at the duplicate delivery; trace to the
+  concurrency defect that allows two workers to claim the same event.
+
+  1. THE DEFECT. Name the single concurrency bug and cite the exact artifact id and code location.
+     State precisely why two workers can claim the same event despite the status-based gating.
+  2. FAILING SCHEDULE. From db-trace, construct the concrete interleaving by which Worker A and
+     Worker B both come to deliver event evt-5501. Cite the timestamps that establish the ordering
+     of each worker's read and claim operations and that both workers proceed to deliver.
+  3. SYMPTOM-TO-CAUSE CHAIN. From delivery-log, cite the lines showing the same event delivered
+     twice by different workers. Connect the duplicate delivery to the claim race in db-trace, and
+     explain why the second delivery was NOT a network-level retry (cite the distinct worker IDs
+     and the gap between delivery timestamps).
+  4. RED HERRING: NETWORK RETRY. Explain why the duplicate is NOT caused by an HTTP timeout or
+     network retry, citing delivery-log and worker-code. State the observable differences between
+     a retry-caused duplicate and the claim-race duplicate seen here.
+  5. RED HERRING: CUSTOMER IDEMPOTENCY KEY. Explain why the customer's idempotency key does not
+     prevent this duplicate, citing idempotency-note. State at which layer the idempotency key
+     operates and why it cannot prevent the server from sending two requests.
+  6. RED HERRING: WORKER SCALING / DB REPLICATION LAG. Explain why "adding more workers" and
+     "replication lag" are not the root cause, citing worker-config and db-trace. State why the
+     defect exists at any concurrency level above one and why the trace shows a single-primary
+     database with no replica lag.
+  7. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression,
+     and state the invariant it enforces between the claim SELECT and the status UPDATE.
+  8. SHALLOW/HARMFUL FIXES. For each of the other three options in fixes, state why it is shallow
+     or harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: worker-code
+    type: code
+    label: webhook-worker/deliver.ts — the claim-deliver-ack loop (complete delivery path)
+    content: |
+      // This is the COMPLETE delivery path. There is no other process, cron job, or background task
+      // that reads or writes webhook_events. Only this worker code claims and delivers events.
+      // Multiple worker instances run this same code concurrently (see worker-config).
+
+      async function pollAndDeliver(workerId: string) {
+        // STEP 1: read pending events
+        const pending = await db.query(
+          `SELECT id, payload, endpoint_url FROM webhook_events WHERE status = 'pending' ORDER BY created_at LIMIT 10`
+        );
+
+        // STEP 2: claim them
+        for (const event of pending) {
+          await db.query(
+            `UPDATE webhook_events SET status = 'claimed', worker_id = $1, claimed_at = NOW() WHERE id = $2`,
+            [workerId, event.id]
+          );
+        }
+
+        // STEP 3: deliver
+        for (const event of pending) {
+          const response = await httpClient.post(event.endpoint_url, { body: event.payload });
+          await db.query(
+            `UPDATE webhook_events SET status = 'delivered', delivered_at = NOW() WHERE id = $1`,
+            [event.id]
+          );
+        }
+      }
+      // Each worker calls pollAndDeliver() on a 500ms interval (see worker-config).
+  - id: delivery-log
+    type: log
+    label: webhook delivery log showing duplicate delivery of evt-5501
+    content: |
+      # Two workers deliver the same event within 1.2 seconds:
+      14:00:01.100  worker-A  evt-5501  CLAIMED   (worker_id=worker-A)
+      14:00:01.150  worker-B  evt-5501  CLAIMED   (worker_id=worker-B)
+      14:00:01.200  worker-A  evt-5501  DELIVERING to https://acme.co/webhooks
+      14:00:01.350  worker-A  evt-5501  DELIVERED  HTTP 200 (150ms)
+      14:00:01.400  worker-B  evt-5501  DELIVERING to https://acme.co/webhooks
+      14:00:01.550  worker-B  evt-5501  DELIVERED  HTTP 200 (150ms)
+  - id: db-trace
+    type: log
+    label: database query trace for evt-5501 showing the claim race interleaving
+    content: |
+      # Database: single-primary PostgreSQL, no read replicas. All queries hit the same primary.
+      # Transaction isolation: READ COMMITTED (default). Autocommit mode (no explicit transaction).
+
+      14:00:00.900  worker-A  SELECT id, payload, endpoint_url FROM webhook_events WHERE status='pending' LIMIT 10
+                     -> returns [evt-5501, evt-5502, evt-5503]  (evt-5501 status='pending')
+      14:00:00.950  worker-B  SELECT id, payload, endpoint_url FROM webhook_events WHERE status='pending' LIMIT 10
+                     -> returns [evt-5501, evt-5502, evt-5503]  (evt-5501 status='pending')
+
+      14:00:01.100  worker-A  UPDATE webhook_events SET status='claimed', worker_id='worker-A' WHERE id='evt-5501'
+                     -> 1 row affected (status changes 'pending' -> 'claimed', worker_id='worker-A')
+      14:00:01.150  worker-B  UPDATE webhook_events SET status='claimed', worker_id='worker-B' WHERE id='evt-5501'
+                     -> 1 row affected (status changes 'claimed' -> 'claimed', worker_id='worker-B')
+
+      14:00:01.200  worker-A  delivers evt-5501 (reads payload from its in-memory copy from STEP 1)
+      14:00:01.400  worker-B  delivers evt-5501 (reads payload from its in-memory copy from STEP 1)
+  - id: worker-config
+    type: config
+    label: webhook worker pool configuration (complete)
+    content: |
+      workers:
+        instanceCount: 4                  # 4 worker processes poll concurrently
+        pollIntervalMs: 500               # each worker polls every 500ms
+        batchSize: 10                     # each poll claims up to 10 events
+        deliveryTimeoutMs: 5000           # HTTP delivery timeout per event
+        retryOnHttpFailure: false         # NO automatic retry on delivery failure (failed events go to DLQ)
+      database:
+        connectionPool: 20
+        replicaMode: none                 # single-primary, no read replicas — all queries hit one server
+  - id: event-schema
+    type: code
+    label: webhook_events table schema (complete — no other tables participate in delivery)
+    content: |
+      CREATE TABLE webhook_events (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        payload       JSONB NOT NULL,
+        endpoint_url  TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending',    -- pending | claimed | delivered | failed
+        worker_id     TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        claimed_at    TIMESTAMPTZ,
+        delivered_at  TIMESTAMPTZ,
+        idempotency_key UUID NOT NULL DEFAULT gen_random_uuid()   -- sent in the X-Idempotency-Key header
+      );
+      CREATE INDEX idx_webhook_events_status ON webhook_events(status) WHERE status = 'pending';
+      -- The partial index on status='pending' speeds up the worker's SELECT.
+      -- The DDL above is the complete schema for this table.
+  - id: idempotency-note
+    type: note
+    label: customer-side idempotency key behavior
+    content: |
+      Each webhook event carries an idempotency_key (UUID, generated at event creation time) in the
+      X-Idempotency-Key HTTP header. This key is IDENTICAL in both deliveries (same event = same key).
+
+      Idempotency handling:
+        - The key is generated ONCE when the event is created (event-schema: DEFAULT gen_random_uuid()).
+        - Both worker-A and worker-B send the SAME key in their POST to the customer endpoint.
+        - Whether the customer deduplicates on this key is entirely up to the customer's server.
+        - acme.co's webhook handler does NOT deduplicate on idempotency key (their support confirmed).
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Replace the two-step SELECT-then-UPDATE with an atomic claim query:
+            UPDATE webhook_events SET status='claimed', worker_id=$1, claimed_at=NOW()
+            WHERE id IN (SELECT id FROM webhook_events WHERE status='pending'
+                         ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED)
+            RETURNING id, payload, endpoint_url;
+
+      F2: Add a unique partial index: CREATE UNIQUE INDEX ON webhook_events(id) WHERE status='claimed'.
+          Two workers claiming the same event would cause a unique-constraint violation on the second
+          UPDATE, which the worker catches and skips.
+
+      F3: Reduce instanceCount from 4 to 1 so only one worker polls at a time, eliminating concurrency.
+
+      F4: Add a deduplication check before delivery: before POSTing, each worker re-reads the event
+          and checks whether worker_id still matches its own ID.
+
+      Constraints:
+        - The system must handle 500+ events/second; single-worker throughput maxes out at ~200/s
+          (deliveryTimeoutMs=5000, batchSize=10 -> 20 events/s per worker; 4 workers -> ~80/s current,
+          needs scaling headroom).
+        - The fix must not introduce delivery gaps (events stuck in 'pending' indefinitely) or
+          require customer-side changes.
+        - FOR UPDATE SKIP LOCKED is supported on PostgreSQL 9.5+ (the database is PostgreSQL 15).
+tags: [debugging, concurrency-defect, race-condition, webhook, duplicate-delivery, claim-pattern]

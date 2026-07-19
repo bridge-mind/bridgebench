@@ -1,0 +1,77 @@
+id: crossed-etag-collation
+version: 1.0.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The Database Collation of an HTTP Entity Tag
+summary: A cache review asks valid HTTP and SQL questions alongside category errors that assign database and TLS properties to values outside those domains.
+prompt: |
+  Audit the six requests against the exhaustive property domains in `platform-contract`.
+  For each category error, name the two object kinds being conflated, cite the controlling
+  definition, restate the nearest legitimate question, and answer it from the artifacts.
+  Answer coherent requests directly with calculations where required.
+
+  1. Determine the exact ETag returned for product version 42.
+  2. Report the PostgreSQL collation used by that ETag during `If-None-Match` comparison.
+  3. Determine whether the shown request returns 200 or 304 and why.
+  4. Report the TLS key-exchange group negotiated by the `products_version_idx` B-tree.
+  5. Identify the index and SQL collation used for the repository lookup.
+  6. Compute the number of origin bytes avoided across 8,000 matching conditional
+     requests when each 200 body is 1,536 bytes and a 304 has no body.
+artifacts:
+  - id: platform-contract
+    type: spec
+    label: Complete HTTP, database, and transport property domains
+    content: |
+      This contract is exhaustive for the service.
+
+      HTTP entity-tag: an opaque quoted validator emitted in a response. Properties:
+      value, weakness (strong/weak). If-None-Match comparison for GET uses the HTTP weak
+      comparison algorithm over opaque tags. It has no SQL collation, index, cipher, or
+      key-exchange property.
+
+      PostgreSQL text column: stored database value. Properties: data type, collation,
+      nullability. A B-tree index has table, columns, ordering, predicate, and access
+      method. Neither a column nor index negotiates TLS.
+
+      TLS connection: transport session. Properties include protocol, cipher suite, and
+      key-exchange group. Those properties belong to the client/server connection only.
+  - id: application-code
+    type: code
+    label: Product endpoint and repository query
+    content: |
+      app.get("/products/:id", async (req, res) => {
+        const product = await repo.find(req.params.id);
+        const etag = `"product-${product.version}"`;
+        res.set("ETag", etag);
+        if (req.headers["if-none-match"] === etag) return res.status(304).end();
+        return res.status(200).json(product);
+      });
+
+      // repo.find SQL (parameterized):
+      SELECT id, name, version FROM products WHERE id = $1;
+  - id: catalog-and-request
+    type: table
+    label: Database catalog and captured conditional request
+    content: |
+      Database objects (complete):
+      - products.id: text COLLATE "C", NOT NULL
+      - products.version: bigint, NOT NULL
+      - products_pkey: btree(products.id ASC), access method btree
+      - products_version_idx: btree(products.version ASC), access method btree
+
+      Captured request:
+      GET /products/p-7 HTTP/1.1
+      If-None-Match: "product-42"
+
+      Repository row: id=p-7, name=Anvil, version=42
+      TLS session: TLS 1.3, TLS_AES_256_GCM_SHA384, group X25519
+  - id: cache-sample
+    type: log
+    label: One-minute cache sample
+    content: |
+      conditional GETs with If-None-Match "product-42": 8,000
+      matching current version: 8,000
+      response body bytes for product p-7 when status is 200: 1,536
+      response body bytes when status is 304: 0
+tags: [crossed-domains, http-caching, etag, postgresql, tls]

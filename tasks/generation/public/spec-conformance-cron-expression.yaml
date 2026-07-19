@@ -1,0 +1,355 @@
+id: spec-conformance-cron-expression
+version: 1.1.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: validateCron — Which Cron Expression Parser Submissions Conform
+summary: A cron expression parser spec defines exactly five fields, inclusive range boundaries, support for lists, ranges, steps, and a strict evaluation order of error tokens. Six candidate submissions are under review. Classify all six against the clauses, identifying the specific clause any non-conformer violates and the input that exposes it.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (cron-spec, test-vectors, candidates-a,
+  candidates-b, reviewer-thread, submission-manifest). Cite the artifact id(s) for every claim. Do not
+  add requirements the spec omits and do not ignore one it states. The verdict vocabulary is exactly:
+  conforms / violates.
+
+  cron-spec fixes clauses P1..P7 (five fields, field ranges, range order, step rules, exact evaluation
+  ORDER, and exact reason tokens) and is the complete contract. submission-manifest declares
+  candidate-1..candidate-6 the entire set. Each candidate returns
+  { ok: true } or { ok: false, reason: <token> }.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates` against cron-spec.
+
+  2. For every candidate you mark `violates`, name the single clause (one of P1..P7) it breaks and
+     give one concrete cron expression on which its returned object differs from the spec-correct object.
+     State both full returned objects.
+
+  3. Identify which candidates, if any, `conform`, and state the object a conforming
+     implementation returns for the input "*/15 2 31 12 6" (a valid v3 cron expression).
+
+  4. In reviewer-thread, reviewer @marcus argues candidate-2 conforms because "it handles all basic
+     validation and returns standard error tokens." State candidate-2's verdict and cite the one clause
+     and a specific cron expression that refutes @marcus (state both returned objects).
+
+  5. For the cron expression "1 5-2 3 4 5", exactly one candidate fails to return { ok: false, reason: "invalid_range" }.
+     Identify that candidate, state what it returns, and the clause it breaks.
+artifacts:
+  - id: cron-spec
+    type: spec
+    label: validateCron specification (frozen, complete)
+    content: |
+      validateCron(expr: string): { ok: true } | { ok: false, reason: string }
+
+      Evaluates a cron expression string against five fields in a fixed evaluation order. The clauses
+      below are the complete contract.
+
+      P1  FIELD COUNT. The expression must consist of exactly 5 fields separated by a single space.
+          Multiple consecutive spaces, or a count other than 5, returns reason "invalid_field_count".
+
+      P2  CHARACTER SET / SYNTAX. Each field can only contain digits (0-9), asterisk (*), hyphen (-),
+          slash (/), and comma (,). Any other character returns reason "invalid_syntax".
+
+      P3  FIELD BOUNDS. The fields correspond to: Minute, Hour, Day of Month, Month, Day of Week.
+          Each numeric value must fall within its respective inclusive bounds:
+            - Minute: 0..59
+            - Hour: 0..23
+            - Day of Month: 1..31
+            - Month: 1..12
+            - Day of Week: 0..6 (0 is Sunday, 6 is Saturday)
+          Any value outside its field's bounds returns "value_out_of_range".
+
+      P4  RANGES. Ranges of the form "start-end" must have start <= end. If start > end (e.g. "5-2"),
+          the reason returned is "invalid_range".
+
+      P5  STEPS. Steps of the form "X/step" must have step >= 1. If step is <= 0 or not a positive integer,
+          the reason returned is "invalid_step".
+
+      P6  EVALUATION ORDER. The checks are applied in exactly this order and the FIRST failing check
+          determines the returned reason:
+            1) P1 field count   2) P2 character set   3) P3 field bounds
+            4) P4 ranges        5) P5 steps
+          An expression that fails several checks returns the reason of the earliest one in THIS order.
+
+      P7  RESULT SHAPE. On success, return exactly { ok: true } with no other fields. On failure,
+          return exactly { ok: false, reason: <token> } where <token> is one of:
+          "invalid_field_count", "invalid_syntax", "value_out_of_range", "invalid_range", "invalid_step".
+          No other property name, casing, spelling, or pluralization is permitted.
+  - id: test-vectors
+    type: table
+    label: authoritative input/output vectors (spec-correct)
+    content: |
+      Authoritative outputs computed from cron-spec. A conforming implementation reproduces every
+      row exactly. (Objects shown as JSON.)
+
+      #  input                     expected output
+      -- ------------------------- ---------------------------------------------
+      1  "1 2 3 4 5"               { "ok": true }
+      2  "1 2 3 4"                 { "ok": false, "reason": "invalid_field_count" }
+      3  "1  2 3 4 5"              { "ok": false, "reason": "invalid_field_count" }
+      4  "1 2a 3 4 5"              { "ok": false, "reason": "invalid_syntax" }
+      5  "60 2 3 4 5"              { "ok": false, "reason": "value_out_of_range" }
+      6  "1 2-5 3 4 7"             { "ok": false, "reason": "value_out_of_range" }
+      7  "1 5-2 3 4 5"             { "ok": false, "reason": "invalid_range" }
+      8  "1 2 3 4 */0"             { "ok": false, "reason": "invalid_step" }
+
+      Ordering notes (per P6):
+        - Input 3 fails P1 because of double spaces, which is checked first.
+        - "1 5-2 3 4 7" fails both P3 (Day of Week is 7, out of bounds) and P4 (Hour range 5-2 is invalid).
+          Per the P6 order, field bounds (position 3) precedes range order (position 4), so the
+          reason is "value_out_of_range", not "invalid_range".
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function validateCron1(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, reason: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, reason: 'invalid_syntax' };
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, reason: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const ranges = f.match(/(\d+)-(\d+)/g) || [];
+          for (const r of ranges) {
+            const [start, end] = r.split('-').map(Number);
+            if (start > end) return { ok: false, reason: 'invalid_range' };
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const steps = f.match(/\/(\d+)/g) || [];
+          for (const s of steps) {
+            const stepVal = parseInt(s.slice(1), 10);
+            if (stepVal <= 0) return { ok: false, reason: 'invalid_step' };
+          }
+        }
+        return { ok: true };
+      }
+
+      // ---- candidate-2 ----
+      function validateCron2(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, reason: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, reason: 'invalid_syntax' };
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, reason: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const ranges = f.match(/(\d+)-(\d+)/g) || [];
+          for (const r of ranges) {
+            const [start, end] = r.split('-').map(Number);
+            if (start > end) return { ok: false, reason: 'invalid_range' };
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const steps = f.match(/\/(\d+)/g) || [];
+          for (const s of steps) {
+            const stepVal = parseInt(s.slice(1), 10);
+            if (stepVal <= 0) return { ok: false, reason: 'invalid_step' };
+          }
+        }
+        return { ok: true };
+      }
+
+      // ---- candidate-3 ----
+      function validateCron3(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, reason: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, reason: 'invalid_syntax' };
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, reason: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const steps = f.match(/\/(\d+)/g) || [];
+          for (const s of steps) {
+            const stepVal = parseInt(s.slice(1), 10);
+            if (stepVal <= 0) return { ok: false, reason: 'invalid_step' };
+          }
+        }
+        return { ok: true };
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function validateCron4(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, reason: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, reason: 'invalid_syntax' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const ranges = f.match(/(\d+)-(\d+)/g) || [];
+          for (const r of ranges) {
+            const [start, end] = r.split('-').map(Number);
+            if (start > end) return { ok: false, reason: 'invalid_range' };
+          }
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, reason: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const steps = f.match(/\/(\d+)/g) || [];
+          for (const s of steps) {
+            const stepVal = parseInt(s.slice(1), 10);
+            if (stepVal <= 0) return { ok: false, reason: 'invalid_step' };
+          }
+        }
+        return { ok: true };
+      }
+
+      // ---- candidate-5 ----
+      function validateCron5(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, reason: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, reason: 'invalid_syntax' };
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, reason: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const ranges = f.match(/(\d+)-(\d+)/g) || [];
+          for (const r of ranges) {
+            const [start, end] = r.split('-').map(Number);
+            if (start > end) return { ok: false, reason: 'invalid_range' };
+          }
+        }
+        return { ok: true };
+      }
+
+      // ---- candidate-6 ----
+      function validateCron6(expr) {
+        const fields = expr.split(' ');
+        if (fields.length !== 5 || fields.includes('')) {
+          return { ok: false, error: 'invalid_field_count' };
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          if (!/^[0-9*/,-]+$/.test(f)) return { ok: false, error: 'invalid_syntax' };
+        }
+        const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const numbers = f.match(/\d+/g) || [];
+          for (const num of numbers) {
+            const val = parseInt(num, 10);
+            if (val < bounds[i][0] || val > bounds[i][1]) {
+              return { ok: false, error: 'value_out_of_range' };
+            }
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const ranges = f.match(/(\d+)-(\d+)/g) || [];
+          for (const r of ranges) {
+            const [start, end] = r.split('-').map(Number);
+            if (start > end) return { ok: false, error: 'invalid_range' };
+          }
+        }
+        for (let i = 0; i < 5; i++) {
+          const f = fields[i];
+          const steps = f.match(/\/(\d+)/g) || [];
+          for (const s of steps) {
+            const stepVal = parseInt(s.slice(1), 10);
+            if (stepVal <= 0) return { ok: false, error: 'invalid_step' };
+          }
+        }
+        return { ok: true };
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the six submissions
+    content: |
+      Review thread for validateCron (PR #1024).
+
+      @marcus: "candidate-2 handles all basic validation correctly and only ever returns standard
+      reasons. It passes our testing criteria and should be approved."
+
+      @isabella: "Be careful. One of the candidates permits the day-of-week field to be 7, which goes
+      against P3 since the standard cron day-of-week range is 0..6 (Sunday to Saturday). We must test
+      with a dayOfWeek value of 7."
+
+      @dan: "We also have a candidate that doesn't respect the evaluation order in P6, returning
+      invalid_range when it should be returning value_out_of_range. A multi-failure test case will
+      expose this."
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for validateCron: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
+      being considered.
+
+      Acceptance rule: submissions are evaluated against cron-spec on every input (a submission
+      must reproduce all test-vectors and obey P1..P7 generally); conforming submissions are
+      accepted.
+tags: [generation, spec-conformance, cron, parsing, code-review]

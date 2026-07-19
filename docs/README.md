@@ -12,8 +12,17 @@ Choose the path that matches what you are trying to verify or change.
    journal transition.
 4. [Private packs](private-packs.md) — understand hidden references,
    contamination controls, retirement, and the external trust boundary.
+5. [Judge improvement plan](judge-improvement-plan.md) — proposed panel,
+   calibration, and verdict-contract work grounded in production vote audits.
 
 Use the [glossary](glossary.md) whenever a contract term is unfamiliar.
+
+## UI Bench
+
+- [UI Bench](ui-bench.md) — the browser-scored Three.js creative-rendering
+  benchmark, kept separate from arena Elo: qualification vs. probes, how to
+  run and evaluate the restored lava lamp task, and what's still on the
+  `season-engine-alpha` branch.
 
 ## Contribute
 

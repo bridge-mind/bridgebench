@@ -1,5 +1,5 @@
 id: counterexample-authorization-rule
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: formal-counterexample
 difficulty: expert
@@ -184,7 +184,7 @@ artifacts:
       the attribute is unread on that row's code path.
 
       No fixture sets an administrator together with legalHold=T. That combination is uncovered by
-      the suite, which is why the suite stays green despite the behavior in question.
+      the suite.
 
       #  | isAdmin | role   | clr | cls | owner | locked | hold | net    | mfa | policy
       1  | T       | -      |  -  |  -  |  -    | F      | F    | corp   |  T  | ALLOW
@@ -227,8 +227,6 @@ artifacts:
         - Rows E and F both involve locked resources but differ in outcome. An analyst flagged this
           as "inconsistent locking." Check whether it actually contradicts the policy.
         - Row J denies a guest with the highest clearance. An analyst called this "a clearance bug."
-        - Rows D and I both set legalHold=T on an administrator and returned ALLOW. No analyst
-          flagged these, because the reviewers assumed the admin path was trivially correct.
   - id: reviewer-notes
     type: note
     label: Review thread and objections

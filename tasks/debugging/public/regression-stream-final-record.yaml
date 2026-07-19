@@ -1,0 +1,128 @@
+id: regression-stream-final-record
+version: 1.0.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: CSV Import Refactor Drops the Final Record When the File Has No Trailing Newline
+summary: >-
+  A streaming CSV importer began silently omitting one row only for files that end immediately after
+  the last field. Five ordered commits changed buffering, metrics, validation, batch size, and shutdown.
+  Use per-commit tests and a byte-level trace to identify the introducing change rather than the commit
+  where monitoring first made the loss visible.
+prompt: |
+  Diagnose the fictional RosterRail regression using ONLY the supplied artifacts. Cite artifact ids for
+  each claim. Use regression-introducing, red-herring, adequate-fix, and shallow-fix.
+
+  1. Identify the single commit that introduced the dropped-record behavior and cite the precise removed
+     operation or branch.
+  2. Trace fixture N through every chunk and parser state, showing where the complete final record exists
+     and why it is never emitted.
+  3. Explain why fixture T still passes and why chunk boundaries are not themselves the defect.
+  4. Classify c1 through c5. Distinguish the introducing commit from changes that expose, observe, or are
+     chronologically near the failure.
+  5. Choose the adequate fix from fixes. Explain why the other candidates either corrupt quoted newlines,
+     duplicate a record, or merely mask the count discrepancy.
+  6. Give a regression matrix covering trailing/no-trailing newline, empty input, quoted embedded newline,
+     CRLF split across chunks, and an exact batch boundary.
+
+  The commit list and parser entry points are exhaustive; exactly one commit introduces the regression.
+artifacts:
+  - id: parser-contract
+    type: spec
+    label: authoritative streaming parser contract
+    content: |
+      - RFC4180-style quoted fields may contain commas and CRLF; doubled quotes escape a quote.
+      - A record ends at an unquoted LF. CRLF is normalized as one record delimiter.
+      - EOF also terminates a non-empty, syntactically complete final record even without LF.
+      - Empty input yields zero records. A trailing record delimiter does not create an empty record.
+      - `parser.push(chunk)` may retain bytes and quote state. `parser.finish()` must validate EOF, emit
+        exactly one retained complete final record if present, then clear state.
+      This is the complete format and lifecycle contract.
+  - id: current-code
+    type: code
+    label: importer/stream.ts at HEAD
+    content: |
+      export async function importCsv(source: AsyncIterable<Buffer>) {
+        const parser = new CsvParser();
+        const batch: Row[] = [];
+        for await (const chunk of source) {
+          for (const row of parser.push(chunk)) {
+            batch.push(row);
+            if (batch.length === 500) await flush(batch.splice(0));
+          }
+        }
+        // source ended successfully
+        for (const row of parser.finish()) batch.push(row);
+        if (batch.length) await flush(batch);
+      }
+
+      class CsvParser {
+        push(chunk) { /* scans bytes; emits only records ending in an unquoted LF */ }
+        finish() {
+          if (this.inQuotes) throw new CsvSyntaxError('unterminated quoted field');
+          return []; // HEAD behavior
+        }
+      }
+      // push and finish are the only emission paths. flush persists every row it receives exactly once.
+  - id: commit-history
+    type: diff
+    label: ordered commits c1..c5 between last-good and HEAD
+    content: |
+      c1  perf: reuse scan buffer
+          Replaced Buffer.concat-per-byte with one growable buffer. Golden byte-for-byte parser tests pass.
+
+      c2  refactor: make EOF validation explicit
+          finish():
+            if (this.inQuotes) throw CsvSyntaxError
+          - if (this.buffer.length > 0) return [parseRecord(this.buffer)]
+          - return []
+          + return []
+          Commit message claimed callers always append LF. No caller or input contract changed.
+
+      c3  metrics: publish accepted_row_count
+          Added a counter increment inside flush(rows). No parser or batch mutations.
+
+      c4  tune: batch size 250 -> 500
+          Changed only the equality threshold and documented memory savings.
+
+      c5  cleanup: await final database flush on shutdown
+          Added `await` to the existing final flush call. No parser-state change.
+      This is the complete ordered commit range; commits applied c1, c2, c3, c4, c5.
+  - id: fixtures-and-results
+    type: table
+    label: deterministic bisect matrix
+    content: |
+      fixture  bytes                       expected  c1   c2   c3   c4   c5/HEAD
+      T        "1,A\n2,B\n3,C\n"            3         3    3    3    3    3
+      N        "1,A\n2,B\n3,C"              3         3    2    2    2    2
+      Q        "1,\"A\nB\"\n2,C"           2         2    1    1    1    1
+      E        ""                          0         0    0    0    0    0
+      c1 is based on parent behavior plus c1. Each later column includes all preceding commits.
+  - id: byte-trace
+    type: log
+    label: fixture N delivered in three chunks at HEAD
+    content: |
+      chunk[0] bytes="1,A\n2"       push emits [row(1,A)]; retains bytes "2"; inQuotes=false
+      chunk[1] bytes=",B\n3,"       push emits [row(2,B)]; retains bytes "3,"; inQuotes=false
+      chunk[2] bytes="C"            push emits []; retains bytes "3,C"; inQuotes=false
+      EOF                             finish sees inQuotes=false; returns []; buffer "3,C" discarded
+      flush receives [row(1,A), row(2,B)]
+      Control with a final LF: chunk[2]="C\n" makes push emit row(3,C), leaves empty buffer, finish returns [].
+  - id: incident-note
+    type: note
+    label: report chronology and attractive suspicions
+    content: |
+      Customer report arrived after c3 exposed `accepted_row_count = manifest_count - 1`. Operations first
+      blamed c3 because the alert was new, then c4 because most customer files exceed 500 rows. Database
+      audit shows flush wrote every row it received; no conflict, rollback, or rejected row occurred.
+      The upstream object checksum matches the exact no-trailing-newline input.
+  - id: fixes
+    type: note
+    label: candidate fixes
+    content: |
+      F1: Restore EOF handling inside finish(): after quote validation, if the retained buffer is non-empty,
+          parse and emit it once, clear it, then return; otherwise return empty.
+      F2: Append LF to every chunk before parser.push(chunk).
+      F3: After import completes, duplicate the last row if accepted_row_count differs by one.
+      F4: Change the dashboard to subtract one from manifest_count for files without a trailing LF.
+tags: [debugging, regression-introduction, csv, streaming, eof]

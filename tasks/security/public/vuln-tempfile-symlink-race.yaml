@@ -1,0 +1,105 @@
+id: vuln-tempfile-symlink-race
+version: 1.0.0
+category: security
+cluster: vuln-discovery
+difficulty: expert
+title: Predictable Shared-Runner Temp Path Is Reopened After Validation
+summary: >-
+  A Go document worker derives a temporary output path from a public job id, checks that it does not
+  exist, invokes a sandboxed renderer, then reopens the path as a privileged uploader identity. Analyze a
+  controlled symlink replacement interleaving, distinguish it from shell and path-traversal false alarms,
+  and design descriptor-safe handoff between differently privileged processes.
+prompt: |
+  Audit the fictional PaperMill worker using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use vulnerable and not-a-vulnerability. Do not provide race automation or destructive steps.
+
+  1. Reconstruct the trust boundary among API, queue, renderer uid, uploader uid, shared /work, and object
+     storage. Enumerate every pathname check/open and which principal performs it.
+  2. Trace schedule T0 through T8 and identify the first operation that violates the intended file-identity
+     invariant. State which file's bytes are read and where they are uploaded.
+  3. Classify findings F1 through F6, separating the symlink/TOCTOU chain from job-id traversal, command
+     injection, broad object-store IAM, ordinary temporary-file cleanup, and log exposure.
+  4. State attacker preconditions and bound confidentiality/integrity impact using mount and IAM facts.
+     Explain why Lstat-before-use and renderer sandboxing do not protect the later uploader open.
+  5. Evaluate fixes P1 through P4. Define a safe descriptor-passing or trusted-directory invariant across
+     uid boundaries, including no-follow, ownership, regular-file, link-count, and cleanup checks.
+  6. Give deterministic race tests for preexisting symlink, replacement after validation, replacement after
+     renderer close, hardlink attempt, normal render, renderer crash, duplicate job delivery, and cleanup.
+
+  The shared-host attacker is an authorized test tenant; no host-root compromise is assumed.
+artifacts:
+  - id: worker-code
+    type: code
+    label: Go worker path lifecycle
+    content: |
+      func Process(job Job) error {
+        if !uuidRE.MatchString(job.ID) { return ErrBadJob }
+        path := filepath.Join("/work/render", job.ID+".pdf")
+        if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) { return ErrCollision }
+
+        cmd := exec.Command("/usr/local/bin/render", "--job", job.ID, "--output", path)
+        cmd.SysProcAttr = credential(rendererUID)
+        if err := cmd.Run(); err != nil { return err }
+
+        f, err := os.Open(path) // worker/uploader uid; follows a final symlink
+        if err != nil { return err }
+        defer f.Close()
+        return bucket.Put("jobs/"+job.TenantID+"/"+job.ID+".pdf", f)
+      }
+      exec.Command uses an argument vector, not a shell. bucket.Put streams bytes from the opened descriptor.
+  - id: identity-and-mounts
+    type: config
+    label: shared runner principals and filesystem boundary
+    content: |
+      /work/render is mode 1777 on a shared persistent volume. renderer uid 2100 and uploader uid 2200 can
+      create/delete their own entries; sticky-bit rules apply. A tenant-controlled preview container also
+      runs uid 2100, so it can replace files owned by renderer uid. /work/render and /srv/papermill are on
+      the same host. uploader uid 2200 may read /srv/papermill/customer-cache.db but renderer uid cannot.
+      Kernel protected_symlinks is disabled on this legacy runner. Neither uid is root.
+  - id: object-policy
+    type: spec
+    label: queue and storage contracts
+    content: |
+      API creates UUID job.id and server-derived tenantId after authentication; clients can observe their
+      own job id but cannot choose either value. Queue messages are signed and validated. Worker IAM can
+      PutObject only under jobs/{job.TenantID}/ and cannot read or list the bucket. The uploaded PDF must be
+      the exact regular file created for this render, not another path resolved later.
+  - id: controlled-schedule
+    type: log
+    label: deterministic same-host race schedule
+    content: |
+      T0 tenant observes own queued UUID J-7
+      T1 worker Lstat /work/render/J-7.pdf -> ENOENT
+      T2 renderer uid creates regular /work/render/J-7.pdf and writes harmless PDF
+      T3 renderer closes file and exits 0
+      T4 preview container, same uid 2100, unlinks its uid-owned J-7.pdf
+      T5 preview creates symlink J-7.pdf -> /srv/papermill/customer-cache.db
+      T6 uploader uid os.Open(path) follows symlink -> descriptor for customer-cache.db
+      T7 preview unlinks symlink; open descriptor remains valid
+      T8 bucket.Put uploads database bytes to jobs/attacker-tenant/J-7.pdf
+      The tenant can download objects under its own prefix through the normal API.
+  - id: finding-list
+    type: note
+    label: candidate findings F1 through F6
+    content: |
+      F1 job.ID permits dot-dot traversal into /srv because it is client controlled.
+      F2 exec.Command permits shell injection through job.ID.
+      F3 check-then-use and privileged reopen permit symlink substitution of the rendered file.
+      F4 bucket credentials expose every tenant because worker has GetObject.
+      F5 defer f.Close leaks the descriptor permanently.
+      F6 logs expose customer-cache bytes. Logs contain job id, tenant id, exit code, and byte count only.
+  - id: patch-candidates
+    type: diff
+    label: proposed fixes
+    content: |
+      P1: Lstat again after cmd.Run, reject ModeSymlink, then call os.Open(path). Replacement remains possible
+          between the second check and open.
+      P2: Randomize the filename but keep it in shared mode-1777 /work and communicate it by pathname.
+          Guessing is harder but identity still depends on a replaceable name and shared uid.
+      P3: Worker creates a mode-0700 per-job directory owned by an isolated uid, opens output with
+          O_CREAT|O_EXCL|O_NOFOLLOW mode 0600, passes the already-open descriptor to renderer, retains a
+          duplicate descriptor for upload, and after child exit validates fstat regular-file/owner/link-count,
+          fsyncs, and seeks to offset zero before streaming. Renderer never reopens a path; cleanup uses the
+          trusted parent descriptor after all handles close.
+      P4: Run uploader as root so sticky-bit and permission checks cannot block os.Open.
+tags: [security, vuln-discovery, go, tempfile, race-condition]

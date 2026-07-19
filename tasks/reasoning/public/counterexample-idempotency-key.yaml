@@ -1,0 +1,170 @@
+id: counterexample-idempotency-key
+version: 1.1.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Idempotency-Key Counterexample to the Single-Charge Invariant
+summary: >-
+  Find the unique minimal request schedule that lets two charges commit under one idempotency key,
+  trace the store state at every boundary, distinguish harmless retry schedules, and select the only
+  atomic claim predicate that restores the stated single-charge invariant.
+prompt: |
+  PayForge uses client idempotency keys to deduplicate charge creation. The team claims
+  [safety-property] always holds, but one candidate schedule violates it. Treat the idempotency
+  contract, database behavior, runtime timing, and candidate schedules as complete. This task is about
+  the final persisted charge rows; it does not ask whether webhooks are safe.
+
+  1. Counterexample selection. Identify the one schedule in [schedule-candidates] that violates the
+     stated safety property. State its final charge rows and the required final state under the
+     property.
+  2. Formal trace. For that schedule, trace every begin, fingerprint check, insert, commit, and
+     response in time order. Explain why the second charge is permitted by the deployed code even
+     though it reuses the idempotency key.
+  3. Minimality and boundary. Prove why two concurrent begins are necessary, why a retry after a
+     completed response cannot violate the property under the shipped fingerprint rule, and why the
+     matching-fingerprint replay in the harmless candidate is not a counterexample.
+  4. Claim review. Classify every assertion in [claims-note] as correct or incorrect using the exact
+     store and fingerprint semantics; do not generalize from an unstated lock model.
+  5. Patch verification. Select the only candidate in [patch-options] that restores [safety-property]
+     for every interleaving. Explain why each other candidate fails the property, and state the exact
+     regression-test assertion for the violating schedule after the correct patch.
+artifacts:
+  - id: safety-property
+    type: spec
+    label: Single-charge-per-idempotency-key invariant
+    content: |
+      For one (accountId, idempotencyKey) pair K, consider every charge row that reaches status
+      `committed` in a finite schedule.
+
+      SINGLE-CHARGE PROPERTY:
+        After every handler in a finite schedule has finished and no further writes occur, there MUST
+        be at most one committed charge row whose (accountId, idempotencyKey) equals K. If any
+        committed row exists for K, every successful HTTP response for K MUST return that same
+        chargeId and amount fingerprint.
+
+      A second in-flight begin may start, but it must never commit a second distinct chargeId for K.
+      This property concerns persisted committed rows and successful responses only.
+  - id: idempotency-store-contract
+    type: spec
+    label: Idempotency record and fingerprint semantics
+    content: |
+      begin(accountId, idempotencyKey, fingerprint, now):
+        - Looks up the current record for (accountId, idempotencyKey).
+        - If a record exists with status=`committed` and the same fingerprint, return
+          {kind:"replay", chargeId:record.chargeId} without writing.
+        - If a record exists with status=`committed` and a different fingerprint, return
+          {kind:"conflict"} without writing.
+        - If a record exists with status=`in_progress`, return {kind:"in_progress"} without writing.
+        - If no record exists, INSERT status=`in_progress` with the fingerprint and a new chargeId,
+          then return {kind:"begun", chargeId}.
+
+      commit(accountId, idempotencyKey, chargeId):
+        - Sets the record to status=`committed` for that chargeId if the in_progress row matches.
+        - Otherwise returns false and changes nothing.
+
+      Fingerprint is sha256 of the canonical charge body (amount, currency, destination). Comparisons
+      at an exact timestamp use the listed operation order in [schedule-candidates].
+  - id: handler-code
+    type: code
+    label: Deployed charge handler path
+    content: |
+      export async function createCharge(req: ChargeRequest): Promise<Response> {
+        const fp = fingerprint(req.body);
+        const began = await store.begin(req.accountId, req.idempotencyKey, fp, req.now);
+        if (began.kind === "replay") {
+          return Response.ok({ chargeId: began.chargeId, replayed: true });
+        }
+        if (began.kind === "conflict") {
+          return Response.conflict("idempotency fingerprint mismatch");
+        }
+        if (began.kind === "in_progress") {
+          const chargeId = await charges.insertCommitted(req.body); // bypasses store.begin insert
+          return Response.ok({ chargeId, replayed: false });
+        }
+
+        const chargeId = began.chargeId;
+        await charges.insertCommitted({ ...req.body, chargeId });
+        await store.commit(req.accountId, req.idempotencyKey, chargeId);
+        return Response.ok({ chargeId, replayed: false });
+      }
+
+      `charges.insertCommitted` always creates a new committed payment row and does not consult the
+      idempotency store. `store.begin` is the only gate that should prevent duplicates.
+  - id: runtime-config
+    type: config
+    label: Accounts, keys, and fingerprints under test
+    content: |
+      accountId: acct-77
+      idempotencyKey: ik-19
+      bodyA: { amount: 4000, currency: "usd", destination: "dest-a" }  # fingerprint F-A
+      bodyB: { amount: 4000, currency: "usd", destination: "dest-a" }  # fingerprint F-A (identical)
+      bodyC: { amount: 5000, currency: "usd", destination: "dest-a" }  # fingerprint F-C (different)
+
+      initialStore: no row for (acct-77, ik-19)
+      initialCharges: []
+
+      Handlers H1 and H2 are the only actors. Each listed begin/insert/commit/response is atomic and
+      serializes in schedule order. A handler that receives kind "begun" always continues to
+      insertCommitted + commit unless the schedule says it crashes before commit.
+  - id: schedule-candidates
+    type: table
+    label: Complete candidate schedules
+    content: |
+      S1 — sequential retry after commit
+        t=0  H1 begin(bodyA) -> begun chargeId=C1
+        t=1  H1 insertCommitted(C1), commit, response ok C1
+        t=2  H2 begin(bodyA) -> replay C1, response ok replayed
+
+      S2 — concurrent begin race with in_progress bypass
+        t=0  H1 begin(bodyA) -> begun chargeId=C1
+        t=1  H2 begin(bodyA) -> in_progress
+        t=2  H2 insertCommitted(new C2) via in_progress branch, response ok C2
+        t=3  H1 insertCommitted(C1), commit, response ok C1
+
+      S3 — conflict on different fingerprint after commit
+        t=0  H1 begin(bodyA) -> begun chargeId=C1
+        t=1  H1 insertCommitted(C1), commit, response ok C1
+        t=2  H2 begin(bodyC) -> conflict, response 409
+
+      Rows at the same timestamp execute from top to bottom. All listed begins are the only begin
+      attempts, and every handler follows [handler-code] exactly.
+  - id: claims-note
+    type: note
+    label: Unverified review assertions
+    content: |
+      1. "S1 violates the property because H2 runs a second begin for the same key."
+      2. "Returning in_progress to H2 is itself a committed second charge."
+      3. "S3 violates the property because bodyC differs."
+      4. "Unique DB index on chargeId alone is enough to enforce the single-charge property for K."
+      5. "Crashing H1 before commit after H2's bypass would leave only one committed row, so S2 is
+          not a real counterexample under the listed schedule."
+  - id: patch-options
+    type: diff
+    label: Candidate idempotency repairs
+    content: |
+      Patch A — sleep and retry on in_progress:
+        if (began.kind === "in_progress") {
+          await sleep(50);
+          return createCharge(req); // recursive retry, still no store lock
+        }
+
+      Patch B — reject in_progress without inserting (no unique constraint added to begin):
+        if (began.kind === "in_progress") {
+          return Response.conflict("charge already in progress");
+        }
+        // store.begin remains a non-atomic read-then-insert. Two concurrent begins that both
+        // observe an empty store can still each receive kind "begun" with different chargeIds.
+
+      Patch C — make begin atomically claim with a unique constraint and never bypass insert:
+        // store.begin uses INSERT ... ON CONFLICT DO NOTHING on (accountId, idempotencyKey)
+        // and returns in_progress | replay | begun based on the winning row; handlers must
+        // NEVER call charges.insertCommitted unless kind === "begun".
+        if (began.kind === "in_progress") {
+          return Response.accepted({ status: "in_progress" }); // no insertCommitted
+        }
+
+      Patch D — remove fingerprint checks:
+        // always insert a new chargeId for every request
+
+      Judge only the final committed-row property in [safety-property].
+tags: [idempotency, payments, concurrency, formal-counterexample, fingerprints]

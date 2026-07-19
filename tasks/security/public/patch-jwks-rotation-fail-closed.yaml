@@ -1,0 +1,114 @@
+id: patch-jwks-rotation-fail-closed
+version: 1.0.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: JWKS Rotation Error Path Turns Signed-Token Verification into Claim Parsing
+summary: >-
+  A Java gateway refreshes signing keys on an unknown key id, then accepts decoded claims when the JWKS
+  endpoint is unavailable. Candidate fixes disable refresh, trust stale keys indefinitely, fail closed,
+  or retry without a bound. Verify which patch preserves legitimate cached-key traffic during rotation
+  while never converting network failure into authentication success.
+prompt: |
+  Review the fictional HarborPass patches using ONLY the supplied artifacts. Cite artifact ids for each
+  verdict. Use closes and does-not-close for candidate patches and vulnerable or not-a-vulnerability for
+  scanner findings. Do not generate tokens or bypass instructions.
+
+  1. Reconstruct the token-verification state machine for known kid, unknown kid with healthy JWKS, and
+     unknown kid during outage. Identify the precise exception edge that reaches an authentication sink.
+  2. Confirm the demonstrated bypass preconditions and impact. Explain what an attacker controls and what
+     they do not need to know.
+  3. Classify S1 through S4 from scanner-notes, separating the reachable fail-open from benign algorithm,
+     transport, and logging observations.
+  4. Classify P1 through P4. For each rejected patch, state the surviving bypass, availability regression,
+     or unbounded stale-key condition.
+  5. For the adequate patch, define issuer/audience/algorithm/signature, cache freshness, refresh
+     single-flight, unknown-kid, and outage invariants. Trace K-old, K-new, and K-fake during the outage.
+  6. Specify tests with a fake clock and JWKS server for normal verification, planned rotation, revoked
+     key expiry, concurrent unknown kids, timeouts, malformed responses, and sanitized audit events.
+
+  Exactly one patch meets auth-contract. The token and network traces are exhaustive.
+artifacts:
+  - id: verifier-code
+    type: code
+    label: Java JwtAuthenticator current implementation
+    content: |
+      Authentication authenticate(String token) {
+        Header h = decoder.header(token); // parses untrusted bytes; does not verify
+        try {
+          Jwk key = cache.get(h.kid()).orElseGet(() -> refreshAndFind(h.kid()));
+          Claims c = jose.verify(token, key, Algorithm.RS256);
+          validate(c.issuer(), c.audience(), c.expiry());
+          return Authentication.user(c.subject(), c.roles());
+        } catch (JwksUnavailable e) {
+          log.warn("jwks refresh unavailable kid={}", safe(h.kid()));
+          Claims c = decoder.claims(token); // parse only
+          return Authentication.user(c.subject(), c.roles());
+        }
+      }
+      refreshAndFind throws UnknownKid when a successful refresh lacks kid, and JwksUnavailable for
+      timeout, TLS failure, non-200, or invalid JWKS. The catch shown is the only fallback.
+  - id: auth-contract
+    type: spec
+    label: authoritative authentication and rotation policy
+    content: |
+      Accept only RS256 tokens whose signature verifies under a currently trusted issuer key and whose
+      issuer, audience, exp, and nbf validate. Cached keys may be used without network access until their
+      signed JWKS snapshot age reaches 15 minutes. After that bound, verification fails closed until a
+      valid refresh. Unknown kid never authenticates unless a successful refresh returns that exact key.
+      Refreshes should be single-flight and capped at 500 ms. Authentication errors return generic 401.
+  - id: cache-and-network
+    type: table
+    label: deterministic cache state and outage trace
+    content: |
+      t=00 JWKS snapshot generation 40 contains K-old; TLS and issuer URL validated
+      t=08 issuer rotates: generation 41 contains K-old and K-new; gateway cache age=8m
+      t=09 issuer JWKS endpoint times out for 4m
+      K-old valid signed token -> cache hit -> signature/claims validate -> accepted
+      K-new valid signed token -> cache miss -> refresh timeout -> current fallback parses -> accepted
+      K-fake unsigned bytes header kid=K-fake claims sub=U-9 roles=[ADMIN]
+        -> cache miss -> refresh timeout -> current fallback parses -> accepted as ADMIN
+      No proxy, alternate issuer, or TLS interception is involved.
+  - id: scanner-notes
+    type: note
+    label: static findings to classify
+    content: |
+      S1: Decoder output reaches Authentication.user on JwksUnavailable without jose.verify.
+      S2: RS256 is weak because it is asymmetric. Policy explicitly requires RS256 and the verifier pins
+          it; no header-selected algorithm or symmetric/asymmetric confusion exists.
+      S3: JWKS uses HTTPS but no certificate pin. The platform trust store and hostname verification are
+          enabled; auth-contract requires valid TLS, not application certificate pinning.
+      S4: Logging kid leaks a signing secret. kid is a public identifier, safe() strips controls and caps
+          length at 64, and no token or claims are logged.
+  - id: patch-p1-p2
+    type: diff
+    label: candidate patches P1 and P2
+    content: |
+      P1: Remove refreshAndFind and accept only keys loaded at process startup. This fails closed for
+          unknown kid but prevents K-new from working until every gateway restarts, violating rotation.
+
+      P2: On refresh error, call cache.findAnyByIssuer() and use that key to verify the token regardless
+          of kid; never expire cached snapshots. A fake kid can be tried with an unrelated key, revoked
+          keys remain trusted without bound, and exact kid binding is lost.
+  - id: patch-p3-p4
+    type: diff
+    label: candidate patches P3 and P4
+    content: |
+      P3: Delete the JwksUnavailable fallback. For a cache miss, single-flight a 500ms refresh; accept only
+          if the valid response contains the exact kid, then run pinned RS256 signature and all claim
+          checks. Cache hits may verify only while snapshot age <=15m. Any refresh/parse/unknown-kid error
+          yields sanitized 401 and an audit reason; no decoded claims become Authentication.
+
+      P4: Retry refresh in a loop until the endpoint returns, retaining the request thread and parsing
+          claims only after success. This removes the current bypass but violates the 500ms bound and can
+          exhaust request threads during an outage.
+  - id: expected-state-matrix
+    type: table
+    label: required behavior under candidate-compatible policy
+    content: |
+      cache age 8m, K-old valid signature, JWKS down -> accept after full verification with cached K-old
+      cache age 8m, K-new valid signature, JWKS down -> 401 (unknown until successfully refreshed)
+      cache age 8m, K-fake decoded ADMIN, JWKS down -> 401
+      cache age 16m, K-old valid signature, JWKS down -> 401 (stale bound exceeded)
+      healthy generation 41, K-new valid signature -> refresh, exact key verify, accept
+tags: [security, patch-verification, java, jwt, fail-closed]

@@ -1,14 +1,14 @@
 id: extract-and-inline-short-circuit-side-effect
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: extract-and-inline
 difficulty: expert
 title: Inlining hasFunds — Short-Circuit Side Effects, the >= Boundary, and Meets-Goal vs Fails-Goal
 summary: >-
   A validator delegates to hasFunds, whose only side effect (a funds_check metric) fires only when a
-  && short-circuit reaches it. The task is to inline hasFunds and remove it. One rewrite preserves
-  behavior and meets the goal; one increments the metric unconditionally; one flips >= to >; one
-  preserves behavior but never actually inlines. Classify each against both behavior and goal.
+  && short-circuit reaches it. The task is to inline hasFunds and remove it. Four rewrites are
+  proposed; classify each against both behavior and the inline goal, tracing the returned boolean
+  and the funds_check increments on every path.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (validate-original, order-note, rewrite-a,
   rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
@@ -32,7 +32,7 @@ prompt: |
   4. Classify rewrite-d against BOTH dimensions. If its behavior matches validate-original, say so, and
      separately state whether it satisfies the transformation goal, with the reason.
 
-  5. Exactly one rewrite both preserves behavior AND meets the inline goal. Name it. Then, for
+  5. State which rewrites, if any, both preserve behavior AND meet the inline goal. Then, for
      validate-original, state the ground truth: when order.itemsValid is false, how many times does
      metrics.inc('funds_check') fire, and what does canCheckout return?
 artifacts:

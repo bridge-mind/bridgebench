@@ -1,10 +1,10 @@
 id: spec-conformance-slug-normalizer
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: spec-conformance
 difficulty: expert
 title: normalizeSlug — Which Of Five Submissions Conforms To Every Clause
-summary: A frozen specification defines normalizeSlug(input) as a strict seven-clause pipeline. Five candidate implementations are under review; exactly one matches the spec on every input while each of the other four violates one specific, citable clause. Classify all five and name the distinguishing input for each near-miss.
+summary: A frozen specification defines normalizeSlug(input) as a strict seven-clause pipeline. Five candidate implementations are under review. Classify all five against the clauses and name the distinguishing input for any non-conformer.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (normalizer-spec, test-vectors,
   candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite the artifact id(s)
@@ -12,8 +12,7 @@ prompt: |
   clause it does state. The verdict vocabulary is exactly: conforms / violates.
 
   The spec (normalizer-spec) declares clauses C1..C7 and is the complete contract. The
-  submission-manifest declares that candidate-1..candidate-5 are the entire set under review
-  and that exactly one is to be accepted.
+  submission-manifest declares that candidate-1..candidate-5 are the entire set under review.
 
   1. Classify each of candidate-1, candidate-2, candidate-3, candidate-4, candidate-5 as
      `conforms` or `violates` against normalizer-spec.
@@ -22,8 +21,8 @@ prompt: |
      and give one concrete input string on which its output differs from the spec-correct
      output. State both the spec-correct output and the candidate's output for that input.
 
-  3. Exactly one candidate `conforms`. Identify it, and state the output it produces for the
-     test-vectors input "café_düsseldorf".
+  3. Identify which candidates, if any, `conform`, and state the output a conforming
+     implementation produces for the test-vectors input "café_düsseldorf".
 
   4. In reviewer-thread, reviewer @ravi argues candidate-2 conforms because "it lowercases,
      collapses separator runs to a single hyphen, trims, truncates to 40 with a trailing-hyphen
@@ -98,17 +97,17 @@ artifacts:
 
       // ---- candidate-1 ----
       function candidate1(input: string): string {
-        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());  // C1
-        s = s.replace(/[^a-z0-9]+/g, '-');                        // C2 + C3
-        s = s.replace(/^-+/, '').replace(/-+$/, '');              // C4
-        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');  // C5
-        return s.length === 0 ? 'n-a' : s;                        // C6
+        let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
+        s = s.replace(/[^a-z0-9]+/g, '-');
+        s = s.replace(/^-+/, '').replace(/-+$/, '');
+        if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
+        return s.length === 0 ? 'n-a' : s;
       }
 
       // ---- candidate-2 ----
       function candidate2(input: string): string {
         let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
-        s = s.replace(/[^\w]+/g, '-');   // \w is [A-Za-z0-9_]
+        s = s.replace(/[^\w]+/g, '-');
         s = s.replace(/^-+/, '').replace(/-+$/, '');
         if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
         return s.length === 0 ? 'n-a' : s;
@@ -119,7 +118,7 @@ artifacts:
         let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
         s = s.replace(/[^a-z0-9]+/g, '-');
         s = s.replace(/^-+/, '').replace(/-+$/, '');
-        if (s.length > 40) s = s.slice(0, 40);   // truncates; no trailing-hyphen removal
+        if (s.length > 40) s = s.slice(0, 40);
         return s.length === 0 ? 'n-a' : s;
       }
   - id: candidates-b
@@ -132,13 +131,13 @@ artifacts:
         s = s.replace(/[^a-z0-9]+/g, '-');
         s = s.replace(/^-+/, '').replace(/-+$/, '');
         if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
-        return s;    // returns s directly, including '' when the result is empty
+        return s;
       }
 
       // ---- candidate-5 ----
       function candidate5(input: string): string {
         let s = input.replace(/[A-Z]/g, (c) => c.toLowerCase());
-        s = s.replace(/[^a-z0-9]/g, '-');   // no '+': each separator char becomes its own hyphen
+        s = s.replace(/[^a-z0-9]/g, '-');
         s = s.replace(/^-+/, '').replace(/-+$/, '');
         if (s.length > 40) s = s.slice(0, 40).replace(/-$/, '');
         return s.length === 0 ? 'n-a' : s;
@@ -170,8 +169,7 @@ artifacts:
       candidate-4, candidate-5. This is the COMPLETE set — there is no candidate-6 and no other
       implementation is being considered.
 
-      Acceptance rule: exactly one submission is to be accepted. A submission is accepted only if
-      it conforms to normalizer-spec on every input (it reproduces all six rows of test-vectors and
-      obeys clauses C1..C7 generally). At most one of the five satisfies this; the acceptance
-      process assumes precisely one conformer exists in the set.
+      Acceptance rule: submissions are evaluated against normalizer-spec on every input. A
+      submission is accepted only if it conforms on every input (it reproduces all six rows of
+      test-vectors and obeys clauses C1..C7 generally); conforming submissions are accepted.
 tags: [generation, spec-conformance, string-processing, code-review]

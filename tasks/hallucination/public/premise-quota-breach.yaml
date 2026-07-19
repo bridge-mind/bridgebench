@@ -1,10 +1,10 @@
 id: premise-quota-breach
-version: 1.0.0
+version: 1.1.0
 category: hallucination
 cluster: false-premise
 difficulty: expert
-title: The Quota That Was Never Breached
-summary: A triage note blames a tenant for breaching its 600 rpm quota with five retries per request, but the usage data shows the tenant never crossed 600 and the SDK caps attempts at three.
+title: Triage Review of the SUP-2290 tenant-orion 429 Spike
+summary: A support triage note attributes tenant-orion's burst of 429 responses to a breached 600 rpm quota amplified by five retries per throttled request. Verify the triage claims against the gateway usage data, request traces, SDK retry policy, and quota configuration, then answer six deliverables.
 prompt: |
   tenant-orion saw a spike of HTTP 429 (rate-limit) responses from the API gateway between
   09:00 and 09:10. A support triage note (see support-ticket) proposes an explanation. Using
@@ -96,10 +96,8 @@ artifacts:
       09:08   519       300              219
       09:09   486       300              186
       09:10   431       300              131
-      Peak request minute: 09:07 at 548 rpm. Maximum request rate anywhere in the window is
-      548 rpm, which is below the 600 rpm standard-tier default. tenant-orion never reaches or
-      exceeds 600 rpm in any minute. All 429s in the window are requests over the 300 effective
-      quota, not over 600.
+      This table is the complete per-minute window series for tenant-orion for 09:00-09:10;
+      no minutes have been omitted.
   - id: gateway-log
     type: log
     label: Gateway window summaries and request traces
@@ -132,8 +130,7 @@ artifacts:
       09:09:44.341 req=r-9788 tenant=orion sdk: MAX_ATTEMPTS(3) reached; error surfaced to caller (2 retries used)
       09:10:00 window tenant=orion requests=431 allowed=300 throttled=131
       09:10:05 note: standard-tier still at sustained_rpm=300; revert of commit b91f2ac has NOT been applied
-      09:10:06 audit: no tenant-orion window in scope shows requests above 600; every 429 is against the 300 effective quota
-      09:10:07 audit: no SDK trace in scope shows more than 3 attempts (2 retries) for a single request
+      09:10:06 note: the window summaries and request traces above are the complete gateway records for tenant-orion in scope
   - id: sdk-retry
     type: code
     label: Official client SDK retry policy
@@ -176,18 +173,11 @@ artifacts:
       09:12 support(a.dulce): orion is getting hammered with 429s since ~09:00. looks like they blew past their quota
       09:14 sre(n.voss): which quota? standard default is 600. what rpm are they actually at?
       09:16 support(a.dulce): not sure of the exact rpm, but lots of 429s. probably retrying too hard too
-      09:19 sre(n.voss): pulling the gateway windows... orion peaks at 548 rpm at 09:07. that's under 600
-      09:21 sre(n.voss): but the effective standard-tier quota is 300 right now, not 600 - the config changed at 09:00
-      09:22 sre(n.voss): commit b91f2ac dropped standard sustained_rpm 600 -> 300 for a load test and was never reverted
-      09:24 support(a.dulce): so it's on us, not the customer over-sending?
-      09:25 sre(n.voss): right. orion never crossed 600. the 429s are all against the 300 we mis-set
-      09:27 support(a.dulce): what about the 5 retries amplifying load 6x?
-      09:29 sre(n.voss): the SDK caps at 3 attempts (2 retries), not 5. the r-8841 trace stops after attempt 3
-      09:30 support(a.dulce): so the amplification is at most 3x per throttled request, not 6x?
-      09:30 sre(n.voss): correct, and only requests that actually hit 429 retry at all. r-9310 succeeded on its first retry
-      09:31 sre(n.voss): fix is to revert b91f2ac back to 600. escalating now.
-      09:33 sre(n.voss): please hold the customer-facing reply - the "breached 600" and "5 retries" lines are both wrong
-      09:34 support(a.dulce): holding. will rewrite once you confirm the revert.
+      09:19 sre(n.voss): pulling the gateway windows and request traces now
+      09:27 support(a.dulce): could the retries be amplifying their load 6x?
+      09:29 sre(n.voss): need to check the SDK retry policy and the traces before we conclude anything
+      09:33 sre(n.voss): please hold the customer-facing reply until I finish going through the gateway data
+      09:34 support(a.dulce): holding. will rewrite once you confirm.
   - id: support-ticket
     type: note
     label: Support triage note (unverified)

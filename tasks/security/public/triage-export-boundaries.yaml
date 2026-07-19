@@ -1,0 +1,119 @@
+id: triage-export-boundaries
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Backup Export Scanner Mixes Spreadsheet Injection and URL Leakage with Four Enforced Boundaries
+summary: >-
+  A multi-tenant Rails export pipeline triggers findings for IDOR, SQL injection, object-key traversal,
+  spreadsheet formulas, signed-URL logging, and webhook SSRF. Trace each source through controllers,
+  jobs, storage, logs, and outbound networking to separate two reachable disclosures from four controls
+  that actually break their alleged chains.
+prompt: |
+  Triage the fictional LedgerNest export pipeline using ONLY the supplied artifacts. Cite artifact ids for
+  every claim. Classify F1 through F6 as real-vulnerability, mitigated, or false-positive and assign
+  severity for real findings. Provide remediation, not formula payloads or abuse steps.
+
+  1. Reconstruct the complete export lifecycle: request authorization, query ordering, CSV cell encoding,
+     object key creation, signed URL delivery, logging, and optional completion callback.
+  2. For F1 through F6, identify source, transformations, guard, sink, attacker preconditions, and whether
+     the chain remains reachable.
+  3. For each real finding, state the smallest affected trust boundary and bounded impact. Explain why CSV
+     quoting is not spreadsheet formula neutralization and why a bearer URL is sensitive even when short-lived.
+  4. Explain why owner-scoped job lookup, sort allowlisting, server-generated object keys, and pinned callback
+     destinations are effective controls rather than relying on framework reputation.
+  5. Evaluate fixes P1 through P4. Select all changes required to close the real findings while preserving
+     UTF-8 CSV interoperability and support diagnostics.
+  6. Give tests for cross-tenant job ids, each sort value, formula-leading Unicode/whitespace, commas/quotes,
+     URL redaction, log-role access, callback redirects, DNS changes, and expiration.
+
+  The application and infrastructure inventories are exhaustive. Spreadsheet fixtures are inert labels.
+artifacts:
+  - id: controller-and-job
+    type: code
+    label: Rails controller and export job
+    content: |
+      def create
+        account = current_user.accounts.find(params[:account_id])
+        job = account.export_jobs.create!(sort: SORTS.fetch(params[:sort], "created_at"))
+        ExportJob.perform_later(job.id)
+        render json: { id: job.id }, status: :accepted
+      end
+
+      def show
+        job = current_user.export_jobs.find(params[:id])
+        render json: job.status_payload
+      end
+
+      SORTS = { "date" => "created_at", "amount" => "amount_cents", "payee" => "payee_name" }.freeze
+      rows = job.account.transactions.order(Arel.sql(job.sort))
+      csv = CSV.generate { |out| rows.each { |r| out << [r.date, r.payee_name, r.memo, r.amount] } }
+      key = "exports/#{job.account_id}/#{job.id}.csv"
+      object_store.put(key, csv)
+  - id: delivery-code
+    type: code
+    label: signed URL, logs, and callback sender
+    content: |
+      url = object_store.presign_get(key, expires_in: 15.minutes)
+      Rails.logger.info(event: "export_ready", export_id: job.id, account_id: job.account_id, url: url)
+      ExportMailer.ready(current_user.email, url).deliver_later
+
+      if job.callback_id
+        endpoint = current_user.callback_endpoints.find(job.callback_id)
+        callback_client.post(endpoint, {export_id: job.id, status: "ready"})
+      end
+      status_payload returns status and expiry but never the URL; only email carries it to the builder.
+  - id: boundary-contracts
+    type: spec
+    label: ORM, CSV, object storage, and callback behavior
+    content: |
+      ActiveRecord find through current_user relations adds an ownership predicate and raises generic 404.
+      SORTS values are fixed constants; request text never reaches Arel.sql. job/account ids are server UUIDs.
+      Ruby CSV quotes delimiters and quotes but does not neutralize a cell beginning (after Unicode-aware
+      leading whitespace) with `=`, `+`, `-`, or `@`; supported spreadsheet clients evaluate such cells.
+      A presigned URL is a bearer capability granting one object read until expiry.
+
+      callback_endpoints are administrator-created from an allowlist of exact HTTPS hosts. Creation resolves
+      all addresses and pins an egress-proxy destination; redirects are disabled and private addresses denied.
+      Builders may select an endpoint id but cannot provide a URL.
+  - id: infrastructure
+    type: config
+    label: storage, logging, and role access
+    content: |
+      Export bucket is private; GetObject requires a valid presigned URL or export-worker IAM. Object keys
+      are opaque strings to the SDK, not filesystem paths. URLs expire after 15 minutes but may be replayed
+      during that interval. Central application logs retain 30 days. Support role can search all application
+      logs across tenants but has no bucket IAM and should not access export contents. Log exporter preserves
+      structured fields verbatim. Email delivery is tenant-scoped and expected.
+  - id: evidence-trace
+    type: table
+    label: deterministic observed cases
+    content: |
+      A U-A show(job owned by U-B) -> current_user.export_jobs query returns none -> generic 404
+      B sort="amount DESC; DROP TABLE" -> SORTS.fetch misses -> stored sort="created_at"
+      C account/payee supplied text="../../x" -> object key still exports/{account UUID}/{job UUID}.csv
+      D payee fixture FORMULA-CELL begins with formula marker -> CSV quoted field; spreadsheet executes cell
+      E export_ready structured log includes full query signature; support role replays within 15m -> object read
+      F builder selects pre-approved callback id -> proxy uses pinned public destination, no redirects
+  - id: finding-list
+    type: note
+    label: scanner findings F1 through F6
+    content: |
+      F1 GET export status is IDOR because params[:id] is user supplied.
+      F2 Arel.sql creates SQL injection through params[:sort].
+      F3 payee text can path-traverse the object key.
+      F4 CSV cells can execute formulas when a recipient opens the export in a supported spreadsheet.
+      F5 application logs disclose live presigned bearer URLs to cross-tenant support staff.
+      F6 callback_id is SSRF because it ultimately causes an HTTP POST.
+  - id: patch-candidates
+    type: diff
+    label: proposed remediation changes
+    content: |
+      P1: Prefix formula-capable cells with a documented inert text marker after Unicode-aware leading-space
+          detection, preserve original values in a separate safe format if exact round-trip is required, and
+          test target spreadsheet clients. CSV quoting remains enabled.
+      P2: Keep logging event/export/account/expiry but redact the URL and all signature query fields at source;
+          restrict log fields by role and revoke/shorten outstanding URLs after exposure.
+      P3: Base64-encode the entire CSV. This breaks ordinary CSV consumers and does not define cell semantics.
+      P4: Make presigned URLs last 24 hours so support has more time to investigate failures.
+tags: [security, finding-triage, rails, csv-injection, signed-url]

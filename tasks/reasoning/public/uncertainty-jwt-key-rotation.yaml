@@ -1,0 +1,83 @@
+id: uncertainty-jwt-key-rotation
+version: 1.0.0
+category: reasoning
+cluster: uncertainty-adversarial
+difficulty: expert
+title: JWT Rejection Spike During Key Rotation With Partial Issuer and Verifier Telemetry
+summary: Reason conservatively across JWKS caches, token headers, signer rollout, clock data, and unsampled failures to decide what the evidence proves and which containment is safe.
+prompt: |
+  Authentication failures rose during an Ed25519 key rotation. Use the evidence gate; no artifact is
+  implicitly exhaustive unless it says so.
+
+  1. Build the exact key-availability timeline for verifier pools east and west from [cache-log].
+  2. Classify causes C1-C5 as supported, contradicted, or not determined for the overall spike and for
+     sampled request s-19 separately.
+  3. Determine what fraction of all failures can be attributed to `kid=k3`; if not computable, give
+     only the defensible bounds.
+  4. Decide whether rollback to signer k2 is safe at 09:12 under the rotation contract and inventories.
+  5. Evaluate containment options A-D, selecting the fail-closed option that restores compatibility
+     without accepting unknown keys or disabling signature verification.
+  6. Specify the missing query/log join and a deterministic rotation test, including cache boundaries,
+     overlap duration, unknown-kid behavior, and clock assertions.
+artifacts:
+  - id: rotation-contract
+    type: spec
+    label: Key rotation safety contract
+    content: |
+      A new signer key may activate only after every verifier can fetch it. The previous public key
+      remains published until maximum token lifetime (15m) plus maximum JWKS cache TTL (5m) after the
+      last old-key token issuance. Unknown kid and signature failure deny. Clock skew allowance is 30s.
+      Never bypass verification or reuse a private key in verifier config.
+  - id: issuer-rollout
+    type: log
+    label: Signer events
+    content: |
+      09:00 publish JWKS k2,k3
+      09:02 signer canary-1 switches k2 -> k3 (10% issuance)
+      09:08 all signers switch to k3
+      09:20 planned removal of k2 CANCELLED
+
+      Issuer clocks are within 4s of reference. No signer emits alg other than EdDSA.
+  - id: cache-log
+    type: table
+    label: Exhaustive verifier cache refreshes
+    content: |
+      pool | cached keys at 08:59 | TTL | refresh attempts and results
+      east | k2                   | 5m  | 09:04 success -> k2,k3; 09:09 success -> k2,k3
+      west | k2                   | 5m  | 09:04 DNS timeout, stale-if-error keeps k2 until 09:09;
+           |                      |     | 09:09 success -> k2,k3
+
+      Cache does not refresh on unknown kid. These are all verifier refresh attempts.
+  - id: sampled-failures
+    type: table
+    label: Stratified sample, not complete failure population
+    content: |
+      id   | time  | pool | kid | error               | token iat
+      s-17 | 09:03 | west | k3  | unknown_kid         | 09:03:01
+      s-18 | 09:03 | east | k3  | unknown_kid         | 09:03:10
+      s-19 | 09:06 | west | k3  | unknown_kid         | 09:06:02
+      s-20 | 09:07 | east | k2  | expired              | 08:50:00
+      s-21 | 09:10 | west | k3  | signature_invalid    | 09:10:02
+
+      Sampling selected five failures by error stratum, not randomly. Request IDs cannot be joined to
+      aggregate counters in the retained dataset.
+  - id: aggregate-metrics
+    type: log
+    label: Non-keyed verifier counters
+    content: |
+      09:00-09:04 failures=120 unknown_kid=75 expired=20 other=25
+      09:05-09:09 failures=310 unknown_kid=180 expired=40 other=90
+      09:10-09:14 failures=45 unknown_kid=0 expired=18 other=27
+      Counters have no pool, kid, issuer instance, or request ID dimensions.
+  - id: causes-and-options
+    type: note
+    label: Hypotheses and containment choices
+    content: |
+      C1 west stale JWKS; C2 east stale JWKS; C3 signer used unpublished private key; C4 clock skew;
+      C5 post-09:09 bad signatures from an unknown source.
+
+      A force successful JWKS refresh everywhere, verify k2+k3 presence, keep both published
+      B accept any EdDSA key when kid is absent from cache
+      C distribute signer private k3 to verifier pools
+      D disable signature checks for 20 minutes
+tags: [jwt, jwks, key-rotation, uncertainty, authentication]

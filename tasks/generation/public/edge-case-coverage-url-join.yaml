@@ -1,0 +1,283 @@
+id: edge-case-coverage-url-join
+version: 1.1.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: urlJoin — Which Candidate Correctly Covers Every Base and Relative Path Edge
+summary: A URL join utility combines a base URL and a relative path according to strict edge-case rules regarding duplicate slashes, parent traversal "..", current directory ".", query/hash handling, and protocol-relative targets. Six candidate implementations are analyzed. Classify all six against the required edge set, pinning the failing edge and input for any non-conformer.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (url-spec, behavior-vectors, candidates-a,
+  candidates-b, reviewer-thread, submission-manifest). Cite the artifact id(s) for every claim. Do not
+  add requirements the spec omits and do not ignore one it states. The verdict vocabulary is exactly:
+  conforms / violates.
+
+  url-spec fixes required edges E1..E5 and is the complete contract. submission-manifest declares
+  candidate-1..candidate-6 the entire set.
+
+  1. Classify each of candidate-1..candidate-6 as `conforms` or `violates` against url-spec.
+
+  2. For every candidate you mark `violates`, name the single required edge (one of E1..E5) it breaks
+     and give one concrete pair of inputs (base, path) on which its output differs from the spec-correct
+     value. State both output strings.
+
+  3. Identify which candidates, if any, `conform`, and state the output a conforming
+     implementation returns for the input base: "//api.io/v1/" and path: "users/./all".
+
+  4. In reviewer-thread, reviewer @sophia argues candidate-2 is correct because "collapsing all duplicate
+     slashes with a single regex pattern is the standard way to prevent URL path errors." State candidate-2's
+     verdict and cite the edge and input that refutes @sophia (state both outputs).
+
+  5. Identify which candidate fails to properly handle parent directory traversal `..` and allows moving
+     past the host root. Give the output it returns for base: "http://api.io/v1" and path: "../../posts"
+     versus the correct spec-correct output.
+artifacts:
+  - id: url-spec
+    type: spec
+    label: urlJoin specification (complete required edge set)
+    content: |
+      urlJoin(base: string, path: string): string
+
+      Combines a base URL and a relative path segment into a single sanitized URL. A conforming
+      implementation MUST satisfy every required edge below.
+
+      E1  SLASH SANITIZATION. Ensure exactly one slash separates the path segments. Leading/trailing
+          slashes on both base and path must be normalized so that exactly one slash remains. However,
+          the double-slash of the protocol scheme (e.g. "http://") or at the start of a protocol-relative
+          URL (e.g. "//") must NOT be collapsed to a single slash.
+
+      E2  PARENT TRAVERSAL (".."). The parent directory indicator ".." moves the path up one level.
+          Traversals must be computed relative to the base path but MUST NOT traverse beyond the host root.
+          For example, "http://api.io" + "../posts" must resolve to "http://api.io/posts", not "http://posts"
+          or "http://api.io/../posts".
+
+      E3  CURRENT DIRECTORY ("."). The current directory indicator "." must be removed entirely from
+          the final path without creating empty segments or duplicate slashes.
+
+      E4  QUERY & HASH PRESERVATION. If path contains query parameters (starting with "?") or a hash
+          (starting with "#"), they must be appended to the final segment of the URL. If the path starts
+          with "?" or "#", no separating slash is added between base and path. For example, "http://api.io/v1"
+          + "?q=1" yields "http://api.io/v1?q=1", not "http://api.io/v1/?q=1".
+
+      E5  PROTOCOL-RELATIVE PRESERVATION. If the base URL is protocol-relative (starts with "//", e.g.
+          "//api.io/v1"), the joined URL must remain protocol-relative. It must not have a default scheme
+          like "http:" or "https:" forced onto it.
+
+      This is the entire required edge set.
+  - id: behavior-vectors
+    type: note
+    label: authoritative behavior scenarios
+    content: |
+      Authoritative outputs computed from url-spec. A conforming implementation reproduces every
+      row exactly.
+
+      #  base                  path            expected output
+      -- --------------------- --------------- ----------------------------------------
+      1  "http://api.io/"      "/v1/users"     "http://api.io/v1/users"
+      2  "http://api.io/v1"    "../posts"      "http://api.io/posts"
+      3  "http://api.io/v1"    "./users"       "http://api.io/v1/users"
+      4  "http://api.io/v1"    "?q=1"          "http://api.io/v1?q=1"
+      5  "//api.io/v1"         "users"         "//api.io/v1/users"
+  - id: candidates-a
+    type: code
+    label: submissions candidate-1, candidate-2, candidate-3
+    content: |
+      // ---- candidate-1 ----
+      function urlJoin1(base, path) {
+        const isProtoRelative = base.startsWith('//');
+        const hasProto = /^[a-z]+:\/\//i.test(base);
+        let prefix = '';
+        let rest = base;
+        if (hasProto) {
+          const match = base.match(/^([a-z]+:\/\/)(.*)/i);
+          prefix = match[1];
+          rest = match[2];
+        } else if (isProtoRelative) {
+          prefix = '//';
+          rest = base.slice(2);
+        }
+        if (path.startsWith('?') || path.startsWith('#')) {
+          return base + path;
+        }
+        let joined = rest.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+        const parts = joined.split('/');
+        const stack = [];
+        const host = parts[0];
+        stack.push(host);
+        for (let i = 1; i < parts.length; i++) {
+          const p = parts[i];
+          if (p === '..') {
+            if (stack.length > 1) stack.pop();
+          } else if (p !== '.' && p !== '') {
+            stack.push(p);
+          }
+        }
+        return prefix + stack.join('/');
+      }
+
+      // ---- candidate-2 ----
+      function urlJoin2(base, path) {
+        if (path.startsWith('?') || path.startsWith('#')) {
+          return base + path;
+        }
+        let url = base + '/' + path;
+        url = url.replace(/([^:])\/\/+/g, '$1/');
+        return url;
+      }
+
+      // ---- candidate-3 ----
+      function urlJoin3(base, path) {
+        const isProtoRelative = base.startsWith('//');
+        const hasProto = /^[a-z]+:\/\//i.test(base);
+        let prefix = '';
+        let rest = base;
+        if (hasProto) {
+          const match = base.match(/^([a-z]+:\/\/)(.*)/i);
+          prefix = match[1];
+          rest = match[2];
+        } else if (isProtoRelative) {
+          prefix = '//';
+          rest = base.slice(2);
+        }
+        if (path.startsWith('?') || path.startsWith('#')) {
+          return base + path;
+        }
+        let joined = rest.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+        const parts = joined.split('/');
+        const stack = [];
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
+          if (p === '..') {
+            stack.pop();
+          } else if (p !== '.' && p !== '') {
+            stack.push(p);
+          }
+        }
+        return prefix + stack.join('/');
+      }
+  - id: candidates-b
+    type: code
+    label: submissions candidate-4, candidate-5, candidate-6
+    content: |
+      // ---- candidate-4 ----
+      function urlJoin4(base, path) {
+        const isProtoRelative = base.startsWith('//');
+        const hasProto = /^[a-z]+:\/\//i.test(base);
+        let prefix = '';
+        let rest = base;
+        if (hasProto) {
+          const match = base.match(/^([a-z]+:\/\/)(.*)/i);
+          prefix = match[1];
+          rest = match[2];
+        } else if (isProtoRelative) {
+          prefix = '//';
+          rest = base.slice(2);
+        }
+        if (path.startsWith('?') || path.startsWith('#')) {
+          return base + path;
+        }
+        let joined = rest.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+        const parts = joined.split('/');
+        const stack = [];
+        const host = parts[0];
+        stack.push(host);
+        for (let i = 1; i < parts.length; i++) {
+          const p = parts[i];
+          if (p === '..') {
+            if (stack.length > 1) stack.pop();
+          } else if (p !== '') {
+            stack.push(p);
+          }
+        }
+        return prefix + stack.join('/');
+      }
+
+      // ---- candidate-5 ----
+      function urlJoin5(base, path) {
+        const isProtoRelative = base.startsWith('//');
+        const hasProto = /^[a-z]+:\/\//i.test(base);
+        let prefix = '';
+        let rest = base;
+        if (hasProto) {
+          const match = base.match(/^([a-z]+:\/\/)(.*)/i);
+          prefix = match[1];
+          rest = match[2];
+        } else if (isProtoRelative) {
+          prefix = '//';
+          rest = base.slice(2);
+        }
+        let joined = rest.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+        const parts = joined.split('/');
+        const stack = [];
+        const host = parts[0];
+        stack.push(host);
+        for (let i = 1; i < parts.length; i++) {
+          const p = parts[i];
+          if (p === '..') {
+            if (stack.length > 1) stack.pop();
+          } else if (p !== '.' && p !== '') {
+            stack.push(p);
+          }
+        }
+        return prefix + stack.join('/');
+      }
+
+      // ---- candidate-6 ----
+      function urlJoin6(base, path) {
+        let cleanBase = base;
+        if (base.startsWith('//')) {
+          cleanBase = 'http:' + base;
+        }
+        const hasProto = /^[a-z]+:\/\//i.test(cleanBase);
+        let prefix = '';
+        let rest = cleanBase;
+        if (hasProto) {
+          const match = cleanBase.match(/^([a-z]+:\/\/)(.*)/i);
+          prefix = match[1];
+          rest = match[2];
+        }
+        if (path.startsWith('?') || path.startsWith('#')) {
+          return cleanBase + path;
+        }
+        let joined = rest.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+        const parts = joined.split('/');
+        const stack = [];
+        const host = parts[0];
+        stack.push(host);
+        for (let i = 1; i < parts.length; i++) {
+          const p = parts[i];
+          if (p === '..') {
+            if (stack.length > 1) stack.pop();
+          } else if (p !== '.' && p !== '') {
+            stack.push(p);
+          }
+        }
+        return prefix + stack.join('/');
+      }
+  - id: reviewer-thread
+    type: note
+    label: code-review discussion on the six submissions
+    content: |
+      Review thread for urlJoin (PR #2056).
+
+      @sophia: "candidate-2 is extremely clean and short. Collapsing all duplicate slashes with
+      a single regex replacement on the output is the standard and safest way to handle path errors
+      without complex array parsing."
+
+      @ethan: "That regex replaces any sequence of duplicate slashes except those preceded by a colon.
+      But what if base is a protocol-relative URL like `//api.io`? It has no colon, so it collapses to
+      `/api.io` which totally changes it from protocol-relative to a local path."
+
+      @lucas: "Also, one of the submissions doesn't protect the domain name from directory traversal.
+      If base is `http://api.io/v1` and we join `../../posts`, we should get `http://api.io/posts` (the parent of
+      v1 is root, and we can't go higher). A broken candidate will go up too far and output `http://posts`!"
+  - id: submission-manifest
+    type: note
+    label: submission manifest and acceptance rule
+    content: |
+      Submissions under review for urlJoin: candidate-1, candidate-2, candidate-3,
+      candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
+      being considered.
+
+      Acceptance rule: submissions are evaluated against all five required edges (E1..E5);
+      submissions that satisfy every required edge are accepted.
+tags: [generation, edge-case-coverage, url, utility, code-review]

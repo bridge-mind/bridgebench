@@ -1,0 +1,109 @@
+id: dependency-decoupling-spring-request-provider
+version: 1.0.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Remove Spring RequestContextHolder Without Capturing the Wrong Request
+summary: >-
+  A singleton service reads request-scoped tenant metadata at each operation. Four injection designs
+  remove or wrap the static dependency but differ on bean creation, request freshness, missing-context
+  failure, and background overrides; one decouples the service without changing lifecycle behavior.
+prompt: |
+  Use only original-service, lifecycle-contract, request-traces, proposals, and manifest. Cite artifact
+  ids. Give behavior-preserving / changes-behavior and meets-goal / fails-goal for every proposal.
+
+  1. Classify proposal-a through proposal-d on both axes.
+  2. For every change, give the first S1..S6 witness and exact tenant/error/provider-call difference.
+  3. Identify the unique proposal satisfying behavior and decoupling goal.
+  4. Trace S4 across both calls and request scopes.
+  5. Explain why injecting an unproxied request bean into a singleton is not equivalent to a provider.
+  6. Evaluate reviewer Ari's claim that tenant context can be safely cached because the service is stateless.
+artifacts:
+  - id: original-service
+    type: code
+    label: Existing singleton Java service
+    content: |
+      @Service
+      final class ExportService {
+        Result export(Job job) {
+          RequestAttributes a = RequestContextHolder.currentRequestAttributes();
+          String tenant = (String) a.getAttribute("tenant", SCOPE_REQUEST);
+          if (tenant == null) throw new MissingTenant();
+          return runForTenant(tenant, job);
+        }
+      }
+
+      currentRequestAttributes throws IllegalStateException when no request is bound. Each export call
+      looks up the current thread's context at call time. runForTenant logs tenant then may return/throw.
+  - id: lifecycle-contract
+    type: spec
+    label: Complete behavior and decoupling goal
+    content: |
+      L1 ExportService is one eager singleton and can be constructed with no active request.
+      L2 every export resolves context exactly once at method call time, so sequential requests differ.
+      L3 absent request throws the exact IllegalStateException from resolution; provider is called once.
+      L4 present request but absent tenant throws exact MissingTenant before runForTenant.
+      L5 background callers may explicitly bind a RequestMeta for the call without Spring request globals.
+      L6 concurrent requests never share tenant state.
+      L7 runForTenant result/exception identity and call count are unchanged.
+
+      Goal G: ExportService must not import/reference RequestContextHolder, RequestAttributes, or Spring
+      web APIs. Inject one application-owned TenantContext interface with currentTenant():String, and
+      allow web/background adapters to supply call-scoped values.
+  - id: request-traces
+    type: table
+    label: Authoritative context witnesses
+    content: |
+      S1 application startup with no request -> service constructs successfully, no context resolution.
+      S2 request A tenant alpha, export x -> one currentTenant call; run alpha/x.
+      S3 request with no tenant -> one currentTenant call; MissingTenant; no run.
+      S4 same singleton: request A alpha export x, later request B beta export y -> run alpha/x then beta/y.
+      S5 no bound context -> exact IllegalStateException; no run.
+      S6 background adapter scoped to gamma -> run gamma/job without RequestContextHolder.
+  - id: proposals
+    type: code
+    label: Four dependency-injection proposals
+    content: |
+      // proposal-a
+      interface TenantContext { String currentTenant(); }
+      ExportService(TenantContext context) { this.context=context; }
+      Result export(Job j) { String t=context.currentTenant(); if(t==null) throw new MissingTenant();
+        return runForTenant(t,j); }
+      // web adapter implementation uses ObjectProvider<RequestMeta>.getObject() inside currentTenant;
+      // background adapter uses its own call-scoped provider
+
+      // proposal-b
+      ExportService(RequestMeta request) { this.request=request; }
+      // RequestMeta is an unproxied @RequestScope bean; export reads request.tenant()
+
+      // proposal-c
+      ExportService(TenantContext context) { this.tenant=context.currentTenant(); }
+      // export reuses cached tenant
+
+      // proposal-d
+      interface TenantContext { String currentTenant(); }
+      // injected implementation's currentTenant calls RequestContextHolder; ExportService is clean
+
+      proposal-a's web provider maps no active request to the exact currentRequestAttributes
+      IllegalStateException and returns null only for present-without-tenant. It performs no lookup in
+      its constructor.
+  - id: scope-facts
+    type: note
+    label: Frozen Spring scope and architecture facts
+    content: |
+      Injecting an unproxied request-scoped instance into an eager singleton requires an active request
+      during singleton construction and then captures that instance. ObjectProvider defers resolution
+      until getObject/currentTenant. An application-owned interface separates ExportService from web
+      APIs only if its contract does not itself require a RequestContextHolder-backed implementation;
+      Goal G explicitly requires both web and background adapters.
+  - id: manifest
+    type: note
+    label: Complete proposal inventory and caching claim
+    content: |
+      proposal-a through proposal-d are complete. proposal-d's only implementation is permanently tied
+      to Spring web globals and cannot satisfy L5/Goal G, though ordinary web traces match. All provider
+      implementations are thread-safe.
+
+      Ari's claim confuses service fields with request identity. Caching tenant in a stateless singleton
+      creates tenant leakage and changes S4/S6.
+tags: [refactoring, dependency-decoupling, java, spring, request-scope]

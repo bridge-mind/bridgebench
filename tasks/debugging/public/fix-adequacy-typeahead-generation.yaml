@@ -1,0 +1,105 @@
+id: fix-adequacy-typeahead-generation
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Aborted Typeahead Request Still Commits a Stale Response
+summary: >-
+  A React typeahead aborts prior fetches but a service-worker cache can fulfill an older request in the
+  microtask already queued before abort. Candidate fixes add debounce, compare query strings, serialize
+  requests, or gate reducer commits with a monotonically increasing generation. Decide which repair
+  handles repeated query values, cache hits, errors, and unmount without suppressing valid results.
+prompt: |
+  Evaluate the fictional AtlasFind fixes using ONLY the supplied artifacts. Cite artifact ids for every
+  claim. Use adequate-fix and shallow-fix.
+
+  1. Reconstruct effect setup/cleanup, AbortController behavior, service-worker timing, promise callbacks,
+     and reducer state transitions.
+  2. Trace schedules A through F exactly, identifying which request generation each response belongs to and
+     which stale success/error reaches the UI at HEAD.
+  3. State the latest-intent, repeated-value, lifecycle, and error-display invariants. Explain why abort is
+     cooperative cancellation, not a commit-authorization proof.
+  4. Classify P1 through P4. Give the surviving schedule for every shallow fix, including the A->B->A case.
+  5. Trace the adequate fix through schedules B, D, E, and F. Specify generation allocation and reducer guard
+     placement so stale callbacks cannot mutate data, loading, or error state.
+  6. Give fake-timer/mocked-fetch tests for network reorder, synchronous cache resolution, abort-before/after
+     settlement, repeated values, rejection, empty query, StrictMode double invocation, and unmount.
+
+  React-semantics and service-worker-contract are authoritative and exhaustive.
+artifacts:
+  - id: component-code
+    type: code
+    label: React hook at HEAD
+    content: |
+      function useSearch(query: string) {
+        const [state, dispatch] = useReducer(reducer, initial);
+        useEffect(() => {
+          if (query === '') { dispatch({type:'clear'}); return; }
+          const controller = new AbortController();
+          dispatch({type:'loading', query});
+          fetch(`/api/search?q=${encodeURIComponent(query)}`, {signal:controller.signal})
+            .then(r => r.json())
+            .then(items => dispatch({type:'success', query, items}))
+            .catch(error => {
+              if (error.name !== 'AbortError') dispatch({type:'error', query, error:String(error)});
+            });
+          return () => controller.abort();
+        }, [query]);
+        return state;
+      }
+
+      reducer accepts every action and stores its query/items/error. No generation or mounted guard exists.
+  - id: runtime-semantics
+    type: spec
+    label: React, fetch, and service-worker contract
+    content: |
+      Before running an effect for a changed dependency, React runs the previous cleanup. Abort asks fetch
+      to cancel; it cannot retract a fulfillment/rejection reaction already queued in the microtask queue.
+      The service worker may answer from Cache Storage synchronously enough to queue fulfillment before
+      cleanup. React development StrictMode mounts, cleans up, and remounts effects once. State must reflect
+      only the latest mounted intent generation, not merely the latest query string.
+  - id: schedules
+    type: table
+    label: deterministic request and callback order
+    content: |
+      A g1 query=a network returns; success g1 -> UI a (valid)
+      B g1 query=a; change to ab aborts g1; g2 ab success; then queued g1 success -> UI reverts to a
+      C g1 a rejects after g2 ab success; error is TimeoutError, not AbortError -> stale error replaces results
+      D g1 a; g2 ab; g3 a; queued g1 a success arrives after g3 a success with different server data
+      E g1 cache fulfillment queued; cleanup abort; g2 network success; g1 callback runs last
+      F component unmounts after fulfillment queued; callback dispatches after cleanup
+      Request ids g1..g3 are conceptual provenance labels; HEAD actions carry only query text.
+  - id: product-contract
+    type: spec
+    label: authoritative search-state invariants
+    content: |
+      Each non-empty query intent receives a strictly increasing generation, even when text repeats. Only
+      callbacks whose generation equals the latest mounted generation may change loading, items, or error.
+      Empty query invalidates prior generations and clears state. Unmount invalidates all generations.
+      Abort remains a resource optimization. Latest success shows its exact items; latest non-abort failure
+      shows an error. Stale success and failure are ignored.
+  - id: candidate-patches
+    type: diff
+    label: proposed UI fixes
+    content: |
+      P1: Debounce requests by 300ms. Once two requests have started, their responses can still reorder.
+      P2: Before dispatch, compare callback query to a `latestQuery` ref. In A->AB->A, g1 and g3 share text;
+          stale g1 passes and can overwrite newer g3 data.
+      P3: Await each prior request before starting the next. A slow/stuck old request blocks latest intent and
+          violates responsive latest-query behavior; unmount callbacks still need invalidation.
+      P4: Increment a ref generation at every intent setup and cleanup/clear; capture `generation` in each
+          effect. Before dispatch, each success/error callback must equal the current ref generation; reducer
+          actions also carry generation and ignore any older than current state. Cleanup increments the ref and
+          aborts, so queued callbacks fail the producer-side guard even after unmount. Ensure the current
+          generation is installed before any promise callback can run.
+  - id: observed-ui
+    type: log
+    label: controlled browser trace for schedule B
+    content: |
+      00 input a -> dispatch loading(a); request g1
+      08 input ab -> cleanup abort(g1); dispatch loading(ab); request g2
+      24 g2 network -> dispatch success(ab,["abacus"]); UI abacus
+      25 service-worker queued g1 JSON callback -> dispatch success(a,["atlas"]); UI atlas
+      Network panel marks g1 `(canceled)` because its signal is aborted even though its queued fulfillment
+      callback runs. No second component or external state store exists.
+tags: [debugging, fix-adequacy, react, race-condition, generation-token]

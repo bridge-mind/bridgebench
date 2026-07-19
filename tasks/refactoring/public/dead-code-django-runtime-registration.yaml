@@ -1,0 +1,107 @@
+id: dead-code-django-runtime-registration
+version: 1.0.0
+category: refactoring
+cluster: dead-code-elimination
+difficulty: expert
+title: Remove Django Notification Dead Code Without Breaking Signals or Command Discovery
+summary: >-
+  A Django package contains functions with no direct callers, but some are reached through AppConfig
+  signal registration, management-command discovery, and dotted settings imports. Four cleanup PRs
+  delete different symbols; only one removes the proven dead branch while preserving every supported
+  runtime entry point.
+prompt: |
+  Use only source-tree, runtime-contract, reachability-matrix, patches, and manifest. Cite artifact ids.
+  Give behavior-preserving / changes-behavior and meets-goal / fails-goal for every patch.
+
+  1. Classify patch-a through patch-d on both axes.
+  2. For every behavior change, give the first D1..D6 witness and exact missing/duplicate/error effect.
+  3. Identify the unique safe patch meeting the cleanup goal.
+  4. Trace D3 from django.setup through receiver invocation.
+  5. Explain why ripgrep call counts cannot prove emit_digest or Command.handle dead.
+  6. Evaluate reviewer Tia's claim that a receiver with no imported name is unreachable.
+artifacts:
+  - id: source-tree
+    type: code
+    label: Complete relevant Django package
+    content: |
+      # notify/apps.py
+      class NotifyConfig(AppConfig):
+          name = "notify"
+          def ready(self):
+              from . import receivers  # registration side effect
+
+      # notify/receivers.py
+      @receiver(post_save, sender=Invoice, dispatch_uid="notify.invoice.v2")
+      def invoice_saved(sender, instance, created, **kwargs):
+          if created: enqueue_invoice(instance.pk)
+
+      def legacy_invoice_saved(invoice):
+          return render_legacy(invoice)  # no decorator/registration/export
+
+      # notify/digests.py
+      def emit_digest(account_id): return current_digest(account_id)
+      def preview_digest(account_id): return current_digest(account_id, dry_run=True)
+
+      # notify/management/commands/send_digest.py
+      class Command(BaseCommand):
+          def handle(self, *args, **opts): emit_digest(opts["account"])
+
+      # notify/backends.py
+      def smtp_backend(message): ...
+      def console_backend(message): ...
+
+      # settings.py
+      NOTIFY_BACKEND = "notify.backends.smtp_backend"
+  - id: runtime-contract
+    type: spec
+    label: Supported runtime entry points and cleanup goal
+    content: |
+      R1 INSTALLED_APPS contains "notify.apps.NotifyConfig"; django.setup calls ready once per process.
+      R2 creating an Invoice must enqueue exactly once through post_save receiver.
+      R3 manage.py send_digest --account A is supported; Django discovers Command by filesystem/module
+         convention, not a Python call reference, and it must invoke emit_digest once.
+      R4 NOTIFY_BACKEND is imported with import_string and smtp_backend remains supported.
+      R5 preview_digest is imported directly by the admin preview route and remains supported.
+      R6 no supported setting, migration, template, plugin, URL, test, or import references
+         legacy_invoice_saved or render_legacy. Reflection is limited to the declared mechanisms.
+
+      Goal G: delete legacy_invoice_saved and its now-unreferenced render_legacy import, without
+      changing any supported behavior or adding compatibility shims.
+  - id: reachability-matrix
+    type: table
+    label: Authoritative runtime witnesses
+    content: |
+      D1 django.setup -> NotifyConfig.ready -> import receivers -> connect invoice_saved.
+      D2 save new Invoice 7 -> enqueue_invoice(7) exactly once.
+      D3 send_digest A -> discover send_digest.Command -> handle -> emit_digest(A).
+      D4 load configured backend -> import_string resolves smtp_backend.
+      D5 admin preview A -> preview_digest(A,dry_run=True behavior).
+      D6 no runtime entry reaches legacy_invoice_saved; deleting it leaves D1..D5 identical.
+  - id: patches
+    type: diff
+    label: Four complete cleanup proposals
+    content: |
+      patch-a:
+        delete legacy_invoice_saved and remove render_legacy import from receivers.py only
+
+      patch-b:
+        delete all functions in receivers.py because no direct call sites exist; remove ready import
+
+      patch-c:
+        delete emit_digest and inline current_digest only into known web callers; delete send_digest.py
+
+      patch-d:
+        delete smtp_backend as unused and change NOTIFY_BACKEND to console_backend
+
+      No patch changes files beyond the lines described. patch-a leaves receiver import/registration,
+      command tree, digests, and backends untouched.
+  - id: manifest
+    type: note
+    label: Complete discovery surface and reviewer claim
+    content: |
+      patch-a through patch-d are complete. runtime-contract is the exhaustive deployment matrix;
+      there are no unknown third-party plugins. render_legacy has no other imports after a.
+
+      Tia's claim ignores decorator registration: invoice_saved is retained by the signal dispatcher
+      after ready imports its module even if application code never calls its Python name.
+tags: [refactoring, dead-code-elimination, python, django, runtime-registration]

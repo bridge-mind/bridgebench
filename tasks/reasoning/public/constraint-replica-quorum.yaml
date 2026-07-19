@@ -1,0 +1,139 @@
+id: constraint-replica-quorum
+version: 1.1.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Six-Role Quorum Placement Through Capability, Zone, and Anti-Affinity Constraints
+summary: >-
+  Reconcile per-role residency, capabilities, quorum zone separation, and node capacity to construct
+  the only compliant replica placement. Audit three planner proposals, decide whether any valid
+  placement survives draining one node, and evaluate a narrowly scoped expansion as a recovery.
+prompt: |
+  QuorumForge must place exactly the six replica roles listed in [shard-catalog] onto the complete
+  node inventory in [node-inventory]. All hard rules are in [placement-contract]. Node capacities are
+  additive units, and a placement is valid only if every role is placed exactly once and every rule
+  holds simultaneously. Operational context in [operator-note] is not a rule.
+
+  1. Baseline placement. Give the only valid baseline node for every replica role, then give each
+     node's used and remaining capacity.
+  2. Forced-placement proof. Explain the constraint chain that forces ledger primary and replica,
+     sessions primary and replica, search primary, and finally search replica. Cite capabilities,
+     zone/residency restrictions, anti-affinity, and capacity where they actually decide a choice.
+  3. Proposal review. For Alpha, Beta, and Gamma in [planner-proposals], classify each as feasible or
+     infeasible and list EVERY violated rule, including the exact capacity excess where relevant. Do
+     not invent violations that are not present.
+  4. Drain feasibility. Under maintenance M1 in [maintenance-change], where node delta is unavailable,
+     decide whether any valid placement exists. State whether it is feasible; if not, prove the
+     contradiction by exhausting every remaining legal location for sessions replica and the resulting
+     search-primary requirement.
+  5. Recovery placement. Under M1 plus patch P1 (only beta capacity changes from 5 to 6), determine
+     whether a valid placement exists and give it if so, with node capacity totals. State whether P1
+     is sufficient without changing any capability, topology, or anti-affinity rule.
+  6. Triage claims. Classify every numbered assertion in [operator-note] as correct or incorrect, with
+     the specific hard rule that settles it.
+artifacts:
+  - id: placement-contract
+    type: spec
+    label: Complete quorum placement rules
+    content: |
+      This document is the complete set of hard placement rules. No affinity, cost, latency, or
+      utilization rule exists outside it.
+
+      INSTANCE RULES
+        - Each role in [shard-catalog] is placed exactly once on one ready node.
+        - A node's assigned capacity units are the sum of all roles placed there and must not exceed
+          its capacity.
+        - Each shard's primary and replica must occupy DIFFERENT zones.
+        - The primary and replica of a shard may never share a node.
+
+      RESIDENCY AND CAPABILITY RULES
+        - ledger-primary must be in the east zone and requires nvme, hsm, and quorum labels.
+        - ledger-replica must be outside east and requires nvme, hsm, and quorum labels.
+        - sessions-primary must be in the central zone and requires nvme.
+        - sessions-replica must be outside central and requires nvme.
+        - search-primary must be in the west zone and requires nvme and edge labels.
+        - search-replica must be outside west and requires nvme.
+
+      CROSS-SHARD RULE
+        - No node may host any sessions role and any search role together. This anti-affinity
+          applies to every primary/replica combination and is independent of remaining capacity.
+
+      QUORUM NOTE
+        - "quorum" is a capability label required by ledger roles; it does not alter zone math.
+        - Witnesses are out of scope; only the six roles in [shard-catalog] exist.
+
+      The only ready nodes, labels, capacities, zones, and role sizes are the rows in
+      [node-inventory] and [shard-catalog]. Treat both artifacts as exhaustive.
+  - id: node-inventory
+    type: table
+    label: Ready node inventory before maintenance
+    content: |
+      node     | zone    | capacity units | labels
+      alpha    | east    | 6              | nvme, hsm, quorum
+      beta     | west    | 5              | nvme, hsm, quorum, edge
+      gamma    | central | 4              | nvme, hsm
+      delta    | east    | 4              | nvme
+      epsilon  | west    | 4              | nvme, edge
+
+      Every listed node is ready for the baseline. Labels are literal: a node has a capability only if
+      it appears in its labels column. There are no hidden nodes or label aliases.
+  - id: shard-catalog
+    type: table
+    label: Six required quorum replica roles
+    content: |
+      role              | shard     | role kind | capacity units
+      ledger-primary    | ledger    | primary   | 4
+      ledger-replica    | ledger    | replica   | 4
+      sessions-primary  | sessions  | primary   | 3
+      sessions-replica  | sessions  | replica   | 3
+      search-primary    | search    | primary   | 2
+      search-replica    | search    | replica   | 2
+
+      All six roles are mandatory. A placement may not resize a role, split it, create a third
+      replica, or leave a role unplaced.
+  - id: planner-proposals
+    type: table
+    label: Candidate baseline placements
+    content: |
+      proposal | ledger-primary | ledger-replica | sessions-primary | sessions-replica | search-primary | search-replica
+      Alpha    | alpha          | beta           | gamma            | epsilon          | beta           | alpha
+      Beta     | alpha          | gamma          | gamma            | delta            | epsilon        | alpha
+      Gamma    | alpha          | beta           | gamma            | delta            | epsilon        | delta
+
+      Evaluate every named node assignment against every hard rule in [placement-contract], including
+      capacities accumulated across all roles in a row.
+  - id: maintenance-change
+    type: diff
+    label: M1 node drain and proposed recovery P1
+    content: |
+      M1 is evaluated independently from the baseline. During M1, delta is unavailable and cannot host
+      any role:
+
+      --- node-inventory (M1)
+      +++ node-inventory (M1)
+      - delta: zone=east, capacity=4, labels=[nvme], state=ready
+      + delta: zone=east, capacity=0, labels=[nvme], state=drained
+
+      P1 is the only proposed recovery change. Evaluate it together with M1:
+
+      --- node-inventory (M1)
+      +++ node-inventory (M1 + P1)
+      - beta: zone=west, capacity=5, labels=[nvme,hsm,quorum,edge], state=ready
+      + beta: zone=west, capacity=6, labels=[nvme,hsm,quorum,edge], state=ready
+
+      P1 changes neither zone nor labels on any node, does not restore delta, and does not alter
+      [placement-contract] or [shard-catalog].
+  - id: operator-note
+    type: note
+    label: Unverified quorum-room comments
+    content: |
+      These are unverified statements from a maintenance chat. They do not add or override rules.
+
+      1. "Gamma can host ledger-replica because it has hsm; the quorum label is only for primaries."
+      2. "Putting sessions-replica on epsilon and search-primary on beta merely swaps two west workloads."
+      3. "Gamma has unused capacity after sessions-primary, so search-replica can move there in the
+          baseline if alpha becomes busy."
+      4. "Draining delta is harmless because sessions-replica can move to epsilon without changing
+          anything else."
+      5. "P1 is a capacity-only patch, so it cannot cure an infeasible M1 placement."
+tags: [quorum, replicas, placement, zones, constraint-reconciliation]

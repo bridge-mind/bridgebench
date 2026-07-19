@@ -13,6 +13,7 @@ import {
   shouldPublishRemoteMatches,
 } from '../src/remote-arena.js';
 import { SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
+import { TASKS_PER_CATEGORY, TASKS_PER_CLUSTER } from '../src/tasks.js';
 import { CATEGORY_CLUSTERS, METHODOLOGY_VERSION, type ArenaRunConfig } from '../src/types.js';
 
 const apiConfig = {
@@ -47,13 +48,11 @@ function speedPublicTask(cluster: string, index: number) {
   };
 }
 
-/** A balanced public-only speed pack: 18 tasks, three per cluster. */
+/** A balanced public-only speed pack: TASKS_PER_CLUSTER tasks per cluster. */
 function speedPack() {
-  const tasks = CATEGORY_CLUSTERS.speed.flatMap((cluster) => [
-    speedPublicTask(cluster, 1),
-    speedPublicTask(cluster, 2),
-    speedPublicTask(cluster, 3),
-  ]);
+  const tasks = CATEGORY_CLUSTERS.speed.flatMap((cluster) =>
+    Array.from({ length: TASKS_PER_CLUSTER }, (_, index) => speedPublicTask(cluster, index + 1)),
+  );
   return {
     category: 'speed',
     methodologyVersion: METHODOLOGY_VERSION,
@@ -81,7 +80,7 @@ describe('remote speed run', () => {
       vi.fn(async () => jsonResponse(speedPack())),
     );
     const { tasks } = await fetchExecutionPack(apiConfig, 'speed');
-    expect(tasks).toHaveLength(18);
+    expect(tasks).toHaveLength(TASKS_PER_CATEGORY);
     expect(tasks.every((task) => task.private === null && task.privateHash === null)).toBe(true);
   });
 

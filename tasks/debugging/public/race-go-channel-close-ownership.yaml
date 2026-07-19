@@ -1,0 +1,110 @@
+id: race-go-channel-close-ownership
+version: 1.0.0
+category: debugging
+cluster: concurrency-defect
+difficulty: expert
+title: Two Producers Each Close a Shared Results Channel
+summary: >-
+  A Go fan-in helper gives both producers ownership of closing the same channel. Depending on which
+  producer finishes first, the consumer may range-exit early, the other producer may panic on send, or a
+  second close may panic after all values arrive. Reconstruct happens-before relations and choose a
+  single-owner close protocol that preserves cancellation and drains exactly the successful results.
+prompt: |
+  Diagnose the fictional HarborScan fan-in using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State ownership and lifecycle invariants for producers, the results channel, cancellation, and the
+     consumer. Identify which operations synchronize and which are unordered.
+  2. Trace schedules A through E operation by operation. State values observed, range termination, panic
+     site, error result, and goroutine liveness.
+  3. Identify the root cause. Explain why channel buffering, GOMAXPROCS, a recover in the HTTP handler, and
+     result append locking are red herrings or merely change timing.
+  4. Distinguish send-on-closed from close-of-closed provenance and explain why both follow from the same
+     ownership violation rather than two unrelated defects.
+  5. Classify P1 through P4. Select the adequate fix and show its happens-before chain for normal completion,
+     first error, and caller cancellation.
+  6. Give deterministic tests using barriers rather than sleeps for first-producer-fast, second-producer-fast,
+     simultaneous close, error cancellation, blocked send, zero jobs, and race-detector execution.
+
+  Go-semantics and function-inventory are exhaustive; producer work has no side effects outside results.
+artifacts:
+  - id: fanin-code
+    type: code
+    label: Go fan-in implementation
+    content: |
+      func ScanAll(ctx context.Context, local, remote []Job) ([]Result, error) {
+        ctx, cancel := context.WithCancel(ctx)
+        defer cancel()
+        results := make(chan Result, 1)
+        errs := make(chan error, 2)
+
+        producer := func(jobs []Job) {
+          defer close(results)
+          for _, job := range jobs {
+            r, err := scan(ctx, job)
+            if err != nil { errs <- err; cancel(); return }
+            select { case results <- r: case <-ctx.Done(): errs <- ctx.Err(); return }
+          }
+          errs <- nil
+        }
+        go producer(local)
+        go producer(remote)
+
+        var out []Result
+        for r := range results { out = append(out, r) }
+        if err := <-errs; err != nil { return nil, err }
+        if err := <-errs; err != nil { return nil, err }
+        return out, nil
+      }
+  - id: go-semantics
+    type: spec
+    label: authoritative channel behavior
+    content: |
+      Exactly one goroutine may successfully close a channel. Closing an already closed channel panics.
+      Sending on a closed channel panics. Receiving drains buffered values, then returns zero/false; range
+      exits then. Close synchronizes before a receive observes closure, but operations in separate producers
+      have no order unless explicitly coordinated. Recovering outside the panicking goroutine cannot catch
+      its panic. A WaitGroup Wait returns only after every corresponding Done.
+  - id: schedules
+    type: table
+    label: controlled interleavings at HEAD
+    content: |
+      A local sends L1, returns, defers close; consumer drains L1/exits; remote next sends R1 -> panic send closed
+      B remote sends R1/returns/closes; local has no more sends, returns -> panic close of closed
+      C local closes while remote is blocked trying to send R2 to full buffer; consumer drains buffered R1,
+        remote resumes send R2 -> panic send closed
+      D local scan errors, sends ErrLocal/cancels/defers close; remote select observes ctx.Done and returns,
+        then its defer closes again -> panic before parent reliably receives both errs
+      E local=[] and remote=[] -> both immediately defer close; exactly one close succeeds, one panics
+      Panics occur in producer goroutines. Their deferred close runs regardless of the return path.
+  - id: incident-log
+    type: log
+    label: reproduced failures under barriers
+    content: |
+      run=11 local_done -> close(results); remote_send job=R1 -> panic: send on closed channel
+      run=12 remote_done -> close(results); local_done -> panic: close of closed channel
+      run=13 local_error=timeout cancel=true; remote_cancel_seen; panic: close of closed channel
+      HTTP middleware recovery did not emit a response because the panic occurred in a child goroutine.
+      `go test -race` reports no data race in append: only the consumer mutates out.
+  - id: lifecycle-contract
+    type: spec
+    label: required behavior
+    content: |
+      Each successful scan result before cancellation is sent at most once. Producers never close a channel
+      they do not solely own. One coordinator closes results only after all producers stop sending. Consumer
+      drains until that close. First error cancels remaining work and is returned after goroutines terminate;
+      cancellation must unblock sends. Zero jobs returns an empty result without panic or leak.
+  - id: patch-candidates
+    type: diff
+    label: proposed concurrency fixes
+    content: |
+      P1: Increase results buffer to len(local)+len(remote). Second close still panics; memory scales with work.
+      P2: Wrap each close in `defer func(){ recover() }()`. This masks close-of-closed but sends after the first
+          close still panic or are lost, and lifecycle ownership remains invalid.
+      P3: Remove producer closes; add WaitGroup count=2, each producer defers Done, and a coordinator goroutine
+          waits then closes results exactly once. Consumer ranges until coordinator close. Record errors in a
+          bounded channel with deterministic source index, cancel on first observation, then wait/drain and
+          return the contract-ordered error.
+      P4: Have the consumer close results after its first receive so producers know no more values are needed.
+          Producers can still be sending, producing immediate send-on-closed panics.
+tags: [debugging, concurrency-defect, go, channels, ownership]

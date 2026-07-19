@@ -1,0 +1,78 @@
+id: counterexample-vector-clock-compaction
+version: 1.0.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Counterexamples to Scalar-Sum Compaction of Vector-Clock Causality
+summary: Audit a claimed causality-preserving vector-clock compaction over a finite event set, producing minimal false-order and lost-order witnesses and testing replacement rules.
+prompt: |
+  A replication library replaces vector clocks with `(sum,writer)` keys and claims the comparator
+  preserves causality on [event-domain]. Use the definitions exactly.
+
+  1. Decide the claim. Give the earliest ordered pair `(Ei,Ej)` in row-major domain order that is
+     concurrent by vectors but ordered by compact keys.
+  2. Give the earliest causal pair whose compact keys collide or reverse, or prove none exists.
+  3. Partition all unordered event pairs into vector-causal, vector-equal, and concurrent classes.
+  4. For every concurrent pair, state the compact comparator result and identify all false orders.
+  5. Evaluate alternatives A-D: which preserve the vector happens-before relation and which preserve
+     concurrency? Supply a witness for each failed property.
+  6. Specify property-based test predicates and the exact exhaustive oracle over [event-domain].
+artifacts:
+  - id: clock-contract
+    type: spec
+    label: Vector and compact comparison rules
+    content: |
+      For vectors x,y over replicas (A,B,C), x happens-before y iff every component x<=y and at least
+      one is smaller. Equal means all components equal. Otherwise they are concurrent.
+
+      compact(v,writer)=(v.A+v.B+v.C,writer). Compact comparator orders first by numeric sum, then by
+      writer lexicographically A<B<C; identical pairs compare equal. The claim is: for every event
+      pair, compact comparison returns before/equal/concurrent exactly as vector comparison. In fact
+      this comparator has no concurrent return unless an alternative explicitly adds one.
+  - id: event-domain
+    type: table
+    label: Exhaustive events in order
+    content: |
+      event | vector  | writer
+      E1    | (1,0,0) | A
+      E2    | (0,1,0) | B
+      E3    | (1,1,0) | B
+      E4    | (2,0,0) | A
+      E5    | (1,0,1) | C
+      E6    | (2,1,0) | A
+      E7    | (1,1,0) | C
+
+      Ordered-pair search uses i=1..7 then j=1..7, skipping i=j. Pair partitions use i<j.
+  - id: implementation
+    type: code
+    label: Shipped compaction comparator
+    content: |
+      type Key = { sum: number; writer: "A"|"B"|"C" };
+      function compare(x: Key, y: Key) {
+        if (x.sum !== y.sum) return x.sum < y.sum ? "before" : "after";
+        if (x.writer === y.writer) return "equal";
+        return x.writer < y.writer ? "before" : "after";
+      }
+  - id: design-claim
+    type: note
+    label: Maintainer proof sketch
+    content: |
+      "Every local increment raises the sum, so sum order is causal order. Writer breaks harmless
+      ties. Equal vectors remain equal because they have the same sum." The sketch does not discuss
+      concurrency or two events with one vector but different writer metadata.
+  - id: alternatives
+    type: diff
+    label: Candidate representations
+    content: |
+      A. Keep the full three-component vector and apply [clock-contract].
+      B. Store sum only; equal sums compare equal.
+      C. Store max component plus writer; compare lexicographically.
+      D. Store the full vector but use sum comparator for sorting and call all unequal sums causal.
+  - id: consumer-invariant
+    type: spec
+    label: Why both properties matter
+    content: |
+      The merge engine may discard x only when x happens-before y. Concurrent values must both be
+      retained for conflict resolution. Vector-equal events may deduplicate only when their payload
+      identity also matches; writer is metadata and is not part of vector equality.
+tags: [vector-clocks, distributed-systems, counterexample, causality, compaction]

@@ -1,0 +1,103 @@
+id: state-corruption-crdt-tombstone
+version: 1.0.0
+category: debugging
+cluster: state-corruption
+difficulty: expert
+title: Local-Age Tombstone Compaction Resurrects a Deleted Offline-Replica Note
+summary: >-
+  An observed-remove set compacts delete tombstones after seven local days without proving that every
+  replica has observed them. An offline replica later syncs a causally older add whose dot was formerly
+  dominated by the deleted context, and the note reappears. Track dots, version vectors, merge order, and
+  compaction frontiers to identify the first invariant-breaking deletion and an adequate causal-stability fix.
+prompt: |
+  Diagnose the fictional FieldNotes CRDT using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State add/remove, merge, tombstone, causal-stability, replica-retirement, and compaction invariants.
+  2. Trace schedule T0 through T10. Track live dots, tombstone context, version vector, stable frontier, and
+     note visibility on replicas A, B, and C.
+  3. Identify the first corrupting state transition. Separate the delayed old Add delivered by the protocol
+     from the compactor's unsafe loss of causal evidence.
+  4. Explain why LWW wall time, seven-day retention, duplicate-message id, encrypted sync, and UI cache are
+     red herrings or inadequate substitutes for causal stability.
+  5. Classify P1 through P4 and select the adequate fix. Explain safe treatment of permanently retired
+     replicas and a rejoining device whose identity was retired.
+  6. Give deterministic model/property tests for add-delete-reorder, offline beyond retention, concurrent
+     add/delete, duplicate deltas, replica retirement, snapshot bootstrap, and repeated compaction.
+
+  crdt-contract defines this benchmark's exact observed-remove semantics.
+artifacts:
+  - id: crdt-contract
+    type: spec
+    label: authoritative observed-remove set model
+    content: |
+      Each Add(note) has a unique dot (replica,counter). Remove records the set of observed add dots in a
+      tombstone context. A merge keeps an add only if its dot is not dominated by a retained remove context.
+      Tombstone evidence may be discarded only after a causally stable frontier proves every active replica
+      has acknowledged a version vector at or beyond the remove. An administratively retired replica is
+      excluded only after retirement is durably replicated; it must rejoin with a new identity and snapshot.
+      Wall-clock age does not prove observation. Merge is idempotent, associative, and commutative.
+  - id: implementation
+    type: code
+    label: current merge and compactor
+    content: |
+      add(note, dot) => live[note].insert(dot); vv.observe(dot)
+      remove(note) => tombstones[note] |= live[note]; live.remove(note); vv.increment(localReplica)
+      merge(delta) =>
+        vv = max(vv, delta.vv)
+        tombstones |= delta.tombstones
+        live |= delta.live.filter(dot => !tombstones.dominates(dot))
+
+      compact(now):
+        for (note, context) in tombstones:
+          if now - context.local_recorded_at > 7days: tombstones.remove(note)
+      // stableFrontier is received from coordinator but compact does not read it.
+  - id: causal-schedule
+    type: log
+    label: deterministic three-replica history
+    content: |
+      T0 A,B,C active; vv all {A:0,B:0,C:0}
+      T1 C Add N dot(C,1), syncs D-add to A/B, then goes offline before receiving later operations
+      T2 A/B live={C1}; C retains an unacknowledged/replayable copy of D-add
+      T3 A Remove N after observing C1; tombstone={C1}; remove event advances A to A1; sync B
+      T4 A/B live is empty; C has not acknowledged remove A1
+      T5 stable frontier from active set remains A:0 because active replica C has not seen A1
+      T6 8 local days pass; current compact deletes tombstone {C1} despite unstable frontier
+      T7 C reconnects with vv C:1 and resends its delayed D-add live={C1}
+      T8 A/B merge: no tombstone dominates C1; live N={C1}; note becomes visible
+      T9 UI reads replicated CRDT and displays N
+      T10 duplicate D-add is idempotent but N remains visible
+  - id: state-matrix
+    type: table
+    label: expected versus observed states
+    content: |
+      Before unsafe compaction: merge delayed C1 with retained remove context {C1} -> C1 is dominated and
+        filtered; N stays deleted under observed-remove semantics.
+      Product delete contract: after recording remove context {C1}, the server requires all active replicas to
+        acknowledge A1 or snapshot before that context is causally stable. At T4 C remains active, so the
+        barrier is pending and the tombstone/context must not compact.
+      At T6 expected: retain {C1} until C ack or retirement; observed: context removed by age.
+      If C is retired before T6 through durable membership event, it must be denied incremental D-add and
+        rebootstrap with a new replica id, so old C1 cannot reenter.
+  - id: observers
+    type: note
+    label: ruled-out downstream components
+    content: |
+      Sync transport authenticates replica ids, encrypts deltas, and delivers exact bytes at least once.
+      UI cache invalidates on CRDT revision and displays precisely whether live[N] is nonempty. Database audit
+      shows the tombstone DELETE at T6 and C1 merge at T8; no alternate note writer exists. Message ids dedupe
+      exact retransmissions but do not encode causal dominance or membership retirement.
+  - id: patch-candidates
+    type: diff
+    label: proposed compaction patches
+    content: |
+      P1: Retain tombstones 30 days instead of 7. A replica can remain offline 31 days.
+      P2: Compare remove wall-clock timestamp against Add timestamp and keep whichever is later. Replica clocks
+          are not causality, and concurrent updates become order-dependent.
+      P3: Compact only contexts dominated by a coordinator-computed stable frontier over all active replica
+          acknowledgements and final-delete barriers. Durably replicate retirement before excluding a replica;
+          reject incremental sync from retired identities and require new-id snapshot bootstrap. Persist frontier
+          and compaction atomically so crash/replay cannot move it backward.
+      P4: Have the UI remember every note id ever deleted and hide it forever. Other replicas/database remain
+          corrupt, legitimate later re-adds disappear, and new clients lack the cache.
+tags: [debugging, state-corruption, crdt, tombstone, causal-stability]

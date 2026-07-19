@@ -1,0 +1,160 @@
+id: root-clock-skew-auth
+version: 1.1.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: Auth Tokens Rejected After a Skewed Signing Clock Drift Past MaxSkew
+summary: >-
+  A single region's auth tokens suddenly fail signature-time validation while other regions remain
+  healthy. Trace token minting, clock sources, validation windows, and incident logs to isolate the
+  one defect that converts a tolerable NTP lag into hard 401s.
+prompt: |
+  TokenGate's `region-coral` issuers began returning 401 `iat_in_future` at 14:10 while `region-slate`
+  continued to succeed. Operators increased worker count and proposed lengthening token TTL. Reconstruct
+  the incident using only these artifacts. Clock skew is expected in distributed systems; the required
+  validation behavior for it is explicit.
+
+  1. Root cause. Name the single software or configuration defect, cite the exact expression or config
+     key, and the runtime fact that makes validation fail. Distinguish the trigger (NTP step) from the
+     defect that makes coral tokens permanently rejected after the step.
+  2. Causal chain. Trace event T-440 through mint, wire transfer, and validation. Cite the relevant
+     [incident-log] facts, including why slate tokens with the same claims shape still verify.
+  3. Decoy elimination. Explain why token TTL, worker concurrency, a revoked signing key, and network
+     latency are not the root cause. Use [auth-contract], [issuer-config], and the logs.
+  4. Fix review. Choose the one correct candidate in [proposed-fixes]. Explain why it is minimal and
+     why every other candidate either weakens security incorrectly or leaves the same skew mechanism
+     alive.
+  5. Blast radius. State exactly which region/issuer pairs can fail under this defect and which remain
+     unaffected. Tie the boundary to the clock source binding, not to global traffic volume.
+  6. Recovery. State the ordered operational outcome after deploying the correct fix for currently
+     failing coral tokens and newly minted ones, including what must happen before pre-fix coral
+     tokens become acceptable again (if ever).
+artifacts:
+  - id: validator-code
+    type: code
+    label: tokengate/src/validate-token.ts (deployed)
+    content: |
+      export function validateToken(token: ParsedJwt, nowMs: number, cfg: ValidatorConfig): void {
+        if (token.exp * 1000 <= nowMs) {
+          throw new AuthError("token_expired");
+        }
+        // iat must not be after the validator's clock plus maxSkew.
+        if (token.iat * 1000 > nowMs + cfg.maxSkewMs) {
+          throw new AuthError("iat_in_future");
+        }
+        if (!verifySignature(token, cfg.jwks)) {
+          throw new AuthError("bad_signature");
+        }
+      }
+
+      // nowMs is always taken from the VALIDATOR host clock (process.hrtime wall clock).
+      // Token iat/exp are set by the ISSUER at mint time. No other skew adjustments exist.
+  - id: auth-contract
+    type: spec
+    label: Complete TokenGate time-claim contract
+    content: |
+      ISSUER DUTIES
+        - Set `iat` to the issuer's current Unix seconds at mint.
+        - Set `exp` to iat + ttlSeconds.
+        - Sign with the region's active key from [issuer-config].
+
+      VALIDATOR DUTIES
+        - Reject when exp*1000 <= validatorNowMs (`token_expired`).
+        - Reject when iat*1000 > validatorNowMs + maxSkewMs (`iat_in_future`).
+        - Reject when the signature does not verify against the advertised JWKS (`bad_signature`).
+        - Accept otherwise with HTTP 200.
+
+      maxSkewMs exists specifically to tolerate issuer clocks that run slightly ahead of validators.
+      A correctly configured deployment must keep |issuerNow - validatorNow| strictly below maxSkewMs
+      under steady NTP, and must not mint with a synthetic future iat.
+
+      This is the complete time-claim contract for the incident. TTL lengthening does not change the
+      iat_in_future rule.
+  - id: issuer-config
+    type: config
+    label: Deployed issuer and validator settings by region
+    content: |
+      regions:
+        region-coral:
+          issuerClockSource: "ntp-pool-coral"   # stepped +120s at 14:09:50 (see incident-log)
+          validatorClockSource: "ntp-pool-core" # did not step
+          ttlSeconds: 300
+          maxSkewMs: 60000                      # 60 seconds
+          activeKid: "coral-key-3"
+        region-slate:
+          issuerClockSource: "ntp-pool-core"
+          validatorClockSource: "ntp-pool-core"
+          ttlSeconds: 300
+          maxSkewMs: 60000
+          activeKid: "slate-key-1"
+
+      jwks_advertised_kids: ["coral-key-3", "slate-key-1"]
+      key_revocations_in_window: []
+
+      Both regions share the same validator binary and JWKS endpoint. Only clock sources and kids
+      differ. maxSkewMs was last changed 40 days ago; ttlSeconds was last changed 12 days ago.
+  - id: ntp-diff
+    type: diff
+    label: Coral NTP step that occurred at 14:09:50
+    content: |
+      # ntp-pool-coral chrony step (automatic, not a code deploy)
+      --- coral issuer wall clock before step
+      +++ coral issuer wall clock after step
+      - offset_from_utc: +0.2s
+      + offset_from_utc: +120.0s
+
+      ntp-pool-core (validators and slate issuers) did not step:
+        offset_from_utc remained between -0.1s and +0.3s for the entire incident window.
+
+      No application release, JWKS change, or maxSkewMs change accompanied this NTP event.
+  - id: incident-log
+    type: log
+    label: Ordered mint and validation incident log
+    content: |
+      14:09:50 ntp      ntp-pool-coral stepped issuer clocks +120s
+      14:10:00 issuer   coral mint T-440 iat=14:12:00Z exp=14:17:00Z kid=coral-key-3
+      14:10:00 validatr coral validate T-440 validatorNow=14:10:00Z => 401 iat_in_future
+      14:10:01 issuer   slate mint T-441 iat=14:10:01Z exp=14:15:01Z kid=slate-key-1
+      14:10:01 validatr slate validate T-441 validatorNow=14:10:01Z => 200
+      14:10:05 issuer   coral mint T-442 iat=14:12:05Z exp=14:17:05Z kid=coral-key-3
+      14:10:05 validatr coral validate T-442 => 401 iat_in_future (deltaMs=120000)
+      14:10:10 validatr coral validate T-440 again => 401 iat_in_future (same claims)
+      14:11:00 ops      increased validator workers 8 -> 16; slate continues 200
+      14:12:00 ops      proposed ttlSeconds 300 -> 900
+      14:13:00 monitor  coral_401_iat_in_future=842 slate_200=1901 bad_signature=0 token_expired=0
+      14:13:00 monitor  coral_issuer_offset_ms=+120000 validator_offset_ms=+200
+
+      T-440's signature verifies when the iat check is skipped in a lab replay; bad_signature is not
+      observed in production for these tokens.
+  - id: proposed-fixes
+    type: diff
+    label: Candidate remediation changes
+    content: |
+      Fix A — disable the iat check entirely:
+        - if (token.iat * 1000 > nowMs + cfg.maxSkewMs) {
+        -   throw new AuthError("iat_in_future");
+        - }
+
+      Fix B — point coral issuers at the same NTP source as validators and wait for resync:
+        regions.region-coral.issuerClockSource: "ntp-pool-coral" -> "ntp-pool-core"
+        # after resync, coral issuer offset returns to < 1s; maxSkewMs stays 60000
+
+      Fix C — raise TTL only:
+        - ttlSeconds: 300
+        + ttlSeconds: 900
+
+      Fix D — add validators:
+        - validator workers: 8
+        + validator workers: 32
+
+      No candidate modifies JWKS kids or the exp check. Evaluate each against [auth-contract].
+  - id: triage-note
+    type: note
+    label: Unverified incident-room conclusions
+    content: |
+      1. "T-440 fails because coral-key-3 was revoked."
+      2. "Raising ttlSeconds to 900 will stop iat_in_future because exp moves later."
+      3. "More validator workers will absorb the 401 spike."
+      4. "slate fails too, but the dashboard only samples coral."
+      5. "maxSkewMs of 60s should already cover a 120s forward step."
+tags: [auth, jwt, clock-skew, ntp, root-cause-reasoning]

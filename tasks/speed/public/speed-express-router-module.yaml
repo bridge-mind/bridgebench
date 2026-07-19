@@ -1,0 +1,49 @@
+id: speed-express-router-module
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: hard
+title: Generate a Typed Express Router Module for a Products API
+summary: >-
+  Produce a complete, self-contained Express router module in TypeScript wrapping five REST endpoints,
+  including inline validation, API key authentication middleware, and global error handling.
+prompt: |
+  Write a single TypeScript module `productsRouter.ts` that implements an Express router matching [products-api] and [router-rules]. Emit the full file.
+
+  1. Define interfaces for `Product`, `CreateProductInput`, and `UpdateProductInput`.
+  2. Implement a private/local `apiKeyGuard` middleware that validates the `x-api-key` header.
+  3. Implement the five endpoints: GET `/products`, GET `/products/:id`, POST `/products`, PUT `/products/:id`, and DELETE `/products/:id`.
+  4. Include inline validation for inputs and a centralized error handling middleware at the end of the router.
+artifacts:
+  - id: products-api
+    type: spec
+    label: Products API Specification
+    content: |
+      Endpoints:
+      - GET /products?category=&minPrice=&limit= -> 200 Product[]
+      - GET /products/{id}                       -> 200 Product | 404 Not Found
+      - POST /products                           -> 201 Product | 400 Bad Request
+      - PUT /products/{id}                       -> 200 Product | 400 Bad Request | 404 Not Found
+      - DELETE /products/{id}                    -> 204 No Content | 404 Not Found
+
+      Types:
+      - Product = { id: string; name: string; category: string; price: number; inStock: boolean; createdAt: string }
+      - CreateProductInput = { name: string; category: string; price: number; inStock?: boolean }
+      - UpdateProductInput = { name?: string; category?: string; price?: number; inStock?: boolean }
+  - id: router-rules
+    type: spec
+    label: Router Implementation Rules
+    content: |
+      - Use `express.Router()` to create and export the router as default.
+      - Use an in-memory `Product[]` array as the mock database, pre-populated with at least 2 sample products.
+      - Implement `apiKeyGuard` middleware:
+        - Checks the `x-api-key` header.
+        - If missing or not equal to `super-secret-key`, returns `401 Unauthorized` with `{ error: "Unauthorized" }`.
+        - Apply this guard to all write endpoints (POST, PUT, DELETE).
+      - Input Validation:
+        - POST `/products`: `name` (non-empty string), `category` (non-empty string), `price` (positive number). If invalid, return `400 Bad Request` with `{ error: "Invalid input" }`.
+        - PUT `/products/:id`: validate any provided fields. If invalid, return `400`.
+      - IDs should be generated as UUIDs (or simple sequential strings if preferred, but UUID-like strings are standard).
+      - Ensure proper Express response status codes are used (200, 201, 204, 400, 401, 404, 500).
+      - Add a standard Express error-handling middleware `(err, req, res, next)` at the bottom of the router to catch unexpected errors and return `500 Internal Server Error` with `{ error: "Internal Server Error" }`.
+tags: [typescript, express, nodejs, api-router]

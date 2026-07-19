@@ -1,0 +1,74 @@
+id: cal-debugging-cache-key
+task:
+  public:
+    id: cal-debugging-cache-key
+    version: 1.0.0
+    category: debugging
+    cluster: root-cause-isolation
+    difficulty: hard
+    title: Stale prices for the wrong tenant
+    summary: Isolate the root cause of cross-tenant cache pollution from the code and one failing trace.
+    prompt: |
+      Customers report seeing another tenant's prices for about a minute after any price update.
+      Deliverables:
+      1. The root cause, citing the exact line.
+      2. Why the bug clears after ~60 seconds.
+      3. The minimal fix.
+    artifacts:
+      - id: price-service
+        type: code
+        label: price-service.ts
+        content: |
+          const TTL_SECONDS = 60;
+          async function getPrice(tenantId: string, sku: string): Promise<number> {
+            const key = `price:${sku}`;                    // L3
+            const cached = await cache.get(key);
+            if (cached !== null) return Number(cached);
+            const price = await db.priceFor(tenantId, sku); // L6: per-tenant lookup
+            await cache.set(key, String(price), TTL_SECONDS);
+            return price;
+          }
+      - id: failing-trace
+        type: log
+        label: Failing request trace
+        content: |
+          10:00:01 tenant=acme   getPrice sku=CHAIR -> db.priceFor(acme, CHAIR) = 100; cache.set price:CHAIR
+          10:00:09 tenant=globex getPrice sku=CHAIR -> cache hit price:CHAIR = 100   (globex price in db is 80)
+  private:
+    id: cal-debugging-cache-key
+    version: 1.0.0
+    expectedResolution: |
+      1. The cache key on L3 omits the tenant: `price:${sku}`. The DB read on L6 is per-tenant, but
+         the cached value is shared, so whichever tenant populates the key first serves its price to
+         every tenant with that SKU (trace: globex receives acme's 100 instead of 80).
+      2. The entry expires after TTL_SECONDS=60, after which the next tenant repopulates it — so the
+         pollution self-clears in about a minute.
+      3. Include the tenant in the key: `price:${tenantId}:${sku}`.
+    requiredEvidence:
+      - price-service
+      - failing-trace
+    disqualifyingErrors:
+      - Blaming the TTL or proposing to shorten/remove it as the fix.
+      - A fix that disables caching entirely.
+    rubric:
+      correctness: Root cause must be the tenant-less cache key on L3.
+      evidenceGrounding: Must connect L3 and L6 and the trace's cross-tenant hit.
+      constraintHandling: The fix must stay minimal — keying, not architecture.
+      completeness: All three deliverables answered.
+strongResponse: |
+  1. Root cause: L3 builds the cache key without the tenant — `price:${sku}` — while L6 fetches
+     per-tenant prices. The first tenant to miss populates a shared key; the trace shows globex
+     getting acme's 100 (its own price is 80) from `price:CHAIR`.
+  2. It clears in ~60s because cache.set uses TTL_SECONDS=60; when the entry expires the next
+     caller repopulates it (possibly correctly for that tenant).
+  3. Fix: key by tenant — `const key = \`price:\${tenantId}:\${sku}\``.
+weakResponse: |
+  1. Root cause: the 60-second TTL is too long for a pricing service, so updated prices linger in
+     the cache and users see stale values until expiry.
+  2. It clears after a minute because that is exactly when the stale entry times out.
+  3. Fix: drop TTL_SECONDS to 5, or call cache.delete on every price update so fresh prices are
+     always served.
+knownDifference: >
+  The weak response explains the 60-second window but not the cross-tenant symptom — globex seeing
+  acme's price is a keying bug, not a staleness bug, and shortening the TTL only narrows the window.
+  The strong response isolates the tenant-less key on L3 and gives the minimal keying fix.

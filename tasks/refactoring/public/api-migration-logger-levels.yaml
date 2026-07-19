@@ -1,0 +1,158 @@
+id: api-migration-logger-levels
+version: 1.1.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrating Lazy Warning Logs to a Structured Telemetry API
+summary: >-
+  A warning log with a lazy formatter, structured fields, and exception channel is migrated to a
+  new telemetry API. Four candidate migrations are proposed; classify each as behavior-preserving,
+  behavior-changing, or goal-missing, tracing the two threshold scenarios.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (legacy-api, telemetry-api,
+  report-original, migration-contract, rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact
+  id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The goal is to migrate reportRetry off legacyLog and onto telemetry.record while preserving
+  threshold behavior, formatter evaluation count, emitted severity and route, message, attributes,
+  and exception identity/stack/fingerprint.
+
+  1. Classify rewrite-a and trace L1 and L2.
+  2. Classify rewrite-b. Under L1, state whether an event is emitted, which route receives it, and
+     how many times formatFailure runs versus report-original.
+  3. Classify rewrite-c. Under L1, distinguish event suppression from formatter side effects.
+  4. Classify rewrite-d. Under L2, list which observable fields remain correct and which exception
+     outputs differ.
+  5. State which rewrites, if any, are behavior-preserving migrations. Give the complete
+     report-original outcomes for L1 and L2.
+artifacts:
+  - id: legacy-api
+    type: spec
+    label: legacy logger — complete API and runtime semantics
+    content: |
+      legacyLog.write(input: {
+        level: 'debug' | 'information' | 'warning' | 'failure';
+        message: () => string;
+        fields?: Record<string, unknown>;
+        error?: Error;
+      }): void
+
+      Severity order is debug < information < warning < failure. The runtime threshold is compared
+      before message() is evaluated. A below-threshold event is discarded and message() is never
+      called. An enabled event evaluates message() exactly once.
+
+      Enabled warning events go to the warning route. `fields` are attached unchanged. `error` is
+      the dedicated exception channel: it preserves object identity, stack, and fingerprint.
+      The API has no other defaults or hidden transformations relevant to this task.
+  - id: telemetry-api
+    type: spec
+    label: telemetry.record — complete replacement API
+    content: |
+      telemetry.record(input: {
+        severity: 'debug' | 'info' | 'warn' | 'error';
+        message?: string;
+        messageFactory?: () => string;
+        attributes?: Record<string, unknown>;
+        exception?: Error;
+      }): void
+
+      Severity order is debug < info < warn < error. telemetry.record applies the runtime threshold
+      first. If enabled, it uses `message` when supplied; otherwise it invokes messageFactory exactly
+      once. If disabled, it does not invoke messageFactory.
+
+      Enabled warn events go to the warning route; error events go to the paging error route.
+      `attributes` are attached unchanged. Only `exception` is the dedicated exception channel and
+      preserves identity, stack, and fingerprint. An Error stored under attributes.error is merely
+      an ordinary attribute: it creates no exception stack or fingerprint. No other behavior exists.
+  - id: report-original
+    type: code
+    label: retry/report.ts — legacy call site
+    content: |
+      let formatCount = 0;
+      function formatFailure(job: Job, error: Error): string {
+        formatCount += 1;
+        return `retry ${job.id}: ${error.message}`;
+      }
+
+      export function reportRetry(job: Job, attempt: number, error: Error): void {
+        legacyLog.write({
+          level: 'warning',
+          message: () => formatFailure(job, error),
+          fields: { jobId: job.id, attempt },
+          error,
+        });
+      }
+  - id: migration-contract
+    type: note
+    label: exhaustive logger migration map and scenarios
+    content: |
+      The APIs' exhaustive behavior-preserving map is:
+        debug -> debug
+        information -> info
+        warning -> warn
+        failure -> error
+        message thunk -> messageFactory (do not call it before telemetry.record)
+        fields -> attributes
+        error -> exception
+
+      Runtime thresholds are configured at matching semantic levels. The only observables are:
+      event emitted or suppressed, route, severity, message, ordered formatCount mutation,
+      attributes, and exception identity/stack/fingerprint. reportRetry has no other callers or
+      effects. Each scenario begins with formatCount = 0:
+
+        L1: threshold is failure/error. Call reportRetry(job id J-9, attempt 2, Error("timeout")).
+            Reference: warning is below threshold; no event; formatCount remains 0.
+
+        L2: threshold is information/info. Make the same call.
+            Reference: one warning-route event at warning/warn severity; message
+            "retry J-9: timeout"; attributes {jobId:"J-9", attempt:2}; the exact Error is present
+            in the exception channel with stack and fingerprint; formatCount is 1.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — semantic level and channel mapping
+    content: |
+      export function reportRetry(job: Job, attempt: number, error: Error): void {
+        telemetry.record({
+          severity: 'warn',
+          messageFactory: () => formatFailure(job, error),
+          attributes: { jobId: job.id, attempt },
+          exception: error,
+        });
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — alternate severity mapping
+    content: |
+      export function reportRetry(job: Job, attempt: number, error: Error): void {
+        telemetry.record({
+          severity: 'error',
+          messageFactory: () => formatFailure(job, error),
+          attributes: { jobId: job.id, attempt },
+          exception: error,
+        });
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — eagerly produce the message string
+    content: |
+      export function reportRetry(job: Job, attempt: number, error: Error): void {
+        telemetry.record({
+          severity: 'warn',
+          message: formatFailure(job, error),
+          attributes: { jobId: job.id, attempt },
+          exception: error,
+        });
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — put the error beside normal attributes
+    content: |
+      export function reportRetry(job: Job, attempt: number, error: Error): void {
+        telemetry.record({
+          severity: 'warn',
+          messageFactory: () => formatFailure(job, error),
+          attributes: { jobId: job.id, attempt, error },
+        });
+      }
+tags: [refactoring, api-migration, logging, severity-levels, lazy-evaluation]

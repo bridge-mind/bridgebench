@@ -1,5 +1,5 @@
 id: fabricated-config-keys
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: fabricated-concepts
 difficulty: expert
@@ -101,12 +101,9 @@ artifacts:
         check on the written value still applies first.
       - TLS: tls_session_resumption and tls_ticket_lifetime_s are the ONLY
         TLS-related configuration keys in 4.x. TLS entropy is drawn from the
-        operating system CSPRNG; there is no entropy-related configuration key of
-        any kind.
-      - Keepalive: keepalive_timeout_ms is a FIXED idle timeout. lattice-gateway 4.x
-        does not auto-tune, scale, or adapt keepalive behavior; there is no
-        coefficient, feedback loop, or adaptive mechanism, and every idle close uses
-        the configured value exactly.
+        operating system CSPRNG.
+      - Keepalive: keepalive_timeout_ms is a FIXED idle timeout; every idle close
+        uses the configured value exactly.
   - id: prod-config
     type: config
     label: lattice-gateway production config as currently running (after CR-2213)

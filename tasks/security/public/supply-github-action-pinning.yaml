@@ -1,0 +1,115 @@
+id: supply-github-action-pinning
+version: 1.1.0
+category: security
+cluster: supply-chain
+difficulty: expert
+title: CI Pipeline — GitHub Actions Supply Chain Review
+summary: Review a fictional CI/CD pipeline configuration. Identify supply chain risks
+  related to dependency pinning and action execution. Decoys include an official action
+  pinned to a major tag, a strict package-lock, and a securely pinned third-party
+  action. Exactly one behavior is a critical supply chain vulnerability. Find the
+  single real flaw.
+prompt: |-
+  You are performing a defensive security review of a CI/CD pipeline configuration. Seven artifacts describe it: ci-workflow, package-json, package-lock-snippet, dependabot-config, action-a-source, action-b-source, and service-note.
+
+  Exactly one of the behaviors in these artifacts is a real, critical supply chain vulnerability that allows arbitrary code execution or repository compromise; the others are look-alikes that are neutralized or represent acceptable low-risk practices.
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you rely on for every claim.
+
+  1. Name the single real vulnerability class present in the module, using standard terminology, and point to the exact code behavior that constitutes it (name the artifact and the specific line/behavior).
+
+  2. State the precondition / exploitability chain: the specific facts across the artifacts that together make it reachable by an external caller.
+
+  3. A reviewer flags the use of `actions/checkout@v4` as a vulnerability because it is pinned to a mutable tag rather than a commit SHA. Rule it in or out and cite the mechanism that decides it.
+
+  4. A reviewer flags the `npm ci` command as vulnerable to malicious postinstall hooks. Rule it in or out, citing the evidence.
+
+  5. A reviewer flags the use of `third-party/action-a@v2` as a supply chain vulnerability. Rule it in or out and cite the evidence.
+
+  6. A reviewer flags the use of `third-party/action-b@a1b2c3d4e5f6g7h8i9j0` as a supply chain vulnerability. Rule it in or out and cite the evidence.
+
+  7. Give the severity of the one real vulnerability and the minimal control that closes it.
+artifacts:
+- id: ci-workflow
+  type: config
+  label: GitHub Actions CI Workflow
+  content: "# .github/workflows/ci.yml\nname: CI\non:\n  pull_request_target:\n  \
+    \  branches: [ main ]\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n\
+    \      - name:\
+    \ Checkout code\n        uses: actions/checkout@v4\n        with:\n          ref:\
+    \ ${{ github.event.pull_request.head.sha }}\n\n      - name: Run Action B\n\
+    \        uses: third-party/action-b@a1b2c3d4e5f6g7h8i9j0\n\n      - name: Run Action\
+    \ A\n        uses: third-party/action-a@v2\n\n      - name: Install\
+    \ dependencies\n        run: npm ci --ignore-scripts\n"
+- id: package-json
+  type: config
+  label: package.json
+  content: |-
+    {
+      "name": "project",
+      "version": "1.0.0",
+      "dependencies": {
+        "lodash": "^4.17.21"
+      }
+    }
+- id: package-lock-snippet
+  type: config
+  label: package-lock.json (Snippet)
+  content: |-
+    {
+      "name": "project",
+      "lockfileVersion": 3,
+      "requires": true,
+      "packages": {
+        "node_modules/lodash": {
+          "version": "4.17.21",
+          "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+          "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="
+        }
+      }
+    }
+- id: dependabot-config
+  type: config
+  label: Dependabot Configuration
+  content: |
+    # .github/dependabot.yml
+    version: 2
+    updates:
+      - package-ecosystem: "npm"
+        directory: "/"
+        schedule:
+          interval: "weekly"
+- id: action-a-source
+  type: code
+  label: Source of third-party/action-a
+  content: |
+    # action.yml for third-party/action-a
+    name: 'Action A'
+    description: 'Does something useful'
+    runs:
+      using: 'node20'
+      main: 'index.js'
+- id: action-b-source
+  type: code
+  label: Source of third-party/action-b
+  content: |
+    # action.yml for third-party/action-b
+    name: 'Action B'
+    description: 'Does something else useful'
+    runs:
+      using: 'node20'
+      main: 'index.js'
+- id: service-note
+  type: note
+  label: Pipeline Context Note
+  content: |-
+    Pipeline Context Note
+
+    - The `pull_request_target` trigger runs the workflow in the context of the base branch (main), granting it access to repository secrets and a read/write GITHUB_TOKEN.
+    - `third-party/action-a` and `third-party/action-b` are maintained by unknown external developers.
+    - The repository strictly requires all third-party actions to be pinned to immutable commit SHAs to prevent supply chain attacks.
+tags:
+- security
+- supply-chain
+- github-actions
+- pinning

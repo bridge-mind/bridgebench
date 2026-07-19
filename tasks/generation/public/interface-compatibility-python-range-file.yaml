@@ -1,0 +1,104 @@
+id: interface-compatibility-python-range-file
+version: 1.0.0
+category: generation
+cluster: interface-compatibility
+difficulty: expert
+title: Replace a Bounded Binary File View Without Breaking Seek, readinto, or Ownership
+summary: >-
+  Four Python adapters expose a bounded window over a shared binary file. Ordinary reads agree, but
+  only one preserves the frozen file-like interface across independent cursors, relative seeks,
+  short reads, buffer mutation, closed state, and ownership.
+prompt: |
+  Use only public-interface, backing-api, compatibility-vectors, adapters, and manifest. Cite artifact
+  ids. Verdicts are compatible / incompatible.
+
+  1. Classify adapter-a through adapter-d against I1..I9.
+  2. For each incompatibility, identify the first F1..F7 witness and exact return/bytes/position/error.
+  3. Identify the unique compatible adapter and trace F4 including backing offsets.
+  4. State which cursor is public and why the backing object's cursor is not observable.
+  5. Explain the required behavior of readinto when the destination is larger than remaining data.
+  6. Evaluate reviewer Quinn's claim that closing a view should close its backing file.
+artifacts:
+  - id: public-interface
+    type: spec
+    label: Exhaustive BoundedReader interface
+    content: |
+      BoundedReader(backing,start,length) creates a readable, seekable binary view over bytes
+      [start,start+length). start,length are nonnegative and in range at construction.
+
+      I1 each view has an independent logical position initially 0, even when sharing backing.
+      I2 read(size=-1) returns fresh bytes from the position, clipped to the view; size=0 returns b'';
+         size<-1 raises ValueError without moving.
+      I3 readinto(writable_buffer) copies at most len(buffer) remaining bytes, returns count, changes
+         only buffer[0:count], and advances by count. Read-only buffers raise TypeError before moving.
+      I4 seek(offset,whence) supports SET=0, CUR=1, END=2 relative to the view and returns new position.
+         Result outside 0..length raises ValueError and leaves position unchanged.
+      I5 tell returns the logical view position.
+      I6 close is idempotent and closes only the view, never backing. closed reports view state.
+      I7 after close, read/readinto/seek/tell raise ValueError('I/O operation on closed file').
+      I8 methods are synchronous and exceptions/types are exact.
+      I9 public methods never alter backing's externally visible cursor.
+  - id: backing-api
+    type: spec
+    label: Frozen shared backing primitive
+    content: |
+      backing.pread(offset,n)->bytes performs a positional short read without changing backing.tell().
+      It may return fewer than n bytes only at backing EOF. backing.seek/read mutate a single shared
+      cursor. backing remains open throughout vectors unless manifest says otherwise.
+
+      memoryview(buffer) identifies writable/read-only and byte length. Assignment view[:n]=data is
+      exact. Construction validates the range once; backing contents do not shrink in this benchmark.
+  - id: compatibility-vectors
+    type: table
+    label: Exact file-like witnesses
+    content: |
+      Backing bytes are b'0123456789', backing cursor initially 9. View V=(start=2,length=5) => b'23456'.
+      F1 V.tell()->0; V.read(2)->b'23'; tell->2; backing.tell remains 9.
+      F2 V.seek(-1,END)->4; V.read()->b'6'; V.read()->b''.
+      F3 at position 1, read(-2)->ValueError and tell remains 1; read(0)->b'' and remains 1.
+      F4 at position 3, dest=bytearray(b'xxxxx'); readinto(dest)->2, dest==b'56xxx', tell==5.
+      F5 readinto(memoryview(b'xx'))->TypeError and position unchanged.
+      F6 failed seek(6,SET)->ValueError and old position retained.
+      F7 two views read independently; closing one leaves the other and backing usable; closed methods
+         raise exact ValueError text.
+  - id: adapters
+    type: code
+    label: Four complete BoundedReader implementations by behavior
+    content: |
+      adapter-a:
+        stores private pos/closed; all operations call _check_closed first
+        validates seek target before assigning; uses backing.pread(start+pos,n)
+        readinto validates writable memoryview, preads clipped bytes, assigns prefix only
+        close sets its flag only
+
+      adapter-b:
+        stores private pos but implements reads as backing.seek(start+pos); backing.read(n)
+        updates pos from returned length; all other behavior matches adapter-a
+
+      adapter-c:
+        uses pread and independent position; readinto obtains bytes with read(len(dest))
+        then assigns dest[:] = data and returns len(data)
+        all other behavior matches adapter-a
+
+      adapter-d:
+        uses pread and validates positions exactly
+        close calls backing.close() then marks itself closed; other methods match adapter-a
+  - id: observable-state
+    type: table
+    label: Frozen side effects and Python assignment behavior
+    content: |
+      adapter-b changes backing cursor to the byte after every read, exposing 4 after F1 rather than 9.
+      In Python, assigning two bytes to bytearray slice [:] resizes a five-byte bytearray to length 2;
+      assigning to [:2] preserves its length and untouched suffix.
+      Closing backing makes every other view's pread fail, so ownership is externally observable.
+  - id: manifest
+    type: note
+    label: Complete callers and ownership claim
+    content: |
+      adapter-a through adapter-d are complete. The backing object is caller-owned and may have
+      unrelated cursor-based consumers. No locks or concurrent calls occur; incompatibilities are
+      present even sequentially.
+
+      Quinn's ownership proposal conflicts with I6. A view releases only its own state; it did not
+      acquire ownership of backing and must not close it.
+tags: [generation, interface-compatibility, python, io, adapters]

@@ -1,0 +1,77 @@
+id: fidelity-metric-attribution
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: The Incident Review Typo
+summary: An incident review document contains numerous typos regarding PR numbers,
+  titles, and deploy versions. The agent must meticulously cross-reference dense,
+  near-duplicate logs to provide exact quotes, attributions, and true timelines without
+  falling for the review's mixed-up claims.
+prompt: |-
+  You are verifying the facts in an incident review document (incident-review) against the authoritative source logs (pr-history, deploy-history, latency-metrics). Using ALL artifacts, answer the six deliverables below.
+
+  This task tests citation fidelity. The incident review document contains several inaccuracies and swapped details. Pay extreme attention to exact numbers, titles, authors, and timestamps. When asked to quote, provide the exact string. If a deliverable asks you to verify a claim, rely strictly on the authoritative logs, not the incident review's narrative. Cite artifact ids for every claim.
+
+  1. Quote exactly the title of PR #1043 as it is written in the incident-review.
+  2. Quote exactly the title of PR #1043 as it is written in the authoritative pr-history.
+  3. Identify the author of the PR that added the 500ms timeout, according to the pr-history.
+  4. The incident-review claims the revert was PR #1044 and was deployed in app-v1.0.5. Based on the timestamps in pr-history and deploy-history, which deploy version (e.g., app-v1.0.x) actually deployed the revert?
+  5. Based strictly on the latency-metrics, what was the exact p99 latency at 14:31?
+  6. Identify the exact deploy version (e.g., app-v1.0.x) that deployed the redis client bump.
+artifacts:
+- id: incident-review
+  type: note
+  label: Incident Review Draft
+  content: |-
+    Incident INC-9092 Review
+
+    Summary:
+    At 14:29, p99 latency spiked to ~850ms.
+
+    Root cause:
+    PR #1042 ("Bump redis client from v3 to v4") caused connection pooling issues.
+
+    Mitigation:
+    PR #1043 ("Add 500ms timeout to redis calls") was merged to mitigate the issue, but did not fully resolve it.
+
+    Resolution:
+    The revert, PR #1044 ("Revert: Bump redis client from v3 to v4"), was merged at 14:34 and deployed in app-v1.0.5 to fully resolve the spike.
+- id: pr-history
+  type: log
+  label: Authoritative PR Merge Log
+  content: |-
+    14:20:10 | PR #1040 | "Update redis cache config" | Author: j.doe
+    14:22:45 | PR #1041 | "Fix typo in redis cache config" | Author: s.smith
+    14:27:30 | PR #1042 | "Bump redis client from v3 to v4" | Author: j.doe
+    14:31:15 | PR #1043 | "Revert: Bump redis client from v3 to v4" | Author: m.jones
+    14:34:20 | PR #1044 | "Add 500ms timeout to redis calls" | Author: a.lee
+- id: deploy-history
+  type: log
+  label: Authoritative Deploy Log
+  content: |-
+    14:20:30 | Deploy started: app-v1.0.1 | Hash: abc1234
+    14:23:05 | Deploy started: app-v1.0.2 | Hash: def5678
+    14:28:15 | Deploy started: app-v1.0.3 | Hash: ghi9012
+    14:32:45 | Deploy started: app-v1.0.4 | Hash: jkl3456
+    14:35:10 | Deploy started: app-v1.0.5 | Hash: mno7890
+- id: latency-metrics
+  type: table
+  label: p99 Latency per minute
+  content: |-
+    minute | p99_latency_ms
+    14:26  | 44
+    14:27  | 45
+    14:28  | 45
+    14:29  | 850
+    14:30  | 860
+    14:31  | 855
+    14:32  | 850
+    14:33  | 46
+    14:34  | 45
+    14:35  | 45
+tags:
+- citation-fidelity
+- incident
+- logs
+- metrics

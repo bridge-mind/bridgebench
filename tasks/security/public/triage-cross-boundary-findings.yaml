@@ -1,0 +1,148 @@
+id: triage-cross-boundary-findings
+version: 1.0.0
+category: security
+cluster: finding-triage
+difficulty: expert
+title: Scanner Mixes Three Reachable Findings with Three Enforced Boundaries
+summary: >-
+  A scanner reports SQL injection, redirect-based SSRF, path traversal, profile mass assignment,
+  stored XSS, and CI shell injection across an image-processing service. Classify all six by tracing
+  actual sources and sinks through allowlists, redirects, schemas, sanitization, and workflow context;
+  exactly half are true positives.
+prompt: |
+  Triage the fictional PixelForge findings using ONLY the supplied artifacts. Cite artifact ids for
+  every verdict. Use true-positive and false-positive. Do not supply exploit payloads; source-to-sink
+  reachability and impact are sufficient.
+
+  1. Classify findings F1 through F6 as true-positive or false-positive.
+  2. For every true positive, trace the complete untrusted source, transformations, security control
+     gap, reachable sink, required preconditions, and impact supported by the runtime facts.
+  3. For every false positive, name the exact enforcement that breaks the alleged flow. Do not treat a
+     keyword match as reachability.
+  4. Rank the true positives by demonstrated production impact, explaining ties or uncertainty without
+     inventing infrastructure beyond runtime-facts.
+  5. Give the smallest remediation invariant for each true positive and one regression assertion per fix.
+  6. State why blanket-confirming all scanner findings and blanket-dismissing them both fail this review.
+
+  The route, sink, workflow, and runtime inventories are exhaustive. Exactly three findings are true
+  positives and three are false positives; the answer must determine which by tracing the artifacts.
+artifacts:
+  - id: findings
+    type: table
+    label: scanner report to classify
+    content: |
+      F1  SQL injection: request sort reaches an ORDER BY fragment.
+      F2  SSRF: validated import URL may redirect to a private network address.
+      F3  Path traversal: avatar filename is joined to the upload directory.
+      F4  Mass assignment: PATCH /profile spreads request fields into an account update.
+      F5  Stored XSS: image caption is rendered into an admin review card.
+      F6  CI command injection: pull-request title is interpolated into a run script.
+  - id: gallery-route
+    type: code
+    label: api/gallery.ts — F1 implementation
+    content: |
+      const Sort = z.enum(['created_desc', 'created_asc', 'name_asc']);
+      const ORDER = {
+        created_desc: sql`created_at DESC, id DESC`,
+        created_asc: sql`created_at ASC, id ASC`,
+        name_asc: sql`name ASC, id ASC`,
+      } as const;
+
+      router.get('/gallery', requireUser, async (req, res) => {
+        const sort = Sort.parse(req.query.sort ?? 'created_desc');
+        const rows = await db.execute(sql`SELECT * FROM images WHERE owner_id=${req.user.id}
+          ORDER BY ${ORDER[sort]} LIMIT 100`);
+        res.json(rows);
+      });
+      // sql tagged-template values are parameters; ORDER entries are developer-owned static fragments.
+      // This map and enum are exhaustive; request text is never used as a fragment.
+  - id: import-worker
+    type: code
+    label: api/import.ts and worker/fetch.ts — F2 implementation
+    content: |
+      const ImportBody = z.object({ sourceUrl: z.string().url() }).strict();
+      router.post('/imports', requireUser, async (req, res) => {
+        const { sourceUrl } = ImportBody.parse(req.body);
+        const u = new URL(sourceUrl);
+        if (u.protocol !== 'https:' || !IMPORT_HOSTS.has(u.hostname)) return res.sendStatus(400);
+        await queue.send({ userId: req.user.id, sourceUrl });
+        res.sendStatus(202);
+      });
+
+      async function fetchImport(job) {
+        return fetch(job.sourceUrl, { redirect: 'follow' }); // up to 10 redirects by runtime default
+      }
+      // Redirect targets receive no protocol, host, DNS, or resolved-IP validation. The allowlisted
+      // public host files.pixelforge.example can issue a 302 to an arbitrary Location supplied in an
+      // authenticated builder's import metadata.
+  - id: profile-and-upload
+    type: code
+    label: api/profile.ts and api/avatar.ts — F3/F4 implementations
+    content: |
+      router.post('/avatar', requireUser, upload.single('avatar'), async (req, res) => {
+        const leaf = path.basename(req.file.originalname.replaceAll('\\', '/'));
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(leaf)) return res.sendStatus(400);
+        const target = path.join(UPLOAD_ROOT, req.user.id, leaf);
+        await fs.rename(req.file.path, target);
+        res.sendStatus(204);
+      });
+
+      router.patch('/profile', requireUser, async (req, res) => {
+        const body = z.object({ displayName: z.string().max(80) }).passthrough().parse(req.body);
+        await db.accounts.update(req.user.id, { ...body });
+        res.sendStatus(204);
+      });
+      // Account columns include displayName, plan, isModerator, billingAccountId. The ORM updates every
+      // provided property whose name matches a column. Database role api_writer may update all four.
+      // UPLOAD_ROOT and req.user.id are server-owned; path.basename handles both slash styles above.
+  - id: caption-render
+    type: code
+    label: admin/review-card.tsx — F5 implementation
+    content: |
+      export function ReviewCard({ image }: { image: ImageRecord }) {
+        return <article>
+          <img src={trustedCdnUrl(image.key)} alt="" />
+          <p>{image.caption}</p>
+        </article>;
+      }
+      // image.caption is builder-controlled and stored verbatim. This app uses standard React 19 DOM
+      // rendering. No dangerouslySetInnerHTML, raw HTML parser, custom renderer, or post-render DOM write
+      // exists in this component tree. React text children are HTML-escaped; CSP also blocks inline script.
+  - id: pr-workflow
+    type: config
+    label: .github/workflows/pr-preview.yml — F6 implementation
+    content: |
+      name: PR preview
+      on:
+        pull_request_target:
+          types: [opened, synchronize, edited]
+      permissions:
+        contents: read
+        packages: write
+      jobs:
+        label:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                ref: ${{ github.event.pull_request.base.sha }}
+            - name: Build label
+              run: |
+                TITLE="${{ github.event.pull_request.title }}"
+                node scripts/write-preview-label.js "$TITLE"
+              env:
+                PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+      # Public forks may open and edit PR titles. pull_request_target runs in the base repository context;
+      # PACKAGE_TOKEN can publish preview packages. The title expression is expanded before bash parses run.
+  - id: runtime-facts
+    type: spec
+    label: exhaustive runtime and scanner assumptions
+    content: |
+      - Import workers have HTTP access to 127.0.0.1, RFC1918 ranges, and the cloud metadata endpoint.
+        They attach no user credentials to redirects, but internal unauthenticated control endpoints exist.
+      - Profile updates take effect immediately; isModerator gates the admin review API server-side.
+      - The CI runner has PACKAGE_TOKEN only for pull_request_target jobs. Fork code is not checked out,
+        but fork-controlled PR metadata remains untrusted input to the shell step.
+      - Avatar destination parent directories already exist and symlinks are prohibited/verified at startup.
+      - The six findings are the complete scanner set for this exercise.
+tags: [security, finding-triage, sast, ssrf, mass-assignment, ci]

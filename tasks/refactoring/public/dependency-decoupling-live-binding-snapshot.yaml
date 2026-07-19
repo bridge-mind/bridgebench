@@ -1,5 +1,5 @@
 id: dependency-decoupling-live-binding-snapshot
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: dependency-decoupling
 difficulty: expert
@@ -7,9 +7,8 @@ title: Decoupling the Client From the apiBase Global — Live Bindings vs Import
 summary: >-
   A client reads a module-level apiBase that main reassigns at startup, relying on ES live-binding
   semantics so the new value shows at call time. Four rewrites decouple the client from importing
-  config. Exactly one preserves the call-time value with no import cycle and a single source. Decoys
-  snapshot apiBase at import (stale default), close a cycle via main, or add a second base main never
-  updates. Classify each and name the observable difference.
+  config; classify each against the goal and the preservation properties — the call-time base value,
+  an acyclic import graph, and a single source of truth for the base.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (config-mod, client-original, module-graph,
   rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
@@ -35,8 +34,8 @@ prompt: |
   4. Classify rewrite-d. State the base string endpoint('/v1/ping') returns and name the mechanism (why
      config's reassignment does not reach the client), and how this differs from rewrite-b.
 
-  5. Exactly one rewrite decouples the client while preserving the call-time value, staying acyclic, and
-     keeping a single source. Name it. Then, for client-original, state the ground truth: what string
+  5. State which rewrites, if any, decouple the client while preserving the call-time value, staying
+     acyclic, and keeping a single source. Then, for client-original, state the ground truth: what string
      does endpoint('/v1/ping') return, and why (in terms of live bindings and the reassignment order)?
 artifacts:
   - id: config-mod
@@ -132,7 +131,7 @@ artifacts:
     label: rewrite-c — client reads a resolved base from main
     content: |
       // app/client.ts (rewrite-c) — read a resolved base FROM main at import.
-      import { resolvedBase } from './main';           // NEW edge: client.ts -> main.ts
+      import { resolvedBase } from './main';
       const base = resolvedBase;                        // read at client.ts load (top level)
       export function endpoint(path: string): string {
         return `${base}${path}`;
@@ -140,7 +139,7 @@ artifacts:
 
       // app/main.ts (rewrite-c)
       import { apiBase, useProdBase } from './config';
-      import { endpoint } from './client';             // main.ts -> client.ts (closes the cycle)
+      import { endpoint } from './client';
       useProdBase();
       export const resolvedBase = apiBase;
       export const url = endpoint('/v1/ping');
@@ -155,9 +154,9 @@ artifacts:
         return `${base}${path}`;
       }
 
-      // app/main.ts (rewrite-d) — reassigns the CONFIG global, not the client's base.
+      // app/main.ts (rewrite-d)
       import { useProdBase } from './config';
       import { endpoint } from './client';
-      useProdBase();                                   // sets config.apiBase; client.base untouched
+      useProdBase();
       export const url = endpoint('/v1/ping');
 tags: [refactoring, dependency-decoupling, live-binding, import-cycle, module-load-order]

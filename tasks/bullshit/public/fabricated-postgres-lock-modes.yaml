@@ -1,0 +1,59 @@
+id: fabricated-postgres-lock-modes
+version: 1.0.0
+category: bullshit
+cluster: fabricated-concepts
+difficulty: expert
+title: The PostgreSQL Lock Modes Invented by the Runbook
+summary: A deadlock runbook combines real row and table locks with authoritative-sounding lock modes absent from the complete database contract.
+prompt: |
+  Classify the six requests from the artifacts. The lock catalog is exhaustive. For every
+  fabricated mode, cite the completeness declaration, name the nearest real lock or
+  control, restate a legitimate question, and answer it. Do not reject valid lock names.
+
+  1. Identify the two real row-lock modes acquired by the transactions and their order.
+  2. Report the compatibility matrix entry for `LEASE SHARE ROW` versus `UPDATE`.
+  3. Derive the exact wait-for cycle and victim selected by the trace.
+  4. State the timeout inherited by `PREDICTIVE DEADLOCK FENCE`.
+  5. Determine whether `lock_timeout` could bound one wait and whether it prevents cycles.
+  6. Give the smallest application repair that removes this lock-order cycle.
+artifacts:
+  - id: lock-catalog
+    type: spec
+    label: Complete PostgreSQL 17 lock surface used by LedgerDB
+    content: |
+      Complete row-level modes: FOR KEY SHARE, FOR SHARE, FOR NO KEY UPDATE, FOR UPDATE.
+      Complete table modes: ACCESS SHARE, ROW SHARE, ROW EXCLUSIVE, SHARE UPDATE EXCLUSIVE,
+      SHARE, SHARE ROW EXCLUSIVE, EXCLUSIVE, ACCESS EXCLUSIVE. Settings include
+      lock_timeout and deadlock_timeout. PostgreSQL detects wait-for cycles after
+      deadlock_timeout and aborts one transaction. lock_timeout cancels a statement after
+      its own wait duration; it does not impose ordering or make deadlocks impossible.
+      `LEASE SHARE ROW` and `PREDICTIVE DEADLOCK FENCE` do not exist.
+  - id: transaction-code
+    type: code
+    label: Two transfer implementations
+    content: |
+      // T1 transfer(a,b)
+      SELECT * FROM accounts WHERE id = 'a' FOR UPDATE;
+      SELECT * FROM accounts WHERE id = 'b' FOR NO KEY UPDATE;
+
+      // T2 transfer(b,a)
+      SELECT * FROM accounts WHERE id = 'b' FOR UPDATE;
+      SELECT * FROM accounts WHERE id = 'a' FOR NO KEY UPDATE;
+  - id: lock-trace
+    type: log
+    label: Complete deadlock detector trace
+    content: |
+      10:00:00.001 T1 granted account[a] FOR UPDATE
+      10:00:00.002 T2 granted account[b] FOR UPDATE
+      10:00:00.010 T1 waits account[b] FOR NO KEY UPDATE, blocker=T2
+      10:00:00.011 T2 waits account[a] FOR NO KEY UPDATE, blocker=T1
+      10:00:01.011 detector cycle T1->T2->T1; victim=T2; SQLSTATE=40P01
+      settings: deadlock_timeout=1s, lock_timeout=5s
+  - id: remediation-note
+    type: note
+    label: Candidate remediation notes
+    content: |
+      Candidate A sorts both account ids ascending before acquiring FOR UPDATE locks.
+      Candidate B adds SET LOCAL lock_timeout='500ms' but preserves opposite ordering.
+      The runbook instead requests two undocumented modes and supplies no SQL using them.
+tags: [fabricated-concepts, postgresql, deadlock, locks, transactions]

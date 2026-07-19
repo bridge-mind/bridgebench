@@ -1,0 +1,69 @@
+id: cal-refactoring-debounce-inline
+task:
+  public:
+    id: cal-refactoring-debounce-inline
+    version: 1.0.0
+    category: refactoring
+    cluster: behavior-preservation
+    difficulty: hard
+    title: Does the rewrite preserve observable ordering?
+    summary: Verify whether a queue-drain rewrite preserves observable behavior, and cite the witness if not.
+    prompt: |
+      The team rewrote `drain()` for readability. Deliverables:
+      1. Verdict for the rewrite: behavior-preserving or changes-behavior, with the exact mechanism.
+      2. If changes-behavior, give a concrete input (queue contents) that exposes the difference.
+    artifacts:
+      - id: original
+        type: code
+        label: Original drain
+        content: |
+          function drain(queue, handle) {
+            while (queue.length > 0) {
+              const item = queue.shift();      // FIFO: oldest first
+              handle(item);
+            }
+          }
+      - id: rewrite
+        type: code
+        label: Proposed rewrite
+        content: |
+          function drain(queue, handle) {
+            while (queue.length > 0) {
+              const item = queue.pop();        // takes from the tail
+              handle(item);
+            }
+          }
+  private:
+    id: cal-refactoring-debounce-inline
+    version: 1.0.0
+    expectedResolution: |
+      1. changes-behavior. `shift()` removes from the head (FIFO); `pop()` removes from the tail
+         (LIFO). Processing order reverses whenever the queue holds more than one item.
+      2. Witness: queue = [1, 2]. Original calls handle(1) then handle(2); rewrite calls handle(2)
+         then handle(1). Any order-sensitive handler observes the difference.
+    requiredEvidence:
+      - original
+      - rewrite
+    disqualifyingErrors:
+      - Calling the rewrite behavior-preserving.
+      - A changes-behavior verdict with no concrete witness input.
+    rubric:
+      correctness: The verdict must match the reference (changes-behavior).
+      evidenceGrounding: The mechanism must cite shift-vs-pop and both artifacts.
+      constraintHandling: The witness must be concrete — actual queue contents, not "it may differ".
+      completeness: Both deliverables answered.
+strongResponse: |
+  1. changes-behavior. In `original`, `queue.shift()` dequeues the head — FIFO. In `rewrite`,
+     `queue.pop()` dequeues the tail — LIFO. For any queue with 2+ items the handler invocation
+     order reverses.
+  2. Witness: queue = [1, 2]. Original: handle(1), handle(2). Rewrite: handle(2), handle(1).
+     An order-sensitive handle (e.g. appending to a log) observes ["1","2"] vs ["2","1"].
+weakResponse: |
+  1. behavior-preserving. Both versions loop until the queue is empty and invoke handle exactly once
+     per item, so every element is processed either way; swapping shift for pop is a stylistic
+     micro-optimization that avoids re-indexing the array.
+  2. Not applicable — no observable difference exists once the queue fully drains.
+knownDifference: >
+  The weak response reduces "observable behavior" to the multiset of handled items and misses the
+  ordering contract: shift is FIFO, pop is LIFO, and [1,2] is a two-element witness. The strong
+  response names the mechanism and supplies the witness input.

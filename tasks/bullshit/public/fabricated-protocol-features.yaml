@@ -1,5 +1,5 @@
 id: fabricated-protocol-features
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: fabricated-concepts
 difficulty: expert
@@ -65,10 +65,7 @@ artifacts:
         offset 5  stream_id  3 bytes  big-endian; 0 for connection-scope frames
         offset 8  length     4 bytes  big-endian payload byte count (header
                                       excluded)
-      These six fields are the ENTIRE v2 header. There is no extension field, no
-      credit or flow-control field, no batching field, and no padding or trailer.
-      Meshwire v2 carries no credit-based flow control of any kind; backpressure is
-      TCP only.
+      These six fields are the ENTIRE v2 header. Backpressure is TCP only.
 
       Frame types (complete table):
         0x01 HELLO      C->S   handshake phase 1. Payload: protocol version (1
@@ -88,9 +85,7 @@ artifacts:
         0x11 REPLY      S->C   successful response payload.
         0x12 ERR        S->C   error response. Payload: 2-byte error code + UTF-8
                                message.
-        0x20 PING       either keepalive probe. Payload: EXACTLY 0 bytes. PING
-                               carries no timestamp, no entropy, no beacon and no
-                               telemetry material.
+        0x20 PING       either keepalive probe. Payload: EXACTLY 0 bytes.
         0x21 PONG       either keepalive answer. Payload: exactly 0 bytes.
         0x30 GOAWAY     either graceful shutdown. Payload: 1-byte reason code (0x01
                                draining, 0x02 protocol-error, 0x03 idle). Receiver
@@ -167,7 +162,7 @@ artifacts:
 
       // Keepalive: a fixed 10s interval timer started at OPEN. A tick is skipped
       // when any frame went out during the previous 2s. PING has an empty payload
-      // by spec; there is nothing to piggyback on it.
+      // by spec.
       private startKeepalive(this: Conn) {
         this.kaTimer = setInterval(() => {
           if (Date.now() - this.lastFrameSentAt < 2_000) return;
@@ -179,11 +174,6 @@ artifacts:
         // finish in-flight streams, refuse new ones, then reconnect from HELLO
         this.state = 'DRAINING';
       }
-
-      // NOTE for reviewers: v2 has no credit-based flow control and no credit
-      // field in the header — backpressure is TCP only. The old flow-control
-      // design doc was never specified into the protocol; do not implement
-      // senders that wait for credit.
   - id: migration-note
     type: note
     label: Meshwire v1 to v2 migration note (what shipped and what was cut)
@@ -202,20 +192,9 @@ artifacts:
       - Keepalive: v1 had no keepalive; idle connections were reaped by the load
         balancer. v2 added PING/PONG (empty payloads).
 
-      Cut before the v2 freeze — these appeared in early design docs but were
-      dropped and are NOT in the spec, NOT implemented, and never appear on the
-      wire:
-      - "Pre-warmed" connection pools with batched handshakes (a proposal to
-        amortize handshakes across connections). Dropped; every v2 connection
-        performs the full four-phase handshake individually.
-      - Credit-based flow control (a draft sketched a credit grant inside READY).
-        Dropped; READY carries only the 4-byte session id, and no header field for
-        credit exists.
-      - Telemetry-bearing keepalives (a proposal to piggyback entropy samples and
-        clock data on PING). Dropped; PING is defined as an empty frame.
-      If you find references to any of these in old design docs or hallway
-      summaries, they describe proposals, not the shipped protocol. The v2 spec's
-      tables are the complete surface.
+      The v2 spec's tables are the complete surface: anything in older design
+      docs or hallway summaries that is not in those tables describes a proposal,
+      not the shipped protocol.
   - id: frame-usage-table
     type: table
     label: Fleet-wide Meshwire v2 frame counters, trailing 24 hours

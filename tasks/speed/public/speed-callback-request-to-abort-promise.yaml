@@ -1,0 +1,47 @@
+id: speed-callback-request-to-abort-promise
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: expert
+title: Transform a Callback Request Into an Abortable Promise
+summary: Rewrite a Node callback API to a promise without changing synchronous throws, once-only settlement, cancellation, or listener cleanup.
+prompt: |
+  Transform [original] into the function required by [target-contract]. Output TypeScript
+  code only, including necessary types/imports.
+artifacts:
+  - id: original
+    type: code
+    label: Existing callback implementation
+    content: |
+      export function fetchJson(
+        client: Client,
+        url: URL,
+        done: (error: Error | null, value?: unknown) => void,
+      ): Request {
+        const req = client.get(url, (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.once("error", (error) => done(error));
+          res.once("end", () => {
+            try { done(null, JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+            catch (error) { done(error as Error); }
+          });
+        });
+        req.once("error", (error) => done(error));
+        return req;
+      }
+  - id: target-contract
+    type: spec
+    label: Exact promise transformation contract
+    content: |
+      Export `function fetchJson(client: Client, url: URL, signal?: AbortSignal): Promise<unknown>`.
+      Preserve a synchronous throw from client.get as a rejected promise. Settle at most
+      once across request error, response error, end, JSON parse failure, and abort. Abort
+      before start rejects with signal.reason without calling client.get. Abort after start
+      destroys the request with an AbortError whose cause is signal.reason, then rejects
+      with signal.reason; a subsequent request error must not replace it. Remove the abort
+      listener and all listeners this function attached to request/response on every terminal
+      path. Ignore data after terminal. Enforce a 2 MiB body cap while streaming; on overflow
+      destroy request and reject RangeError("response body exceeds 2 MiB"). Do not use any,
+      polling, external packages, or an async executor passed to new Promise.
+tags: [typescript, callbacks, promises, abortsignal, cleanup]

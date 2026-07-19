@@ -1,0 +1,116 @@
+id: root-cause-redis-topology-stale
+version: 1.0.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: Redis Cluster Failover Triggers a MOVED Storm Only in the New Client Pool
+summary: >-
+  A checkout service enters a retry storm after a planned Redis primary failover. CPU, network, command
+  latency, DNS, and slot ownership all appear suspicious. Reconcile the client refactor, redirect trace,
+  topology-refresh configuration, and control deployment to isolate why one pool never learns the new
+  owner and select the fix that restores bounded redirection.
+prompt: |
+  Diagnose the fictional CartSpring incident using ONLY the supplied artifacts. Cite artifact ids for
+  every claim. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. Name the single root cause and identify the exact changed option/code path that makes it possible.
+  2. Trace one request from stale slot lookup through MOVED handling, retry scheduling, pool contention,
+     and the user-visible timeout. Explain why the loop remains stale instead of converging.
+  3. Rule out Redis command latency, DNS propagation, packet loss, and insufficient server capacity using
+     the supplied control evidence.
+  4. Explain why the legacy worker deployment recovers in one redirect while checkout-api does not.
+  5. Classify F1 through F4 in candidate-fixes and choose the adequate fix. State the invariant it restores.
+  6. Give a regression test that performs a slot-owner failover and bounds redirects, topology age, and
+     request completion without hiding errors by raising timeouts.
+
+  The code and configuration inventory is exhaustive. Exactly one cause and one adequate fix survive.
+artifacts:
+  - id: client-code
+    type: code
+    label: cache/cluster-client.ts — checkout-api complete client construction
+    content: |
+      export function makeCheckoutCache(seedNodes: string[]) {
+        const topology = new SlotMap(seedNodes); // populated at startup by CLUSTER SLOTS
+        return new ClusterClient({
+          topology,
+          commandTimeoutMs: 250,
+          maxRedirects: 32,
+          onMoved: async moved => {
+            metrics.moved.inc({ slot: moved.slot });
+            if (settings.redis.adaptiveRefresh) {
+              await topology.refreshFrom(moved.target);
+            }
+            return 'retry';
+          },
+        });
+      }
+
+      // For each retry, ClusterClient asks topology.owner(slot) again. It does not use moved.target
+      // directly. refreshFrom is the only method that updates SlotMap after startup. No background
+      // periodic refresh exists. This is the complete topology-update path.
+  - id: refactor-diff
+    type: diff
+    label: deploy 2026.07.11 client unification diff
+    content: |
+      - const cache = legacyRedisCluster({ refreshOnMoved: true, maxRedirects: 4 });
+      + const cache = makeCheckoutCache(config.redis.seedNodes);
+
+      # config extraction in the same commit
+        redis:
+          seedNodes: ${REDIS_SEEDS}
+      -   adaptiveRefresh: true
+      +   adaptiveRefresh: false  # comment: topology is stable; avoid control-plane calls on hot path
+
+      Only checkout-api adopted makeCheckoutCache. queue-worker remains on legacyRedisCluster with
+      refreshOnMoved:true. No other cache, timeout, DNS, or retry change shipped in this deploy.
+  - id: redirect-trace
+    type: log
+    label: one checkout request for key cart:A-71 after failover
+    content: |
+      14:03:00.000 startup SlotMap says slot 8421 -> redis-a:6379 (map generation 91)
+      14:08:12.100 planned failover completes: slot 8421 owner redis-b:6379 (generation 92)
+      14:08:12.115 attempt=1 topology.owner=redis-a -> MOVED 8421 redis-b:6379
+      14:08:12.116 onMoved adaptiveRefresh=false -> retry; SlotMap remains generation 91
+      14:08:12.120 attempt=2 topology.owner=redis-a -> MOVED 8421 redis-b:6379
+      14:08:12.124 attempt=3 topology.owner=redis-a -> MOVED 8421 redis-b:6379
+      ... same owner and MOVED response through attempt=32 ...
+      14:08:12.247 redirect budget exhausted -> RedisTooManyRedirects
+      14:08:12.248 retry middleware schedules whole operation attempt 2; pool wait=91ms
+      14:08:12.501 HTTP deadline 400ms exceeded -> 503 CACHE_TIMEOUT
+      # topology generation remains 91 until process restart at 14:19.
+  - id: telemetry
+    type: table
+    label: service and Redis telemetry before/during incident
+    content: |
+      metric                       before   14:08-14:19
+      checkout p99 ms              42       401
+      checkout 503/min             0        1840
+      MOVED replies/min            0        58900
+      client pool wait p99 ms      2        188
+      redis command p99 ms         1.8      2.1
+      redis server CPU max %       31       38
+      redis network packet loss %  0.00     0.00
+      checkout process CPU %       28       94
+      Slot owner redis-b served direct control GETs in 2ms throughout the incident.
+  - id: control-deployment
+    type: log
+    label: queue-worker control during the same failover
+    content: |
+      14:08:12.116 queue-worker slot 8421 via redis-a -> MOVED redis-b
+      14:08:12.117 legacy onMoved refreshOnMoved=true -> CLUSTER SLOTS from redis-b generation=92
+      14:08:12.120 retry topology.owner=redis-b -> GET success 2ms
+      14:08:12-14:19 queue-worker errors=0 MOVED total=1
+      Both deployments use the same seed hostname list, resolver, network, Redis credentials, and server
+      cluster. DNS records did not change because MOVED targets are node addresses, not seed discovery.
+  - id: candidate-fixes
+    type: note
+    label: fixes proposed during incident review
+    content: |
+      F1: Set adaptiveRefresh=true and cap maxRedirects at 4; on the first MOVED, refresh the authoritative
+          slot map before retrying. If refresh fails, fail the request rather than retry stale ownership.
+      F2: Raise maxRedirects from 32 to 256 and HTTP deadline from 400ms to 2s.
+      F3: Add four checkout-api replicas but leave adaptiveRefresh=false.
+      F4: Lower commandTimeoutMs from 250 to 50 so every stale attempt fails faster.
+      Requirement: after a legitimate MOVED, all subsequent retries for that slot must consult a map at
+      least as new as the redirect's owner generation; errors must remain bounded if refresh fails.
+tags: [debugging, root-cause-isolation, redis, topology, retry-storm]

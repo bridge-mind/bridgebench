@@ -137,6 +137,8 @@ function eventLabel(event: ArenaEvent, models: DashboardModel[]): string {
       return 'Run complete — reports rebuilt';
     case 'run.failed':
       return String(event.data.error ?? 'Run failed');
+    default:
+      return event.type;
   }
 }
 

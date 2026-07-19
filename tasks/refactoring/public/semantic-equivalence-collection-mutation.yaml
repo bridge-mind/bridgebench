@@ -1,10 +1,10 @@
 id: semantic-equivalence-collection-mutation
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: semantic-equivalence
 difficulty: expert
 title: Are these six array simplifications behavior-preserving across mutation, ordering, and identity?
-summary: Six small functions each have a proposed one-line simplification over arrays. Some are equivalent for every input; others break on argument mutation (sort/splice in place), the default lexicographic sort comparator, or NaN membership (indexOf vs includes). Using the cited language semantics and the declared observability rules, classify each rewrite as behavior-preserving or changes-behavior and give a witness for every change.
+summary: Six small functions each have a proposed one-line simplification over arrays. Using the cited language semantics and the declared observability rules, classify each rewrite as behavior-preserving or changes-behavior and give a concrete witness input for every change.
 prompt: |
   A "simplify" PR rewrites six array functions (originals O1..O6) into shorter forms (proposed
   P1..P6). Judge each rewrite for FULL semantic equivalence: it is behavior-preserving only if, for

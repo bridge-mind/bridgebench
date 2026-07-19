@@ -1,15 +1,14 @@
 id: behavior-preservation-retry-wrapper
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: behavior-preservation
 difficulty: expert
 title: runWithRetry Rewrite Equivalence — Attempt Counts, Error Class, and onRetry Timing
 summary: >-
-  Four candidate rewrites of a transient-retry wrapper are proposed. Exactly one preserves
-  observable behavior (task-invocation count, which error classes retry vs rethrow, the error
-  object thrown, and how many times onRetry fires and with which attempt argument). The others
-  shift an attempt boundary, broaden the caught error class, or move onRetry across the exhaustion
-  check. Classify each rewrite and name the observable difference.
+  Four candidate rewrites of a transient-retry wrapper are proposed. Classify each as
+  behavior-preserving, behavior-changing, or goal-missing against the observable contract —
+  task-invocation count, which error classes retry vs rethrow, the error object thrown, and how
+  many times onRetry fires and with which attempt argument — tracing the given scenarios.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (retry-original, error-model,
   rewrite-a, rewrite-b, rewrite-c, rewrite-d, usage-note). Cite artifact id(s) for every claim.
@@ -36,7 +35,7 @@ prompt: |
      attempt arguments, and name the observable difference from retry-original, considering what
      usage-note says onRetry is wired to.
 
-  5. Exactly one rewrite is the only behavior-preserving merge. Name it. Then, for retry-original
+  5. State which rewrites, if any, are behavior-preserving merges. Then, for retry-original
      under scenario S1, state the ground-truth counts: how many times task() is invoked, how many
      times onRetry fires and with which attempt values, and which error object is thrown.
 artifacts:
@@ -110,7 +109,7 @@ artifacts:
             return await task();
           } catch (err) {
             if (!(err instanceof TransientError)) throw err;
-            if (attempt > opts.maxAttempts) throw err; // changed >= to >
+            if (attempt > opts.maxAttempts) throw err;
             opts.onRetry?.(err, attempt);
           }
         }
@@ -134,7 +133,6 @@ artifacts:
             opts.onRetry?.(err, attempt);
           }
         }
-        // note: the instanceof TransientError guard from retry-original is gone.
       }
   - id: rewrite-d
     type: code
@@ -152,7 +150,7 @@ artifacts:
             return await task();
           } catch (err) {
             if (!(err instanceof TransientError)) throw err;
-            opts.onRetry?.(err, attempt);              // moved ABOVE the exhaustion check
+            opts.onRetry?.(err, attempt);
             if (attempt >= opts.maxAttempts) throw err;
           }
         }

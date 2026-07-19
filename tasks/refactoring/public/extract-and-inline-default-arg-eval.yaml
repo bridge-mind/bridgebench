@@ -1,0 +1,118 @@
+id: extract-and-inline-default-arg-eval
+version: 1.1.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Inlining a Defaulted Helper Without Moving Its Evaluation
+summary: >-
+  A label helper has a side-effectful default argument and is called only after an enabled guard.
+  Four inline rewrites are proposed; classify each on both behavior and the inline goal, tracing
+  the returned value, sequence counter, and audit events in the given scenarios.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (label-original, evaluation-contract,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to inline makeLabel into labelJob and remove makeLabel while preserving
+  the returned value, sequence counter, and audit events exactly.
+
+  1. Classify rewrite-a on both behavior and goal. Trace E1, E2, and E3.
+  2. Classify rewrite-b. For E1, state labelJob's return, the final sequence value, and audit events
+     for both label-original and rewrite-b.
+  3. Classify rewrite-c. For E3, state the exact returned string and audit argument in both versions.
+  4. Classify rewrite-d on both behavior and goal; do not conflate equivalent behavior with actually
+     completing the requested inline.
+  5. State which rewrites, if any, are both behavior-preserving and meets-goal. State why default
+     parameter evaluation is per invocation and only substitutes for undefined.
+artifacts:
+  - id: label-original
+    type: code
+    label: forge/labels.ts — original helper and guarded caller
+    content: |
+      type Job = { id: string; enabled: boolean };
+      type Prefix = string | null | undefined;
+
+      let sequence = 0;
+      function nextPrefix(): string {
+        sequence += 1;
+        return `run-${sequence}`;
+      }
+
+      function makeLabel(job: Job, prefix: string | null = nextPrefix()): string {
+        audit.record('label-prefix', prefix);
+        return `${prefix}:${job.id}`;
+      }
+
+      export function labelJob(job: Job, prefix?: Prefix): string | null {
+        if (!job.enabled) return null;
+        return makeLabel(job, prefix);
+      }
+  - id: evaluation-contract
+    type: spec
+    label: JavaScript evaluation and complete observability contract
+    content: |
+      Rules authoritative for this task:
+        - A default parameter initializer runs when, and only when, that function is invoked with
+          the argument omitted or exactly undefined. It does NOT run for null, "", or any string.
+        - The initializer runs afresh for every qualifying invocation; its result is not cached.
+        - `x ?? y` evaluates y when x is null OR undefined. `x === undefined ? y : x` evaluates y
+          only when x is undefined.
+        - An early return prevents evaluation of all statements after it.
+        - Template interpolation renders null as the text "null".
+        - nextPrefix's sequence mutation and audit.record's ordered arguments are observable.
+          No other functions, callers, getters, exceptions, or side effects exist.
+
+      The source shown in label-original is the complete call surface: labelJob is the only caller
+      of makeLabel, so removing makeLabel after a faithful inline satisfies the structural goal.
+
+      Each scenario begins with sequence = 0 and an empty audit log:
+        E1: labelJob({ id: 'J1', enabled: false }, undefined)
+            Reference: returns null; sequence remains 0; no audit event.
+        E2: call labelJob({ id: 'J1', enabled: true }, undefined), then the same with id 'J2'.
+            Reference returns "run-1:J1", then "run-2:J2"; audits prefixes "run-1", "run-2";
+            final sequence is 2.
+        E3: labelJob({ id: 'J3', enabled: true }, null)
+            Reference: returns "null:J3"; audit prefix is null; sequence remains 0.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — guard, then reproduce undefined-only defaulting inline
+    content: |
+      export function labelJob(job: Job, prefix?: Prefix): string | null {
+        if (!job.enabled) return null;
+        const resolvedPrefix = prefix === undefined ? nextPrefix() : prefix;
+        audit.record('label-prefix', resolvedPrefix);
+        return `${resolvedPrefix}:${job.id}`;
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — resolve the default before the enabled guard
+    content: |
+      export function labelJob(job: Job, prefix?: Prefix): string | null {
+        const resolvedPrefix = prefix === undefined ? nextPrefix() : prefix;
+        if (!job.enabled) return null;
+        audit.record('label-prefix', resolvedPrefix);
+        return `${resolvedPrefix}:${job.id}`;
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — use nullish coalescing for the default
+    content: |
+      export function labelJob(job: Job, prefix?: Prefix): string | null {
+        if (!job.enabled) return null;
+        const resolvedPrefix = prefix ?? nextPrefix();
+        audit.record('label-prefix', resolvedPrefix);
+        return `${resolvedPrefix}:${job.id}`;
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — preserve the guarded call but keep makeLabel
+    content: |
+      function makeLabel(job: Job, prefix: string | null = nextPrefix()): string {
+        audit.record('label-prefix', prefix);
+        return `${prefix}:${job.id}`;
+      }
+
+      export function labelJob(job: Job, prefix?: Prefix): string | null {
+        return job.enabled ? makeLabel(job, prefix) : null;
+      }
+tags: [refactoring, extract-and-inline, default-arguments, evaluation-order, nullish]

@@ -1,0 +1,112 @@
+id: api-migration-postgres-transaction
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrate PostgreSQL Transactions Without Splitting the Session or Masking Errors
+summary: >-
+  A callback-era repository pins one pool connection across BEGIN, queries, rollback/commit, and
+  release. Four promise-based migrations differ on connection ownership, query routing, rollback
+  precedence, and release timing; one preserves every transaction and error observable.
+prompt: |
+  Use only old-repository, new-driver, transaction-schedules, migrations, and manifest. Cite artifact
+  ids. Give behavior-preserving / changes-behavior and meets-goal / fails-goal for each migration.
+
+  1. Classify migration-a through migration-d on both axes.
+  2. For every change, give the first P1..P6 witness and exact connection/log/result/error difference.
+  3. Identify the unique migration satisfying both axes and trace P5.
+  4. State which error escapes when work and rollback both fail.
+  5. Explain why pool.query inside a transaction helper is not transaction-scoped.
+  6. Evaluate reviewer Mae's proposal to release the client before awaiting COMMIT.
+artifacts:
+  - id: old-repository
+    type: code
+    label: Existing callback transaction behavior
+    content: |
+      transfer(from,to,cents,callback):
+        pool.connect((connectErr, client, release) => {
+          if (connectErr) return callback(connectErr)
+          client.query('BEGIN', err => {
+            if (err) { release(); return callback(err) }
+            debitThenCredit(client, from, to, cents, (workErr,result) => {
+              if (workErr) client.query('ROLLBACK', rollbackErr => {
+                release(); callback(workErr, undefined, rollbackErr ? {rollback:rollbackErr}:undefined)
+              })
+              else client.query('COMMIT', commitErr => {
+                release(); callback(commitErr, commitErr?undefined:result)
+              })
+            })
+          })
+        })
+
+      The public Promise wrapper rejects connect/BEGIN/work/COMMIT exact errors. If work and rollback
+      both fail, it rejects exact work error and attaches rollback error at error.rollbackError.
+  - id: new-driver
+    type: spec
+    label: Frozen promise driver and migration goal
+    content: |
+      await pool.connect()->client; client.release() synchronous and exactly once.
+      await client.query executes on that pinned session. pool.query chooses any idle session.
+      SQL promises settle only after the command completes. release before settlement permits that
+      connection to be reused concurrently.
+      debitThenCredit(client,...) returns a Promise and uses only the supplied queryable.
+
+      Goal G: replace callbacks with async/await, retaining one explicit checked-out client and no
+      callback API. Observable query text/order, session identity, errors, and release timing remain.
+  - id: transaction-schedules
+    type: table
+    label: Authoritative migration witnesses
+    content: |
+      P1 connect rejects C -> reject exact C; no release/query.
+      P2 BEGIN on client 7 rejects B -> log c7:BEGIN, release7, reject exact B.
+      P3 success -> c7:BEGIN,debit,credit,COMMIT(resolve),release7; return exact result.
+      P4 work rejects W -> c7:BEGIN,debit,ROLLBACK(resolve),release7; reject exact W.
+      P5 work W and ROLLBACK R -> await rollback, set W.rollbackError=R, release, reject exact W.
+      P6 COMMIT rejects M -> await rejection, release, reject exact M; never rollback after COMMIT failure.
+  - id: migrations
+    type: code
+    label: Four complete async migration proposals
+    content: |
+      migration-a:
+        const client=await pool.connect()
+        try { await client.query('BEGIN'); let result
+          try { result=await debitThenCredit(client,...); }
+          catch(work) { try { await client.query('ROLLBACK'); }
+            catch(rb){ work.rollbackError=rb; } throw work; }
+          await client.query('COMMIT'); return result
+        } finally { client.release() }
+
+      migration-b:
+        const client=await pool.connect(); try { await client.query('BEGIN');
+          const result=await debitThenCredit(pool,...); await client.query('COMMIT'); return result;
+        } catch(e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+
+      migration-c:
+        same pinned-client work as a; on work failure:
+          try { await client.query('ROLLBACK') } catch(rb) { throw rb } throw work
+        finally release
+
+      migration-d:
+        pinned client and work/error rules as a, but on success:
+          const committing=client.query('COMMIT'); client.release(); await committing; return result
+        failure paths release in finally guard that avoids a second release
+  - id: session-ledger
+    type: table
+    label: Frozen query ownership and error precedence
+    content: |
+      BEGIN/debit/credit/COMMIT or ROLLBACK must all use one client id.
+      Work failure is primary; rollback failure is attached, not substituted.
+      BEGIN failure releases without ROLLBACK because no transaction began.
+      COMMIT failure is primary and does not trigger ROLLBACK in the original.
+      Release is after the final SQL promise settles on every connected path.
+  - id: manifest
+    type: note
+    label: Complete concurrency and review assumptions
+    content: |
+      migration-a through migration-d are complete. Setting rollbackError succeeds and preserves error
+      identity. migration-b's catch also attempts rollback after BEGIN/COMMIT failures and routes work
+      through arbitrary pool sessions. No automatic transaction behavior exists in the driver.
+
+      Mae's early-release proposal violates session ownership: the pool may issue new work on that
+      client while COMMIT is pending, changing ordering and transaction isolation.
+tags: [refactoring, api-migration, postgresql, transactions, error-precedence]

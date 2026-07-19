@@ -1,10 +1,10 @@
 id: semantic-equivalence-async-ordering
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: semantic-equivalence
 difficulty: expert
 title: Are these six async refactors behavior-preserving under Promise ordering and error semantics?
-summary: Six async functions each get a rewrite that changes how promises are sequenced. Some are equivalent; others diverge on ordering of observable side effects, how many metered calls run on the error path, whether a non-idempotent write always fires, or whether rejections still propagate. Using the cited Promise semantics and the declared side effects, classify each rewrite as behavior-preserving or changes-behavior.
+summary: Six async functions each get a rewrite that changes how promises are sequenced. Using the cited Promise semantics and the declared side effects, classify each rewrite as behavior-preserving or changes-behavior, naming a witnessing condition for every divergence.
 prompt: |
   A refactor PR rewrites six async functions (originals A1..A6) into forms that sequence their
   promises differently (proposed B1..B6). Judge each rewrite for FULL observable equivalence across

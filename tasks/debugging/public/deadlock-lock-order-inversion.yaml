@@ -1,9 +1,9 @@
 id: deadlock-lock-order-inversion
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: concurrency-defect
 difficulty: expert
-title: Wallet Transfers Deadlock Under Load From Inconsistent Row-Lock Ordering
+title: Wallet Transfers Deadlock Under Load
 summary: >-
   walletsvc transfers intermittently fail with lock errors while users see timeouts. Given the
   transfer code, a full interleaving of two concurrent transfers, a waits-for graph, a metrics table,
@@ -36,7 +36,6 @@ artifacts:
       export async function transfer(fromId, toId, amount) {
         await db.query('BEGIN');
         try {
-          // Locks are acquired in ARGUMENT order: fromId first, then toId.
           const from = await db.query(
             'SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [fromId]);   // lock A: fromId
           const to = await db.query(
@@ -48,23 +47,20 @@ artifacts:
           return 'ok';
         } catch (e) { await db.query('ROLLBACK'); throw e; }
       }
-      // Nothing sorts fromId/toId before locking; the acquisition order is whatever the caller passed.
   - id: trace-fail
     type: log
     label: interleaved execution — transfer(A,B) and transfer(B,A) run concurrently
     content: |
-      # T1 = transfer(A, B, 10);  T2 = transfer(B, A, 5). Same two accounts, opposite directions.
+      # T1 = transfer(A, B, 10);  T2 = transfer(B, A, 5).
       t=0.000 T1 BEGIN
       t=0.000 T2 BEGIN
       t=0.001 T1 SELECT ... id=A FOR UPDATE   -> ACQUIRES lock(A)
       t=0.001 T2 SELECT ... id=B FOR UPDATE   -> ACQUIRES lock(B)
       t=0.002 T1 SELECT ... id=B FOR UPDATE   -> BLOCKS (lock(B) held by T2)
       t=0.002 T2 SELECT ... id=A FOR UPDATE   -> BLOCKS (lock(A) held by T1)
-      # Neither can proceed: T1 holds A and waits for B; T2 holds B and waits for A.
       t=1.002 db deadlock detector: victim = T2 -> T2 aborted with SQLSTATE 40P01 (deadlock detected)
       t=1.003 T2 ROLLBACK; transfer(B,A) fails and is surfaced to the client
       t=1.003 T1 SELECT ... id=B FOR UPDATE   -> now ACQUIRES lock(B); T1 proceeds and COMMITs
-      # The deadlock is provable: two transfers over the SAME pair in OPPOSITE order form a 2-cycle.
   - id: waits-graph
     type: note
     label: waits-for graph captured at t=0.002 (from pg_locks)
@@ -72,9 +68,7 @@ artifacts:
       Waits-for graph among blocked transactions at t=0.002:
         T1  --waits-for-->  T2      (T1 requests lock(B), currently held by T2)
         T2  --waits-for-->  T1      (T2 requests lock(A), currently held by T1)
-      This is a cycle of length 2 (T1 -> T2 -> T1) => deadlock. The only edges in the graph are these
-      two; no other transaction participates. A cycle exists iff two transfers hold one of {A,B} and
-      request the other, which happens exactly when their (fromId,toId) orders are inverted.
+      No other transactions appear in the capture.
   - id: metrics
     type: table
     label: walletsvc metrics, 1-minute buckets (deadlock vs. pool)
@@ -84,15 +78,10 @@ artifacts:
       12:01      910              7                7                0                  27/40
       12:02      1780             36               34               11                 40/40
       12:03      1810             39               37               13                 40/40
-      # deadlocks_40P01 rises first and tracks client_timeouts almost 1:1. pool_acquire_errs appear
-      # only at 12:02+ once pool_active hits max 40 — because deadlocked transfers hold their
-      # connection for the full ~1s detector interval before aborting, starving the pool. The 40P01
-      # count leads; the pool errors follow.
   - id: sibling-code
     type: code
     label: walletsvc — other paths that also take row locks (for contrast)
     content: |
-      // applyInterest locks exactly ONE row. A single lock cannot form a cycle with itself.
       export async function applyInterest(accountId, bps) {
         await db.query('BEGIN');
         await db.query('SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [accountId]);
@@ -101,10 +90,8 @@ artifacts:
         await db.query('COMMIT');
       }
 
-      // batchSettle locks MANY rows, but always in a CANONICAL sorted order, so no two batchSettle
-      // calls can invert their acquisition order relative to each other.
       export async function batchSettle(accountIds) {
-        const ids = [...accountIds].sort();          // canonical order before locking
+        const ids = [...accountIds].sort();
         await db.query('BEGIN');
         for (const id of ids) {
           await db.query('SELECT balance FROM accounts WHERE id=$1 FOR UPDATE', [id]);

@@ -1,0 +1,27 @@
+id: speed-is-palindrome
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Implement a Palindrome Checker With Character Normalization
+summary: >-
+  Write a tiny TypeScript helper that checks if a string is a palindrome, ignoring case and
+  non-alphanumeric characters, throwing a TypeError for non-string inputs, plus four assertion-style examples.
+prompt: |
+  Implement `isPalindrome` from [palindrome-spec] in TypeScript.
+
+  1. Output only a typed `function isPalindrome(text: string): boolean`.
+  2. If the input is not a string, throw a `TypeError("input must be a string")`.
+  3. Add four lines of `expect(isPalindrome(...)).toBe(...)` (or `.toThrow(...)`) covering: a mixed-case palindrome with spaces, a non-palindrome, an empty/punctuation-only string, and an invalid non-string input.
+artifacts:
+  - id: palindrome-spec
+    type: spec
+    label: Palindrome rules
+    content: |
+      isPalindrome(text: string): boolean
+      - If the input is not a string (e.g. null, undefined, number), throw a TypeError with the message "input must be a string".
+      - Ignore casing (case-insensitive comparison).
+      - Ignore all non-alphanumeric characters (only ASCII letters [a-zA-Z] and digits [0-9] are compared).
+      - An empty string or a string containing no alphanumeric characters must return true.
+      - Return true if the normalized alphanumeric characters read the same forwards and backwards, otherwise false.
+tags: [typescript, utility, strings]

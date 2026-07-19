@@ -1,0 +1,118 @@
+id: behavior-preservation-java-resource-suppression
+version: 1.0.0
+category: refactoring
+cluster: behavior-preservation
+difficulty: expert
+title: Replace Manual Java Cleanup Without Changing Suppressed-Exception Order
+summary: >-
+  A Java method manually acquires two resources, closes them in reverse order, and preserves a
+  precise primary/suppressed exception graph. Four cleanup rewrites differ on initialization,
+  closure, and wrapping; only one preserves every lifecycle observable while meeting the
+  try-with-resources goal.
+prompt: |
+  Use only original-method, observable-contract, scenarios, rewrites, and manifest. Cite artifact
+  ids. For each rewrite give behavior-preserving / changes-behavior and meets-goal / fails-goal.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For each behavior change, give the first J1..J6 witness and exact log plus thrown/suppressed graph.
+  3. Identify the unique rewrite that is both behavior-preserving and meets-goal.
+  4. Trace J5 through the original and accepted rewrite.
+  5. Explain which exception is primary when body and both close calls fail.
+  6. Evaluate reviewer Uma's claim that close order is irrelevant once every resource is closed.
+artifacts:
+  - id: original-method
+    type: code
+    label: Existing Java method and close helper
+    content: |
+      Result execute(Factory f) throws Exception {
+        A a = f.openA();
+        B b = null;
+        Throwable primary = null;
+        try {
+          b = f.openB(a);
+          return b.run();
+        } catch (Throwable t) {
+          primary = t;
+          throw t;
+        } finally { closeResources(b, a, primary); }
+      }
+
+      void closeResources(B b, A a, Throwable primary) {
+        Throwable failure = primary;
+        for (AutoCloseable r : new AutoCloseable[]{b,a}) {
+          if (r == null) continue;
+          try { r.close(); }
+          catch (Throwable closing) {
+            if (failure != null) failure.addSuppressed(closing); else failure = closing;
+          }
+        }
+        if (primary == null && failure != null) sneakyThrow(failure);
+      }
+
+      Factory/open/run/close append their operation to a shared log immediately. Throwable identity,
+      cause, and ordered getSuppressed() contents are observable.
+  - id: observable-contract
+    type: spec
+    label: Complete behavior and refactoring goal
+    content: |
+      B1 acquisition order is openA then openB; if openA fails nothing closes.
+      B2 if openB fails, A closes and its close failure is suppressed on the openB throwable.
+      B3 after successful acquisition, close B then A on return or throw.
+      B4 the body throwable remains primary; B-close then A-close failures are appended to its
+         suppressed array in that order.
+      B5 with a successful body, the first close failure is primary and later close failure is
+         suppressed on it; a close failure overrides the pending return.
+      B6 exact Throwable objects escape without wrapping.
+      B7 exact operation log ordering is public.
+
+      Goal G: replace primary/closeResources/manual finally machinery in execute with Java
+      try-with-resources, without changing Factory, resources, or behavior B1..B7.
+  - id: scenarios
+    type: table
+    label: Authoritative lifecycle witnesses
+    content: |
+      J1 openA throws EA -> log [openA], throw EA suppressed[].
+      J2 openB throws EB; A closes -> [openA,openB,closeA], throw EB suppressed[].
+      J3 openB throws EB; closeA throws CA -> throw EB suppressed[CA].
+      J4 run returns R; closes succeed -> [openA,openB,run,closeB,closeA], return R.
+      J5 run throws E; closeB throws CB; closeA throws CA -> same log order, throw E suppressed[CB,CA].
+      J6 run returns R; closeB throws CB; closeA throws CA -> throw CB suppressed[CA].
+  - id: rewrites
+    type: code
+    label: Four proposed Java rewrites
+    content: |
+      // rewrite-a
+      try (A a = f.openA(); B b = f.openB(a)) { return b.run(); }
+
+      // rewrite-b
+      A a = f.openA();
+      B b = f.openB(a);
+      try (a; b) { return b.run(); }
+
+      // rewrite-c
+      try (A a = f.openA(); B b = f.openB(a)) { return b.run(); }
+      catch (Exception e) { throw new ExecutionException(e); }
+
+      // rewrite-d
+      A a = f.openA();
+      B b = null;
+      Throwable primary = null;
+      try { b = f.openB(a); return b.run(); }
+      catch (Throwable t) { primary=t; throw t; }
+      finally { closeResources(b,a,primary); }
+
+      Java language try-with-resources semantics are exactly JLS reverse-close and suppression:
+      resources initialize left-to-right, close right-to-left, and close failures are suppressed on
+      the already-pending throwable in close order.
+  - id: manifest
+    type: note
+    label: Complete proposals and review claim
+    content: |
+      rewrite-a through rewrite-d are complete. rewrite-b's resources are both initialized before the
+      try-with-resources statement becomes active, so openB failure does not trigger automatic A
+      close. rewrite-c catches and wraps body, initialization, and close exceptions assignable to
+      Exception. rewrite-d is textually the original behavior and retains the machinery Goal G removes.
+
+      Uma's claim ignores B3/B4/B5/B7: reverse close order determines both side effects and the exact
+      primary/suppressed exception graph.
+tags: [refactoring, behavior-preservation, java, resources, exceptions]

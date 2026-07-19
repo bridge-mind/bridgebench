@@ -1,0 +1,188 @@
+id: counterexample-lease-ttl
+version: 1.1.0
+category: reasoning
+cluster: formal-counterexample
+difficulty: expert
+title: Lease TTL Counterexample to the Highest-Fence Completion Invariant
+summary: >-
+  Find the unique minimal worker schedule that lets an expired lease holder overwrite a newer
+  fenced completion, trace the state at every boundary, distinguish harmless expiry schedules, and
+  select the only atomic database predicate that restores the stated final-result invariant.
+prompt: |
+  JobForge uses expiring leases to distribute jobs. The team claims [safety-property] always holds,
+  but one candidate schedule violates it. Treat the lease contract, database behavior, runtime timing,
+  and candidate schedules as complete. This task is about the final persisted job row; it does not ask
+  whether duplicate external side effects are safe.
+
+  1. Counterexample selection. Identify the one schedule in [schedule-candidates] that violates the
+     stated safety property. State its final row and the required final row under the property.
+  2. Formal trace. For that schedule, trace every successful/failed acquire, fence value, expiry,
+     execution interval, completion write, and release outcome in time order. Explain why the final
+     write is permitted by the deployed code even though its fence is lower.
+  3. Minimality and boundary. Prove why two workers are necessary, why a takeover at t=29 cannot work,
+     and why the t=30 boundary alone does not cause a violation in the harmless candidate schedule.
+  4. Claim review. Classify every assertion in [claims-note] as correct or incorrect using the exact
+     comparison and release semantics; do not generalize from an unstated lock model.
+  5. Patch verification. Select the only candidate in [patch-options] that restores
+     [safety-property] for every completion ordering. Explain why each other candidate fails the
+     property, and state the exact regression-test assertion for the violating schedule after the
+     correct patch.
+artifacts:
+  - id: safety-property
+    type: spec
+    label: Final highest-fence completion invariant
+    content: |
+      For one job J, consider every lease acquisition that succeeds in a schedule. Each successful
+      acquisition receives a strictly larger fence than any earlier successful acquisition for J.
+
+      FINAL HIGHEST-FENCE COMPLETION PROPERTY:
+        After every worker in a finite schedule has run its one completion write and no further writes
+        occur, the persisted `jobs[J]` row MUST have:
+          committedFence = the greatest fence from every successful acquisition for J
+          completedBy = the owner of that greatest fence
+          result = the result produced by that owner
+
+      A lower-fence completion may happen earlier, but it must never overwrite a row already committed
+      by a higher fence. This property concerns the final database row only. It intentionally makes no
+      claim about exactly-once execution or external effects.
+  - id: lease-store-contract
+    type: spec
+    label: Expiring lease and release semantics
+    content: |
+      acquire(jobId, owner, now, ttlSeconds):
+        - Succeeds if there is no active record OR currentRecord.expiresAt <= now.
+        - On success, stores (owner, fence=previousGreatestFence+1, expiresAt=now+ttlSeconds) and
+          returns that exact owner/fence pair.
+        - On failure, returns null and changes nothing.
+        - An expiry makes a record available to another worker; it does NOT interrupt or notify the
+          former owner, which may continue executing.
+
+      release(jobId, owner, fence):
+        - Deletes the current record only if BOTH owner and fence match the current record.
+        - Otherwise returns false and changes nothing.
+
+      Fence values are monotonically increasing per job and are never reused, including after expiry
+      or release. Comparisons at an exact timestamp use the listed operation order in
+      [schedule-candidates].
+  - id: worker-code
+    type: code
+    label: Deployed job worker completion path
+    content: |
+      export async function run(job: Job, workerId: string, now: number) {
+        const lease = await leases.acquire(job.id, workerId, now, 30);
+        if (lease === null) return "not-acquired";
+
+        const result = await execute(job); // duration is specified per candidate schedule
+
+        await db.jobs.update({
+          where: eq(jobs.id, job.id),
+          set: {
+            status: "succeeded",
+            completedBy: workerId,
+            result,
+            committedFence: lease.fence,
+          },
+        });
+
+        await leases.release(job.id, workerId, lease.fence);
+        return "completed";
+      }
+
+      `execute()` does not heartbeat, renew, inspect lease expiry, or cancel itself. The database update
+      has only the job-id predicate shown above, so every completion write that reaches it overwrites all
+      four listed columns regardless of the currently stored fence.
+  - id: job-schema
+    type: spec
+    label: Job-row state and atomic update behavior
+    content: |
+      Initial row for job J-17:
+        status="running", completedBy=null, result=null, committedFence=0
+
+      Database updates to one jobs row are atomic and serialize in the operation order given by a
+      schedule. A conditional UPDATE whose WHERE predicate is false affects zero rows and leaves the
+      entire row unchanged. There are no triggers, retries, version columns, or other writers of J-17.
+  - id: runtime-config
+    type: config
+    label: Scheduler timing assumptions
+    content: |
+      leaseTtlSeconds: 30
+      initialPreviousGreatestFence(J-17): 40
+      workerA:
+        id: A
+        executionResult: "result-A"
+      workerB:
+        id: B
+        executionResult: "result-B"
+
+      An idle worker runs execute() immediately after a successful acquire and performs exactly one
+      completion write when its listed execution duration ends. It does not stop merely because its
+      lease expires. A worker that fails acquire performs no execute, database update, or release.
+  - id: schedule-candidates
+    type: table
+    label: Complete candidate schedules
+    content: |
+      S1 — failed early takeover
+        t=0   A acquire J-17, execute duration=35
+        t=29  B acquire J-17, execute duration=2 if acquired
+        t=35  A completion write, then A release
+
+      S2 — expired owner writes last
+        t=0   A acquire J-17, execute duration=35
+        t=30  B acquire J-17, execute duration=2
+        t=32  B completion write, then B release
+        t=35  A completion write, then A release
+
+      S3 — exact-boundary takeover but higher fence writes last
+        t=0   A acquire J-17, execute duration=30
+        t=30  A completion write, then A release
+        t=30  B acquire J-17, execute duration=2
+        t=32  B completion write, then B release
+
+      Rows at the same timestamp execute from top to bottom. All listed acquires are the only acquire
+      attempts, and every successful worker follows [worker-code] exactly.
+  - id: claims-note
+    type: note
+    label: Unverified lock-review assertions
+    content: |
+      1. "B cannot acquire at t=30 because an expiry must be strictly before now, not equal to now."
+      2. "A's release at t=35 deletes B's lease and is what causes the stale final result."
+      3. "Changing only the TTL from 30 to 120 proves the safety property for all future jobs."
+      4. "The first successful completion must win because the lease store serializes acquisitions."
+      5. "S3 proves that any acquisition at an expiry boundary is automatically a counterexample."
+  - id: patch-options
+    type: diff
+    label: Candidate final-result fencing repairs
+    content: |
+      Patch A — increase the lease duration:
+        - const lease = await leases.acquire(job.id, workerId, now, 30);
+        + const lease = await leases.acquire(job.id, workerId, now, 120);
+
+      Patch B — keep the deployed unconditional completion write:
+        await db.jobs.update({
+          where: eq(jobs.id, job.id),
+          set: { completedBy: workerId, result, committedFence: lease.fence },
+        });
+
+      Patch C — make a completion advance the persisted fence only:
+        const write = await db.jobs.update({
+          where: and(
+            eq(jobs.id, job.id),
+            lt(jobs.committedFence, lease.fence),
+          ),
+          set: { status: "succeeded", completedBy: workerId, result, committedFence: lease.fence },
+        });
+        // write.rowCount === 0 means this is a stale completion and is intentionally a no-op.
+
+      Patch D — reverse the fence predicate:
+        await db.jobs.update({
+          where: and(
+            eq(jobs.id, job.id),
+            gt(jobs.committedFence, lease.fence),
+          ),
+          set: { status: "succeeded", completedBy: workerId, result, committedFence: lease.fence },
+        });
+
+      The database atomicity guarantee in [job-schema] applies to all candidate UPDATE statements.
+      Execution may still overlap under any patch; judge only the final-row property in
+      [safety-property].
+tags: [leases, fencing-tokens, concurrency, formal-counterexample, database-predicates]

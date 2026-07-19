@@ -1,0 +1,317 @@
+id: constraint-satisfaction-streaming-median
+version: 1.1.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: StreamingMedian — Which Candidate Is Truly Single-Pass, O(log n) Insertion, and Space-Optimized
+summary: A streaming median tracker processes values and returns the running median. The spec mandates O(log n) insertion time, O(1) lookup time, O(n) total space, and no allocations during retrieval. Five candidates are analyzed. Classify all five against the constraints, pointing out the exact code structures responsible for any violations.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (median-spec, worked-example, candidate-a,
+  candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite the artifact id(s) for
+  every claim. Do not execute anything — reason about each candidate from its code using the
+  definitions in `reading-guide`.
+
+  Verdict vocabulary: a candidate CONFORMS if it satisfies ALL FOUR declared constraints C1–C4 in
+  `median-spec`; it VIOLATES if it breaks any one of them. Every candidate returns the CORRECT median on
+  the worked-example inputs, so correctness (C4) is not the deciding axis — the performance and allocation
+  constraints are.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or violates. For every
+     violator, name the exact constraint number (C1–C4) it breaks and quote the exact code statement or
+     construct responsible.
+
+  2. State the complete set of conforming candidates.
+
+  3. candidate-c uses binary search (`binarySearch`) to find the exact insertion point. Explain precisely
+     why it still VIOLATES, and name the constraint and statement that causes the violation.
+
+  4. Explain why candidate-d is extremely efficient on additions (O(1)) but unacceptable for hot-path
+     retrievals. Identify the constraint it breaks and state its time and space complexity during `getMedian()`.
+
+  5. A reviewer approves candidate-b, arguing "it simply maintains a sorted array and retrieves the median in
+     O(1) time." Rebut this using C1 and the exact code structure in candidate-b.
+artifacts:
+  - id: median-spec
+    type: spec
+    label: StreamingMedian specification (class + constraints)
+    content: |
+      CLASS StreamingMedian
+
+      This class tracks a running stream of numbers and supports two operations:
+        - `add(num)`: Adds a new number to the stream.
+        - `getMedian()`: Returns the median of all numbers added so far as a float.
+
+      C4  CORRECTNESS. The median of a list of numbers:
+            - If the count is odd, it is the middle element of the sorted list.
+            - If the count is even, it is the average of the two middle elements of the sorted list.
+          If no elements have been added, `getMedian()` returns 0.
+
+      This tracks data on a high-throughput, latency-sensitive telemetry stream. It MUST satisfy each of the
+      following constraints:
+
+        C1  O(log n) INSERTION TIME. Adding a new element to the stream must take at most O(log n) amortized
+            time. It MUST NOT perform a full array sort on addition (O(n log n)), nor use linear element-shifting
+            insertions in an array (O(n)).
+
+        C2  O(1) RETRIEVAL TIME. Accessing the current running median via `getMedian()` must be O(1) time.
+            It MUST NOT perform any sorting, filtering, or array traversals during retrieval.
+
+        C3  NO ALLOCATIONS ON RETRIEVAL. `getMedian()` must not allocate any new arrays, objects, or auxiliary
+            data structures. The lookup must be pure, read-only, and allocate no garbage for the GC.
+
+      A candidate CONFORMS iff it satisfies C1 AND C2 AND C3 AND C4. Breaking any single constraint means
+      it VIOLATES.
+  - id: worked-example
+    type: table
+    label: worked example and reference values
+    content: |
+      Reference values for C4 so running calculations are checkable by hand.
+
+      Stream of values: 5, 15, 1, 3
+        - add(5)    -> stream: [5]          -> median = 5.0
+        - add(15)   -> stream: [5, 15]      -> median = (5 + 15)/2 = 10.0
+        - add(1)    -> stream: [1, 5, 15]   -> median = 5.0
+        - add(3)    -> stream: [1, 3, 5, 15]-> median = (3 + 5)/2 = 4.0
+
+      Every candidate below returns these same values.
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      class StreamingMedianA {
+        constructor() {
+          // Uses two heaps: minHeap for the larger half, maxHeap for the smaller half.
+          // Heaps are represented in standard array form where index i has children 2i+1 and 2i+2.
+          this.minHeap = [];
+          this.maxHeap = [];
+        }
+
+        add(num) {
+          // Add to maxHeap (invert sign for min-heap implementation to act as max-heap)
+          this._heapPush(this.maxHeap, -num);
+          // Balance: move largest of maxHeap to minHeap
+          this._heapPush(this.minHeap, -this._heapPop(this.maxHeap));
+
+          if (this.maxHeap.length < this.minHeap.length) {
+            this._heapPush(this.maxHeap, -this._heapPop(this.minHeap));
+          }
+        }
+
+        getMedian() {
+          if (this.maxHeap.length === 0) return 0;
+          if (this.maxHeap.length > this.minHeap.length) {
+            return -this.maxHeap[0];
+          }
+          return (-this.maxHeap[0] + this.minHeap[0]) / 2;
+        }
+
+        _heapPush(heap, val) {
+          heap.push(val);
+          let idx = heap.length - 1;
+          while (idx > 0) {
+            let parent = Math.floor((idx - 1) / 2);
+            if (heap[parent] <= heap[idx]) break;
+            let tmp = heap[parent]; heap[parent] = heap[idx]; heap[idx] = tmp;
+            idx = parent;
+          }
+        }
+
+        _heapPop(heap) {
+          const top = heap[0];
+          const bottom = heap.pop();
+          if (heap.length > 0) {
+            heap[0] = bottom;
+            let idx = 0;
+            while (true) {
+              let left = 2 * idx + 1;
+              let right = 2 * idx + 2;
+              let smallest = idx;
+              if (left < heap.length && heap[left] < heap[smallest]) smallest = left;
+              if (right < heap.length && heap[right] < heap[smallest]) smallest = right;
+              if (smallest === idx) break;
+              let tmp = heap[idx]; heap[idx] = heap[smallest]; heap[smallest] = tmp;
+              idx = smallest;
+            }
+          }
+          return top;
+        }
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      class StreamingMedianB {
+        constructor() {
+          this.arr = [];
+        }
+
+        add(num) {
+          this.arr.push(num);
+          this.arr.sort((a, b) => a - b);
+        }
+
+        getMedian() {
+          const n = this.arr.length;
+          if (n === 0) return 0;
+          const mid = Math.floor(n / 2);
+          if (n % 2 !== 0) {
+            return this.arr[mid];
+          }
+          return (this.arr[mid - 1] + this.arr[mid]) / 2;
+        }
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      class StreamingMedianC {
+        constructor() {
+          this.arr = [];
+        }
+
+        add(num) {
+          const idx = this._binarySearch(num);
+          this.arr.splice(idx, 0, num);
+        }
+
+        getMedian() {
+          const n = this.arr.length;
+          if (n === 0) return 0;
+          const mid = Math.floor(n / 2);
+          if (n % 2 !== 0) {
+            return this.arr[mid];
+          }
+          return (this.arr[mid - 1] + this.arr[mid]) / 2;
+        }
+
+        _binarySearch(num) {
+          let low = 0, high = this.arr.length;
+          while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (this.arr[mid] < num) low = mid + 1;
+            else high = mid;
+          }
+          return low;
+        }
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      class StreamingMedianD {
+        constructor() {
+          this.arr = [];
+        }
+
+        add(num) {
+          this.arr.push(num);
+        }
+
+        getMedian() {
+          const temp = this.arr.slice().sort((a, b) => a - b);
+          const n = temp.length;
+          if (n === 0) return 0;
+          const mid = Math.floor(n / 2);
+          if (n % 2 !== 0) {
+            return temp[mid];
+          }
+          return (temp[mid - 1] + temp[mid]) / 2;
+        }
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      // A variant of dual-heaps using an external library style wrapper.
+      class StreamingMedianE {
+        constructor() {
+          // MinHeap and MaxHeap are balanced
+          this.heaps = {
+            min: new BinaryHeap((a, b) => a - b),
+            max: new BinaryHeap((a, b) => b - a)
+          };
+        }
+
+        add(num) {
+          this.heaps.max.push(num);
+          this.heaps.min.push(this.heaps.max.pop());
+          if (this.heaps.max.size() < this.heaps.min.size()) {
+            this.heaps.max.push(this.heaps.min.pop());
+          }
+        }
+
+        getMedian() {
+          const lMax = this.heaps.max.size();
+          const lMin = this.heaps.min.size();
+          if (lMax === 0) return 0;
+          if (lMax > lMin) {
+            return this.heaps.max.peek();
+          }
+          return (this.heaps.max.peek() + this.heaps.min.peek()) / 2;
+        }
+      }
+
+      // Inline helper class
+      class BinaryHeap {
+        constructor(compare) {
+          this.data = [];
+          this.compare = compare;
+        }
+        push(val) {
+          this.data.push(val);
+          this._up(this.data.length - 1);
+        }
+        pop() {
+          const top = this.data[0];
+          const bottom = this.data.pop();
+          if (this.data.length > 0) {
+            this.data[0] = bottom;
+            this._down(0);
+          }
+          return top;
+        }
+        peek() {
+          return this.data[0];
+        }
+        size() {
+          return this.data.length;
+        }
+        _up(i) {
+          while (i > 0) {
+            let p = Math.floor((i - 1) / 2);
+            if (this.compare(this.data[p], this.data[i]) <= 0) break;
+            let t = this.data[p]; this.data[p] = this.data[i]; this.data[i] = t;
+            i = p;
+          }
+        }
+        _down(i) {
+          while (true) {
+            let l = 2 * i + 1;
+            let r = 2 * i + 2;
+            let s = i;
+            if (l < this.data.length && this.compare(this.data[l], this.data[s]) < 0) s = l;
+            if (r < this.data.length && this.compare(this.data[r], this.data[s]) < 0) s = r;
+            if (s === i) break;
+            let t = this.data[i]; this.data[i] = this.data[s]; this.data[s] = t;
+            i = s;
+          }
+        }
+      }
+  - id: reading-guide
+    type: note
+    label: how to read the constraints (definitions + scope)
+    content: |
+      Scope: candidate-a … candidate-e are the COMPLETE set of submissions.
+
+      To trace time and space bounds:
+        - C1 (O(log n) addition): Heap push/pop on arrays of size n is O(log n). Array sorting (`Array.prototype.sort`) is
+          O(n log n). Array splicing (`Array.prototype.splice`) requires shifting up to n elements, which is O(n).
+        - C2 (O(1) retrieval): Reading heap roots (index 0) or array midpoints is O(1). Doing any array copy (`slice()`) or sorting
+          inside `getMedian()` is O(n log n).
+        - C3 (no allocations on retrieval): Creating a copy array (`slice()`) inside `getMedian()` allocates memory, breaking C3.
+tags: [streaming, median, heaps, complexity, performance, constraint-satisfaction, generation]

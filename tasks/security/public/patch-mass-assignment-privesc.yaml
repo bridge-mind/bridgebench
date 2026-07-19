@@ -1,5 +1,5 @@
 id: patch-mass-assignment-privesc
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: patch-verification
 difficulty: expert
@@ -62,7 +62,7 @@ prompt: |
 artifacts:
   - id: update-handler
     type: code
-    label: Wicket profile-update handler (vulnerable original)
+    label: Wicket profile-update handler (original)
     content: |
       // wicket/accounts/update-profile.ts — PATCH /accounts/me (Wicket accounts service).
       // Self-service profile update for the logged-in caller.
@@ -159,7 +159,7 @@ artifacts:
          user.displayName = req.body.displayName ?? user.displayName;
       -  user.role = req.body.role ?? user.role;
       +  // (direct role assignment removed)
-         Object.assign(user, req.body.metadata ?? {});   // metadata spread KEPT
+         Object.assign(user, req.body.metadata ?? {});
 
       === Patch C: validate body.role against the role enum ===
       --- a/wicket/accounts/update-profile.ts
@@ -171,9 +171,9 @@ artifacts:
       +    if (!ROLE_ENUM.includes(req.body.role)) {
       +      return res.status(400).json({ error: 'invalid role' });
       +    }
-      +    user.role = req.body.role;   // accepts ANY valid role name
+      +    user.role = req.body.role;
       +  }
-         Object.assign(user, req.body.metadata ?? {});   // metadata spread KEPT
+         Object.assign(user, req.body.metadata ?? {});
   - id: patches-de
     type: diff
     label: Candidate patches D, E (mutually exclusive alternatives)
@@ -198,8 +198,8 @@ artifacts:
       +++ b/wicket/accounts/update-profile.ts
       @@ handler body
          user.displayName = req.body.displayName ?? user.displayName;
-         user.role = req.body.role ?? user.role;         // WRITE POSITION 1 unchanged
-         Object.assign(user, req.body.metadata ?? {});   // WRITE POSITION 2 unchanged
+         user.role = req.body.role ?? user.role;
+         Object.assign(user, req.body.metadata ?? {});
 
          await accounts.save(user);
       -  return res.json({ id: user.id, displayName: user.displayName, role: user.role });

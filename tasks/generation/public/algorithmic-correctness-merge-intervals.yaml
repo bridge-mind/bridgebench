@@ -1,0 +1,184 @@
+id: algorithmic-correctness-merge-intervals
+version: 1.1.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: mergeIntervals — Which Implementation Correctly Merges Overlapping Ranges
+summary: An interval merging specification defines correct combination of overlapping, nested, adjacent, empty, and unsorted interval ranges. Five candidates are submitted. Classify all five against properties Q1..Q5, identifying the failing input and output for each violator.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (merge-spec, worked-examples, candidate-a,
+  candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite the artifact id(s) for every
+  claim. Do not execute anything — trace each candidate by hand against the worked-examples and judging-notes.
+
+  Verdict vocabulary: a candidate CONFORMS if, for every valid list of intervals, it returns the correct
+  merged list and obeys all properties Q1..Q5; it VIOLATES otherwise.
+
+  1. For EACH candidate (candidate-a … candidate-e), give a verdict: conforms or violates. State the
+     verdict for all five.
+
+  2. For every candidate you mark VIOLATES, name the specific property (one of Q1..Q5) it breaks, and give
+     one concrete input array from worked-examples or judging-notes on which its returned output differs
+     from the spec-correct output. State both returned arrays.
+
+  3. Identify the smallest input array (lowest number of intervals) that exposes candidate-b's lack of
+     sorting, and show its returned output versus the expected output.
+
+  4. State why candidate-d fails on nested intervals (like [[1, 10], [2, 5]]), giving its returned output
+     and the property (Q1..Q5) it breaks.
+
+  5. State the complete set of conforming candidates.
+artifacts:
+  - id: merge-spec
+    type: spec
+    label: mergeIntervals specification (complete contract)
+    content: |
+      FUNCTION mergeIntervals(intervals)
+
+      Input:
+        `intervals` is an array of intervals, where each interval is a two-element array of numbers: `[start, end]`.
+        The list may be empty, unsorted, or contain overlapping segments.
+
+      Return:
+        An array of merged intervals where all overlapping intervals are combined into one.
+
+      Declared properties (complete contract):
+        Q1  SORTING. The input intervals may be unsorted. They must be sorted by `start` ascending. If two
+            intervals have the same `start`, they are sorted by `end` ascending.
+        Q2  OVERLAP. Two intervals [s1, e1] and [s2, e2] (with s1 <= s2) overlap if s2 <= e1. They are
+            merged into a single interval [s1, max(e1, e2)].
+        Q3  ADJACENT INTERVALS. Adjacent intervals sharing a boundary (e.g., [1, 2] and [2, 3] where s2 === e1)
+            DO overlap and MUST be merged into [1, 3].
+        Q4  EMPTY AND SINGLETON. If the input is empty or contains exactly one interval, it must be returned
+            directly (or as a copy) without throwing or modifying the interval.
+        Q5  NESTING. If an interval is fully contained within another (e.g., [2, 5] inside [1, 10]), they must
+            merge into the larger containing interval ([1, 10]).
+  - id: worked-examples
+    type: table
+    label: worked examples and reference values
+    content: |
+      Reference values computed from merge-spec. A conforming implementation reproduces every row exactly.
+      (Interval lists shown as JSON arrays.)
+
+      #  input                                       expected output
+      -- ------------------------------------------- ----------------------------------------
+      1  []                                          []
+      2  [[1, 3]]                                    [[1, 3]]
+      3  [[1, 3], [2, 6], [8, 10]]                   [[1, 6], [8, 10]]
+      4  [[1, 4], [4, 5]]                            [[1, 5]]
+      5  [[1, 10], [2, 5]]                           [[1, 10]]
+      6  [[5, 8], [1, 3]]                            [[1, 3], [5, 8]]
+  - id: candidate-a
+    type: code
+    label: candidate-a
+    content: |
+      // candidate-a
+      function mergeIntervals(intervals) {
+        if (intervals.length <= 1) return intervals;
+        const sorted = intervals.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const merged = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+          const last = merged[merged.length - 1];
+          const curr = sorted[i];
+          if (curr[0] <= last[1]) {
+            last[1] = Math.max(last[1], curr[1]);
+          } else {
+            merged.push(curr);
+          }
+        }
+        return merged;
+      }
+  - id: candidate-b
+    type: code
+    label: candidate-b
+    content: |
+      // candidate-b
+      function mergeIntervals(intervals) {
+        if (intervals.length <= 1) return intervals;
+        const merged = [intervals[0]];
+        for (let i = 1; i < intervals.length; i++) {
+          const last = merged[merged.length - 1];
+          const curr = intervals[i];
+          if (curr[0] <= last[1]) {
+            last[1] = Math.max(last[1], curr[1]);
+          } else {
+            merged.push(curr);
+          }
+        }
+        return merged;
+      }
+  - id: candidate-c
+    type: code
+    label: candidate-c
+    content: |
+      // candidate-c
+      function mergeIntervals(intervals) {
+        if (intervals.length <= 1) return intervals;
+        const sorted = intervals.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const merged = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+          const last = merged[merged.length - 1];
+          const curr = sorted[i];
+          if (curr[0] < last[1]) {
+            last[1] = Math.max(last[1], curr[1]);
+          } else {
+            merged.push(curr);
+          }
+        }
+        return merged;
+      }
+  - id: candidate-d
+    type: code
+    label: candidate-d
+    content: |
+      // candidate-d
+      function mergeIntervals(intervals) {
+        if (intervals.length <= 1) return intervals;
+        const sorted = intervals.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const merged = [sorted[0]];
+        for (let i = 1; i < sorted.length; i++) {
+          const last = merged[merged.length - 1];
+          const curr = sorted[i];
+          if (curr[0] <= last[1]) {
+            last[1] = curr[1];
+          } else {
+            merged.push(curr);
+          }
+        }
+        return merged;
+      }
+  - id: candidate-e
+    type: code
+    label: candidate-e
+    content: |
+      // candidate-e
+      function mergeIntervals(intervals) {
+        if (intervals.length <= 1) return intervals.slice();
+        const sorted = intervals.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        return sorted.reduce((acc, curr) => {
+          if (acc.length === 0) return [curr];
+          const last = acc[acc.length - 1];
+          if (curr[0] <= last[1]) {
+            last[1] = Math.max(last[1], curr[1]);
+          } else {
+            acc.push(curr);
+          }
+          return acc;
+        }, []);
+      }
+  - id: judging-notes
+    type: note
+    label: how to judge (edge-case and sorting rules)
+    content: |
+      Scope for this task:
+        - candidate-a … candidate-e are the COMPLETE set of submissions.
+        - worked-examples is the complete reference set.
+
+      Algorithmic properties to verify:
+        - Unsorted inputs must be sorted ascending by start time first. If sorting is skipped, intervals that should
+          be merged will remain separated if they are not contiguous in the input.
+        - Overlapping ranges include those that are adjacent on a shared boundary (e.g. s2 === e1). This requires `<=`
+          for comparison rather than strictly `<`.
+        - Fully nested intervals require that the end time of the merged interval remains the maximum of the two (i.e.,
+          `max(last[1], curr[1])`). If we blindly assign `last[1] = curr[1]`, the nested interval [2, 5] inside [1, 10]
+          will erroneously contract the merged end to 5 instead of keeping it at 10.
+tags: [algorithmic-correctness, intervals, sorting, array, greedy, generation]

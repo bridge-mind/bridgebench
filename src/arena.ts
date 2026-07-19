@@ -6,12 +6,13 @@ import {
   isArenaCancellationError,
   throwIfCancelled,
 } from './cancellation.js';
-import { getModel, listModels, resolveCompetitorRoster } from './models.js';
+import { getJudgeModel, getModel, listModels, resolveCompetitorRoster } from './models.js';
 import { sanitizeError } from './openrouter.js';
 import { writeReports } from './report.js';
 import { createRunManifest, runIdFromManifest, runManifestHash } from './run-manifest.js';
 import { scheduleMatches } from './scheduler.js';
-import { decideSpeedMatch } from './speed.js';
+import { seatPanel, seatReserves } from './seating.js';
+import { decideSpeedMatch, isLiveResponse, medianTrialResponse, SPEED_TRIALS } from './speed.js';
 import { ArenaStore } from './store.js';
 import { buildCompetitorPrompt } from './tasks.js';
 import { detectResponseAnomalies } from './triage.js';
@@ -45,12 +46,15 @@ interface RunProgress {
   completed: number;
   matchesWithFailures: number;
   stoppedForBudget: boolean;
+  stoppedForHealth: boolean;
 }
 
 interface PreparedRun {
   runId: string;
   manifestHash: string;
   competitors: ModelRegistryEntry[];
+  /** The manifest's judge pool; each match seats its panel from this via seatPanel. */
+  judgePoolIds: string[];
   schedule: ScheduledMatch[];
   tasksById: Map<string, ArenaTask>;
   completedIds: Set<string>;
@@ -63,6 +67,24 @@ function failedResponse(modelId: string, error: unknown, latencyMs: number): Com
     success: false,
     error: sanitizeError(error),
     latencyMs,
+  };
+}
+
+/**
+ * The response a speed match journals for one side after its paired trials:
+ * the median-total trial when every trial is live (carrying the summed cost
+ * of all trials, so matchCostUsd stays the verifiable sum of journaled
+ * responses), or the first dead trial when any failed — liveness voids the
+ * match regardless of the other trials' timings.
+ */
+function journaledSpeedResponse(trials: readonly CompetitorResponse[]): CompetitorResponse {
+  const dead = trials.find((trialResponse) => !isLiveResponse(trialResponse));
+  if (dead) return dead;
+  const live = trials.filter(isLiveResponse);
+  const median = medianTrialResponse(live);
+  return {
+    ...median,
+    costUsd: live.reduce((sum, trialResponse) => sum + trialResponse.costUsd, 0),
   };
 }
 
@@ -138,6 +160,7 @@ export class ArenaRunner {
       completed: progress.completed,
       costUsd: progress.costUsd,
       stoppedForBudget: progress.stoppedForBudget,
+      stoppedForHealth: progress.stoppedForHealth,
       cancelled: true,
     };
   }
@@ -177,11 +200,20 @@ export class ArenaRunner {
       tasks,
       runId,
     });
+    const judgePoolIds = manifest.judges.map((model) => model.id);
+    // Pre-flight every scheduled panel so a pairing the pool cannot cover
+    // fails the run here — before model validation or any paid work.
+    if (config.category !== 'speed') {
+      for (const match of schedule) {
+        seatPanel(judgePoolIds, [match.modelA, match.modelB], match.seed, match.id);
+      }
+    }
     const existing = journal.filter((result) => result.runId === runId);
     const prepared: PreparedRun = {
       runId,
       manifestHash,
       competitors,
+      judgePoolIds,
       schedule,
       tasksById: new Map(tasks.map((task) => [task.public.id, task])),
       completedIds: new Set(journal.map((result) => result.matchId)),
@@ -190,6 +222,7 @@ export class ArenaRunner {
         completed: 0,
         matchesWithFailures: 0,
         stoppedForBudget: false,
+        stoppedForHealth: false,
       },
     };
 
@@ -218,8 +251,16 @@ export class ArenaRunner {
     execution: ArenaExecutionOptions = {},
   ): Promise<ArenaRunResult> {
     const { signal, onMatchResult } = execution;
-    const { runId, manifestHash, competitors, schedule, tasksById, completedIds, progress } =
-      await this.prepareRun(config, tasks, signal);
+    const {
+      runId,
+      manifestHash,
+      competitors,
+      judgePoolIds,
+      schedule,
+      tasksById,
+      completedIds,
+      progress,
+    } = await this.prepareRun(config, tasks, signal);
     const competitorIds = competitors.map((model) => model.id);
     const cancellation = this.observeCancellation(runId, progress, signal);
 
@@ -289,7 +330,15 @@ export class ArenaRunner {
         });
         let result: MatchResult;
         try {
-          result = await this.runMatch(match, task, manifestHash, competitorIds, signal);
+          result = await this.runMatch(
+            match,
+            task,
+            manifestHash,
+            competitorIds,
+            judgePoolIds,
+            config.ranked ?? true,
+            signal,
+          );
         } catch (error) {
           if (signal?.aborted || isArenaCancellationError(error)) {
             cancellation.requested();
@@ -326,18 +375,29 @@ export class ArenaRunner {
           progress.completed >= HEALTH_STOP_MIN_MATCHES &&
           progress.matchesWithFailures / progress.completed >= HEALTH_STOP_FAILURE_RATE
         ) {
+          // Graceful circuit breaker, mirroring the budget stop: failed
+          // matches are already journaled as voided no-contests, so stop
+          // scheduling new ones and end the run cleanly — completed matches
+          // stand, the final journal sweep still runs, and the run records
+          // as health-stopped rather than crashing to `failed`.
+          progress.stoppedForHealth = true;
           this.logger.error('run.health-stopped', {
             runId,
             completed: progress.completed,
             matchesWithFailures: progress.matchesWithFailures,
             failureRate: progress.matchesWithFailures / progress.completed,
           });
-          throw new Error(
-            `Run halted after ${progress.completed} matches: ${progress.matchesWithFailures} had failed competitor responses. ` +
-              `The provider path is unhealthy, so continuing would journal junk matches. ` +
-              `Inspect the run log${this.logger.filePath ? ` at ${this.logger.filePath}` : ''}, fix the cause, ` +
-              `then rerun with --resume (or pass --no-health-stop to override).`,
-          );
+          this.emit({
+            id: `${runId}-health-stopped`,
+            type: 'run.health-stopped',
+            data: {
+              runId,
+              completed: progress.completed,
+              matchesWithFailures: progress.matchesWithFailures,
+              failureRate: progress.matchesWithFailures / progress.completed,
+            },
+          });
+          break;
         }
       }
 
@@ -359,6 +419,7 @@ export class ArenaRunner {
           completed: progress.completed,
           costUsd: progress.costUsd,
           stoppedForBudget: progress.stoppedForBudget,
+          stoppedForHealth: progress.stoppedForHealth,
         },
       });
       return {
@@ -366,6 +427,7 @@ export class ArenaRunner {
         completed: progress.completed,
         costUsd: progress.costUsd,
         stoppedForBudget: progress.stoppedForBudget,
+        stoppedForHealth: progress.stoppedForHealth,
         cancelled: false,
       };
     } finally {
@@ -378,15 +440,39 @@ export class ArenaRunner {
     task: ArenaTask,
     manifestHash: string,
     competitorIds: readonly string[],
+    judgePoolIds: readonly string[],
+    ranked: boolean,
     signal?: AbortSignal,
   ): Promise<MatchResult> {
     throwIfCancelled(signal);
     const state = this.store.rebuildEloState(competitorIds);
     const prompt = buildCompetitorPrompt(task);
-    const [responseA, responseB] = await Promise.all([
-      this.runCompetitor(match, 'A', prompt, signal),
-      this.runCompetitor(match, 'B', prompt, signal),
-    ]);
+    let responseA: CompetitorResponse;
+    let responseB: CompetitorResponse;
+    if (task.public.category === 'speed') {
+      // Speed matches run paired trials and journal each side's median-total
+      // trial, so one provider hiccup or cache warm-up cannot decide a match.
+      // The journaled response carries the whole match's cost for its side.
+      const trialsA: CompetitorResponse[] = [];
+      const trialsB: CompetitorResponse[] = [];
+      for (let trial = 1; trial <= SPEED_TRIALS; trial += 1) {
+        const [a, b] = await Promise.all([
+          this.runCompetitor(match, 'A', prompt, signal, trial),
+          this.runCompetitor(match, 'B', prompt, signal, trial),
+        ]);
+        trialsA.push(a);
+        trialsB.push(b);
+        // A dead side already voids the match; further trials waste budget.
+        if (!isLiveResponse(a) || !isLiveResponse(b)) break;
+      }
+      responseA = journaledSpeedResponse(trialsA);
+      responseB = journaledSpeedResponse(trialsB);
+    } else {
+      [responseA, responseB] = await Promise.all([
+        this.runCompetitor(match, 'A', prompt, signal),
+        this.runCompetitor(match, 'B', prompt, signal),
+      ]);
+    }
     throwIfCancelled(signal);
     this.inspectResponse(match, responseA);
     this.inspectResponse(match, responseB);
@@ -432,20 +518,51 @@ export class ArenaRunner {
       winnerModelId = decision.winnerModelId;
       speedMetrics = decision.speedMetrics;
     } else if (responseA.success !== responseB.success) {
-      outcome = 'forfeit';
-      winnerModelId = responseA.success ? match.modelA : match.modelB;
+      // A failed response (provider outage, timeout, empty completion) voids
+      // the match: no winner, no point, no Elo movement. Scoring an
+      // infrastructure failure as a loss punished models for their
+      // provider's downtime — the surviving answer is never judged either,
+      // so there is no quality signal to award.
+      outcome = 'no-contest';
     } else if (responseA.success && responseB.success) {
       if (!isCompleteArenaTask(task)) {
         throw new Error(
           `A judged ${task.public.category} match requires a task with its hidden reference`,
         );
       }
+      // The seated panel is deterministic in (pool, competitors, seed,
+      // matchId) — verification re-derives it; the event carries it for UIs.
+      const seatedJudgeIds = seatPanel(
+        judgePoolIds,
+        [match.modelA, match.modelB],
+        match.seed,
+        match.id,
+      );
+      // Adjudication reserves (ranks 4..5 of the same ordering) sit only when
+      // the primary panel splits, tie-majorities, or loses a vote to
+      // abstention. An empty reserve list just disables escalation.
+      const reserveJudgeIds = seatReserves(
+        judgePoolIds,
+        [match.modelA, match.modelB],
+        match.seed,
+        match.id,
+      );
       this.emit({
         id: `${match.id}-judging-started`,
         type: 'judging.started',
-        data: { matchId: match.id, judges: listModels('judge').map((model) => model.id) },
+        data: { matchId: match.id, judges: seatedJudgeIds },
       });
-      panel = await this.judges.judge({ match, task, responseA, responseB }, signal);
+      panel = await this.judges.judge(
+        {
+          match,
+          task,
+          responseA,
+          responseB,
+          judges: seatedJudgeIds.map(getJudgeModel),
+          reserveJudges: reserveJudgeIds.map(getJudgeModel),
+        },
+        signal,
+      );
       throwIfCancelled(signal);
       if (panel.winnerModelId) {
         outcome = 'judged';
@@ -453,7 +570,9 @@ export class ArenaRunner {
       }
     }
 
-    if (winnerModelId) {
+    // Exhibition matches keep the verdict but never move the ladder:
+    // eloAfter stays equal to eloBefore, and verification enforces that.
+    if (winnerModelId && ranked) {
       const update = applyEloWin(
         eloBefore[match.modelA]!,
         eloBefore[match.modelB]!,
@@ -486,6 +605,7 @@ export class ArenaRunner {
       winnerModelId,
       panel,
       speedMetrics,
+      ranked,
       eloBefore,
       eloAfter,
       pointAwarded: winnerModelId !== null,
@@ -526,14 +646,19 @@ export class ArenaRunner {
     side: 'A' | 'B',
     prompt: { system: string; user: string },
     signal?: AbortSignal,
+    trial = 1,
   ): Promise<CompetitorResponse> {
     const modelId = side === 'A' ? match.modelA : match.modelB;
     const startedAt = Date.now();
     let sequence = 0;
+    // Trial 1 keeps the historical event-id shape; extra speed trials get a
+    // distinct prefix so their deltas never collide with trial 1's ids.
+    const idPrefix =
+      trial === 1 ? `${match.id}-delta-${side}` : `${match.id}-t${trial}-delta-${side}`;
     const emitDelta = (text: string, done: boolean, success = true): void => {
       sequence += 1;
       this.emit({
-        id: `${match.id}-delta-${side}-${sequence}`,
+        id: `${idPrefix}-${sequence}`,
         type: 'competitor.delta',
         data: { matchId: match.id, modelId, side, text, done, success },
       });

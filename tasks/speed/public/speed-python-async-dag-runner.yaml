@@ -1,0 +1,50 @@
+id: speed-python-async-dag-runner
+version: 1.0.0
+category: speed
+cluster: long-generation
+difficulty: expert
+title: Generate a Bounded Async DAG Runner
+summary: Implement a complete Python asyncio DAG executor with deterministic readiness, fail-fast cancellation, timeouts, and cycle validation.
+prompt: |
+  Write the complete `dag_runner.py` described by [api] and [execution-contract]. Emit code
+  only and use the Python 3.13 standard library.
+artifacts:
+  - id: api
+    type: spec
+    label: Required API
+    content: |
+      from collections.abc import Awaitable, Callable, Mapping
+      from dataclasses import dataclass
+      from typing import Any
+
+      @dataclass(frozen=True)
+      class TaskSpec:
+          deps: tuple[str, ...]
+          run: Callable[[Mapping[str, Any]], Awaitable[Any]]
+          timeout_s: float | None = None
+
+      class DagError(Exception): pass
+      class UnknownDependency(DagError): pass
+      class CycleDetected(DagError): pass
+      class TaskFailed(DagError):
+          task: str
+          cause: BaseException
+
+      async def run_dag(tasks: Mapping[str, TaskSpec], max_concurrency: int) -> dict[str, Any]: ...
+  - id: execution-contract
+    type: spec
+    label: Complete runner semantics
+    content: |
+      Validate max_concurrency >=1, unique mapping keys, every dependency exists, no self
+      dependency, and no cycle before starting any run callable. Empty graph returns {}.
+      A task becomes ready only after all dependencies succeed; pass it an immutable mapping
+      containing only direct dependency results. When several tasks become ready together,
+      start them in lexicographic name order, subject to the concurrency bound. Apply
+      asyncio.timeout when timeout_s is not None and require timeout_s >0 during validation.
+      On first task exception/timeout, cancel every running task, await cancellation with
+      return_exceptions, start nothing else, and raise TaskFailed(name, original cause) from
+      that cause. If several failures become observable in the same scheduler turn, choose
+      lexicographically smallest task name. External cancellation must propagate after
+      cleaning up children. Return a normal dict in lexicographic key order. No polling,
+      threads, globals, third-party packages, or swallowed task exceptions.
+tags: [python, asyncio, dag, concurrency, cancellation]

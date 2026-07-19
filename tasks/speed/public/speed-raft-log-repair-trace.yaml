@@ -1,0 +1,58 @@
+id: speed-raft-log-repair-trace
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: expert
+title: Trace Raft Conflict-Term Log Repair
+summary: Derive optimized nextIndex jumps, suffix replacement, commit advancement, and state-machine application under a pinned Raft exchange.
+prompt: |
+  Trace [exchange] using only [raft-contract]. Produce exactly:
+
+  1. A table `rpc | prev check | reply | leader nextIndex[F] | follower log after rpc`.
+  2. The leader and follower logs as `index:term:command` after RPC 4.
+  3. The leader and follower commitIndex and ordered newly applied commands after RPC 4.
+  4. A five-sentence proof explaining both optimized backtracks, the overwritten suffix,
+     why index 8 may advance commitIndex, and why index 6 alone could not do so.
+artifacts:
+  - id: raft-contract
+    type: spec
+    label: Pinned Raft rules
+    content: |
+      Terms and indices are positive integers. Both nodes are in term 7; L is the leader.
+      AppendEntries(prevIndex, prevTerm, entries, leaderCommit) succeeds only when the
+      follower has prevIndex with prevTerm. On success, the follower deletes its entry at
+      the first index whose term conflicts with an incoming entry and every entry after it,
+      appends missing incoming entries, and sets commitIndex to
+      min(leaderCommit, index of its last new entry). Existing matching entries are retained.
+
+      On a prev-term mismatch, F replies Conflict(term=t, first=i), where t is the term at
+      prevIndex and i is the first index in F with term t. On a missing prevIndex, it replies
+      Missing(last=j). For Conflict(t,i), if L has term t, L sets nextIndex[F] to one past
+      L's last entry in term t; otherwise it sets nextIndex[F]=i. For Missing(j), it sets
+      nextIndex[F]=j+1. A failure changes no log or commitIndex.
+
+      After each successful reply, matchIndex[F] is the last replicated index and
+      nextIndex[F]=matchIndex[F]+1. L advances commitIndex to the greatest N greater than
+      its old commitIndex for which a majority stores index N and L[N].term equals L's
+      current term 7. The two-node cluster's majority is both nodes. Once L advances, the
+      next listed RPC carries that leaderCommit. Each node applies newly committed commands
+      in increasing index order. Before RPC 1, both commitIndex values are 4 and both state
+      machines have applied through index 4.
+  - id: exchange
+    type: table
+    label: Initial logs and exact RPC sequence
+    content: |
+      L log:
+        1:1:a  2:1:b  3:2:c  4:2:d  5:3:e  6:3:f  7:7:g  8:7:h
+      F log:
+        1:1:a  2:1:b  3:2:c  4:2:d  5:4:x  6:4:y  7:4:z
+
+      Initially nextIndex[F]=9 and matchIndex[F]=0.
+
+      RPC 1: L sends prev=8/term7, entries=[], leaderCommit=4.
+      RPC 2: after processing reply 1, L sends prev=7/term7, entries=[8:7:h], leaderCommit=4.
+      RPC 3: after processing reply 2, L sends prev=4/term2,
+             entries=[5:3:e,6:3:f], leaderCommit=4.
+      RPC 4: after processing reply 3, L sends prev=6/term3,
+             entries=[7:7:g,8:7:h], leaderCommit equal to L's then-current commitIndex.
+tags: [raft, distributed-systems, replication, conflict-term, trace]

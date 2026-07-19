@@ -1,10 +1,10 @@
 id: vuln-token-alg-confusion
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: vuln-discovery
 difficulty: expert
 title: Latchkey Session-Token Verification Review
-summary: Review a fictional session-token issuance/verification service where one real, reachable token-forgery vulnerability hides among three benign look-alikes (long TTL, Math.random request id, dev-secret fallback) that are each neutralized elsewhere in the artifacts.
+summary: Review a fictional session-token issuance and verification service spanning an issuer, a verifier, key loading, runtime configuration, and a public key-distribution endpoint. Exactly one behavior is a real, reachable vulnerability; the others are look-alikes neutralized elsewhere in the artifacts.
 prompt: |
   You are performing a defensive security review of "Latchkey", an internal
   session-token issuance and verification service. Six artifacts describe the
@@ -107,9 +107,6 @@ artifacts:
             signatureOk = rsaVerify(signingInput, rawSig, key.publicKeyPem);
             break;
           case 'HS256':
-            // Symmetric path for internal callers that cannot do RSA. There is no
-            // separate HS256 key configured, so we key the HMAC with the RSA
-            // public key material we already hold.
             signatureOk = hmacVerify(signingInput, rawSig, key.publicKeyPem);
             break;
           default:

@@ -1,0 +1,224 @@
+id: authz-tenant-header-trust
+version: 1.1.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Cobalt Multi-Tenant API — Tenant-Identity Source Analysis
+summary: >-
+  In the multi-tenant "Cobalt" API, tenant identity must come from the verified
+  JWT `org` claim, never from the client-supplied X-Tenant-Id header. Five routes
+  touch the header in different ways: one cross-checks it, one uses it only for a
+  metrics label, one is internal-only, one uses the claim — and exactly one scopes
+  its data query by the raw header. Classify five routes, name the single
+  cross-tenant defect, and locate the fix, using only the artifacts.
+prompt: |
+  You are reviewing tenant isolation on "Cobalt," a multi-tenant API. Each request
+  carries a verified JWT whose `org` claim is the caller's organization, and the
+  gateway forwards an X-Tenant-Id request header. You are given six artifacts:
+  auth-spec, tenant-resolver, api-controllers, deploy-config, route-map, and
+  design-note.
+
+  auth-spec is the AUTHORITATIVE statement of how tenant identity must be derived;
+  treat it as ground truth. Answer each item using ONLY the supplied artifacts.
+  Cite the artifact id(s) you rely on for every claim. If something is not
+  defined, not reachable, or not exploitable in the artifacts, say so explicitly.
+  Do NOT write exploit code, requests, or enumeration payloads — this is an
+  analysis-only task; reachability and precondition reasoning is the ceiling.
+
+  For items 1-5, classify each route as EXACTLY ONE of: PROPERLY-SCOPED (tenant
+  isolation enforced from a trusted source), CROSS-TENANT (an org-owned query is
+  scoped by the untrusted client header), INTENDED-INTERNAL (uses the header but is
+  not reachable by external clients by design), or NOT-USED-FOR-AUTHZ (touches the
+  header but only for a non-authorization purpose). Justify each by citing the
+  tenant source the route's DATA query actually uses, the code path, and the
+  relevant rule.
+
+  1. GET  /invoices        (InvoicesController.listInvoices)
+  2. GET  /projects        (ProjectsController.listProjects)
+  3. GET  /usage           (UsageController.getUsage)
+  4. POST /internal/reindex (ReindexController.reindex)
+  5. GET  /audit           (AuditController.listAuditEvents)
+
+  6. Exactly one route is a genuine cross-tenant defect (broken tenant isolation via
+     trusting the client header). Name that single route and state the precondition
+     an attacker needs for it to be exploitable. Ground the claim in the tenant
+     source its query uses and the rule it violates.
+
+  7. State where and how to fix the defect from item 6 — which tenant source the
+     query must use and the layer the decision belongs in — and explain why deriving
+     tenant identity from the client header at the controller is the wrong approach
+     even if a per-route check were added.
+artifacts:
+  - id: auth-spec
+    type: spec
+    label: Cobalt tenant-identity rules (authoritative)
+    content: |
+      Cobalt tenant-identity rules — AUTHORITATIVE and COMPLETE.
+
+      1. Every request is authenticated by the edge with a signed JWT. The verified
+         token's `org` claim (exposed to handlers as req.auth.org) is the caller's
+         organization and is the ONLY trusted source of tenant identity. It cannot be
+         set by the client; it is produced by token verification.
+
+      2. Every query that reads or writes an org-owned row (invoices, projects,
+         audit_events, usage_counters) MUST be scoped by the caller's organization
+         taken from req.auth.org. Scoping such a query by any client-supplied value is
+         a cross-tenant isolation defect.
+
+      3. The X-Tenant-Id request header is CLIENT-SUPPLIED and UNTRUSTED. The edge
+         gateway forwards it verbatim to services and does NOT strip, overwrite, or
+         validate it against the token — the platform team confirms external callers
+         can send any X-Tenant-Id value they choose (see design-note). It MUST NOT be
+         used as the tenant identity for any authorization or data-scoping decision.
+         It is acceptable ONLY for non-authorization uses (e.g. a metrics/log label),
+         or when a handler explicitly asserts it EQUALS req.auth.org before use.
+
+      4. Header provenance: `org` arrives only inside the verified JWT. X-Tenant-Id is
+         the only tenant-related header a client can control. There are no other
+         tenant-identity inputs in this system.
+  - id: tenant-resolver
+    type: code
+    label: cobalt/src/common/tenant-resolver.ts
+    content: |
+      // Two helpers exist for obtaining a tenant id. Exactly one is a trusted source.
+
+      // TRUSTED: reads the organization from the verified JWT claim. Cannot be
+      // influenced by the client (auth-spec rule 1).
+      export function tenantFromClaim(req): string {
+        return req.auth.org;
+      }
+
+      // UNTRUSTED: reads the raw client-supplied X-Tenant-Id header. The gateway
+      // forwards this verbatim (auth-spec rule 3); it is whatever the caller sent.
+      // Provided for the internal reindex worker and for logging only.
+      export function tenantFromHeader(req): string {
+        return String(req.headers['x-tenant-id'] ?? '');
+      }
+  - id: api-controllers
+    type: code
+    label: cobalt/src/http/controllers.ts (all tenant-facing routes)
+    content: |
+      // Every route below runs behind the edge auth (req.auth is the verified token).
+      // This file lists every route that reads or writes an org-owned resource.
+      import { tenantFromClaim, tenantFromHeader } from '../common/tenant-resolver';
+      import { db } from '../db';
+      import { metrics } from '../metrics';
+
+      // 1) GET /invoices — list the caller's invoices.
+      export async function listInvoices(req, res) {
+        // Scopes the query by the X-Tenant-Id header value.
+        const tenant = tenantFromHeader(req);
+        const rows = await db.invoices.findMany({ where: { org_id: tenant } });
+        return res.json(rows);
+      }
+
+      // 2) GET /projects — list the caller's projects.
+      export async function listProjects(req, res) {
+        const tenant = tenantFromClaim(req);        // from the verified JWT claim
+        const rows = await db.projects.findMany({ where: { org_id: tenant } });
+        return res.json(rows);
+      }
+
+      // 3) GET /usage — usage counters for the caller's org.
+      export async function getUsage(req, res) {
+        const tenant = tenantFromClaim(req);        // query scoped by the claim
+        // The header is used ONLY as a metrics dimension, never for scoping.
+        metrics.increment('usage.read', { tenantTag: tenantFromHeader(req) });
+        const rows = await db.usageCounters.findMany({ where: { org_id: tenant } });
+        return res.json(rows);
+      }
+
+      // 4) POST /internal/reindex — rebuild a tenant's search index. Mounted on the
+      // internal listener only (deploy-config). The internal indexer passes the
+      // target org via X-Tenant-Id because it acts on behalf of many orgs.
+      export async function reindex(req, res) {
+        const tenant = tenantFromHeader(req);       // trusted here: internal caller
+        await db.searchIndex.rebuild(tenant);
+        return res.json({ ok: true });
+      }
+
+      // 5) GET /audit — list audit events for the caller's org.
+      export async function listAuditEvents(req, res) {
+        const claimed = tenantFromHeader(req);
+        // Defense: the header must EQUAL the verified claim, else 403 (auth-spec 3).
+        if (claimed !== tenantFromClaim(req)) {
+          return res.status(403).json({ error: 'tenant mismatch' });
+        }
+        const rows = await db.auditEvents.findMany({ where: { org_id: claimed } });
+        return res.json(rows);
+      }
+  - id: deploy-config
+    type: config
+    label: Cobalt listeners and gateway (production)
+    content: |
+      # cobalt/deploy-config — COMPLETE list of listeners and their routes. A route
+      # not listed here is not mounted.
+      listeners:
+        public:                          # tenant-facing, exposed to the internet
+          bind: 0.0.0.0:8080
+          routes:
+            - GET  /invoices             # listInvoices
+            - GET  /projects             # listProjects
+            - GET  /usage                # getUsage
+            - GET  /audit                # listAuditEvents
+        internal:                        # ops/indexer only; NOT internet-routable
+          bind: 127.0.0.1:9110           # loopback; reachable only from the host / indexer sidecar
+          routes:
+            - POST /internal/reindex     # reindex
+      gateway:
+        # The edge verifies the JWT and injects req.auth from the token. It FORWARDS
+        # the client's X-Tenant-Id header unchanged and does not compare it to the
+        # token. There is no header-stripping or normalization for X-Tenant-Id.
+        forwards_client_header: [X-Tenant-Id]
+        strips_client_header: []         # nothing stripped
+  - id: route-map
+    type: table
+    label: Cobalt route/tenant-source map (COMPLETE)
+    content: |
+      Cobalt route map — COMPLETE. Every route that reads or writes an org-owned
+      resource is listed with its listener, the tenant source its DATA query uses,
+      whether the header is cross-checked against the claim, and any non-authz use of
+      the header. A route not in this table is not served.
+
+      route                  | listener | data query scoped by  | header cross-checked? | other header use
+      -----------------------|----------|-----------------------|-----------------------|------------------
+      GET  /invoices         | public   | X-Tenant-Id header    | NO                    | none
+      GET  /projects         | public   | req.auth.org (claim)  | n/a (claim)           | none
+      GET  /usage            | public   | req.auth.org (claim)  | n/a (claim)           | metrics label only
+      POST /internal/reindex | internal | X-Tenant-Id header    | NO                    | none (internal listener)
+      GET  /audit            | public   | X-Tenant-Id header*   | YES (== claim else 403)| none
+
+      * /audit reads the header but rejects the request unless it equals req.auth.org,
+      so the value it scopes by is provably the caller's own org.
+
+      Reminder (auth-spec): X-Tenant-Id is client-controlled and forwarded verbatim by
+      the gateway; scoping an org-owned query by it — without a cross-check — is a
+      cross-tenant defect.
+  - id: design-note
+    type: note
+    label: Cobalt tenant-isolation design notes (authoritative)
+    content: |
+      Cobalt tenant-isolation notes — authoritative; reflects production as deployed.
+
+      - Trusted identity is req.auth.org (from the verified JWT). X-Tenant-Id is a
+        client-supplied header. The edge gateway forwards it verbatim and never
+        compares it to the token, so an external caller can send ANY X-Tenant-Id
+        value (deploy-config gateway; auth-spec rule 3).
+
+      - /invoices scopes its data query by the value returned from tenantFromHeader.
+
+      - /projects and /usage scope their queries by the claim (tenantFromClaim).
+        /usage additionally reads the header, but only as a metrics dimension — it is
+        not used to scope any query.
+
+      - /audit reads the header and compares it to the claim, returning 403 on
+        mismatch before any query runs.
+
+      - /internal/reindex uses the header as the target org. It is mounted only on the
+        internal loopback listener (deploy-config listeners.internal, 127.0.0.1:9110)
+        and is invoked by the indexer sidecar acting on behalf of many orgs.
+
+      This note, auth-spec, deploy-config, route-map, tenant-resolver, and
+      api-controllers are the COMPLETE surface for tenant scoping. There are no other
+      routes, resolvers, or tenant-identity inputs.
+tags: [security, authz-boundary, multi-tenant, tenant-isolation, idor]

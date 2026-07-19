@@ -1,0 +1,109 @@
+id: taint-log-injection-sink
+version: 1.1.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: AuditTrail Logger — Log Injection Review
+summary: Review a fictional "AuditTrail" logging module. Trace user-controlled sources
+  to log sinks. Decoy sinks are JSON-encoded, parameterized, or sanitized. Exactly
+  one path is a genuinely reachable log injection (CRLF) vulnerability allowing log
+  forging. Find the single reachable log injection.
+prompt: |-
+  You are performing a defensive security review of "AuditTrail", an internal logging service. Seven artifacts describe it: audit-api, json-logger, db-logger, text-logger, input-sanitizer, admin-routes, and service-note.
+
+  User input flows into various logging sinks. Exactly one of these paths is a real, reachable log injection (CRLF) vulnerability; the others are look-alikes that are neutralized somewhere in the same artifacts.
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you rely on for every claim. If something is not defined, not a sink, or not reachable in the artifacts, say so explicitly. Reason about reachability ONLY — do NOT write an exploit payload.
+
+  1. Name the single real vulnerability class present in the module, using standard terminology, and point to the exact code behavior that constitutes it (name the artifact and the specific line/behavior).
+
+  2. State the precondition / exploitability chain: the specific facts across the artifacts that together make it reachable by an external caller.
+
+  3. A reviewer flags the `json-logger` as vulnerable to log injection because it logs user-agent strings. Rule it in or out and cite the mechanism that decides it.
+
+  4. A reviewer flags the `db-logger` as vulnerable to SQL injection or log forging. Rule it in or out and cite the evidence.
+
+  5. A reviewer flags the `admin-routes` action logger as vulnerable to log injection. Rule it in or out and cite the mechanism that decides it.
+
+  6. A reviewer flags the `text-logger` used in the `/api/feedback` route as vulnerable. Rule it in or out, citing the evidence.
+
+  7. Give the severity of the one real vulnerability and the minimal control that closes it.
+artifacts:
+- id: audit-api
+  type: code
+  label: AuditTrail Public API
+  content: "// audittrail/audit-api.ts\nimport { logJson } from './json-logger';\n\
+    import { logText } from './text-logger';\nimport { sanitizeInput } from './input-sanitizer';\n\
+    \nexport async function handleLogin(req, res) {\n  const { username } = req.body;\n\
+    \  const userAgent = req.headers['user-agent'];\n  \n  logJson('login_attempt', { username, userAgent });\n  return\
+    \ res.send('OK');\n}\n\nexport async function handleFeedback(req, res) {\n  const\
+    \ { message, email } = req.body;\n  \n  const cleanMessage = sanitizeInput(message);\n  \n  logText(`Feedback\
+    \ received from ${email}: ${cleanMessage}`);\n  return res.send('Feedback saved');\n\
+    }"
+- id: json-logger
+  type: code
+  label: AuditTrail JSON Logger
+  content: |-
+    // audittrail/json-logger.ts
+    import fs from 'fs';
+
+    export function logJson(event: string, data: any) {
+      const logEntry = JSON.stringify({ timestamp: new Date(), event, data });
+      fs.appendFileSync('/var/log/audit.json', logEntry + '\n');
+    }
+- id: db-logger
+  type: code
+  label: AuditTrail Database Logger
+  content: |-
+    // audittrail/db-logger.ts
+    import { db } from './db-client';
+
+    export async function logToDb(userId: string, action: string) {
+      await db.query('INSERT INTO audit_logs (user_id, action, created_at) VALUES ($1, $2, NOW())', [userId, action]);
+    }
+- id: text-logger
+  type: code
+  label: AuditTrail Plain Text Logger
+  content: |-
+    // audittrail/text-logger.ts
+    import fs from 'fs';
+
+    export function logText(message: string) {
+      // Sink: Appends the raw message directly to a plain text log file.
+      // If 'message' contains \n or \r, an attacker can forge fake log entries.
+      const logEntry = `[${new Date().toISOString()}] ${message}\n`;
+      fs.appendFileSync('/var/log/audit.log', logEntry);
+    }
+- id: input-sanitizer
+  type: code
+  label: AuditTrail Input Sanitizer
+  content: |-
+    // audittrail/input-sanitizer.ts
+    export function sanitizeInput(input: string): string {
+      if (!input) return '';
+      // Removes carriage returns and newlines to prevent log injection
+      return input.replace(/[\r\n]/g, ' ');
+    }
+- id: admin-routes
+  type: code
+  label: AuditTrail Admin Routes
+  content: "// audittrail/admin-routes.ts\nimport { logToDb } from './db-logger';\n\
+    \nexport async function deleteUser(req, res) {\n  const { targetUserId } = req.body;\n\
+    \  const adminId = req.user.id;\n  \n  await logToDb(adminId, `Deleted user ${targetUserId}`);\n\
+    \  return res.send('User deleted');\n}"
+- id: service-note
+  type: note
+  label: AuditTrail Architecture Note
+  content: |-
+    AuditTrail Architecture Note
+
+    - The application uses three logging sinks: JSON file, Database, and Plain Text file.
+    - All public endpoints are routed through `audit-api.ts`.
+    - Admin endpoints are routed through `admin-routes.ts`.
+    - There are no other logging mechanisms or entry points.
+tags:
+- security
+- taint-flow
+- log-injection
+- crlf
+- reachability

@@ -1,0 +1,36 @@
+id: speed-sql-expand-contract-rewrite
+version: 1.0.0
+category: speed
+cluster: code-transformation
+difficulty: expert
+title: Rewrite a Blocking Column Rename Into an Expand Migration
+summary: Transform a production PostgreSQL rename into a rerunnable expand-phase migration with synchronized old/new columns and bounded locking.
+prompt: |
+  Rewrite [unsafe-migration] into the expand-phase SQL required by [rewrite-contract]. Output
+  SQL only. Do not include the later contract/drop phase.
+artifacts:
+  - id: unsafe-migration
+    type: code
+    label: Current one-step migration
+    content: |
+      BEGIN;
+      ALTER TABLE invoices RENAME COLUMN total_cents TO amount_cents;
+      ALTER TABLE invoices ALTER COLUMN amount_cents SET NOT NULL;
+      COMMIT;
+  - id: rewrite-contract
+    type: spec
+    label: Exact expand-phase requirements
+    content: |
+      PostgreSQL 17. Existing `invoices(id bigint primary key, total_cents bigint not null)`
+      has 300M rows and live old writers. Produce rerunnable SQL that: sets lock_timeout to
+      2s locally where transactions are used; adds nullable amount_cents with no default
+      using IF NOT EXISTS; creates or replaces a trigger function that on INSERT/UPDATE
+      rejects rows where both columns are non-null and unequal, copies the non-null value
+      to the missing side, and rejects rows where both are null; drops/recreates one named
+      BEFORE trigger safely; does not backfill in the DDL transaction; includes a separate
+      bounded backfill statement for caller-supplied inclusive id range parameters `$1/$2`
+      that updates only rows with amount_cents IS NULL and uses total_cents; adds a NOT VALID
+      check constraint requiring amount_cents IS NOT NULL, guarded by a pg_constraint
+      existence test; and validates that constraint as the final statement. Do not rename,
+      drop, or set NOT NULL on either column. Qualify function/trigger/table as public.
+tags: [postgresql, migration, expand-contract, sql, zero-downtime]

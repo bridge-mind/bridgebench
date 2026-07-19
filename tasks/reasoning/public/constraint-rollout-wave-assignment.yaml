@@ -1,0 +1,113 @@
+id: constraint-rollout-wave-assignment
+version: 1.0.0
+category: reasoning
+cluster: constraint-reconciliation
+difficulty: expert
+title: Three-Wave Protocol Upgrade With Capacity, Compatibility, and Irreversible Cutover Constraints
+summary: Reconcile service-version compatibility, a two-slot wave capacity, schema expand-contract rules, and an irreversible protocol cutover to find the sole valid six-service rollout and reject five plausible schedules.
+prompt: |
+  Plan the Aurora protocol rollout using only the complete constraints in [rollout-policy], the
+  version capabilities in [release-matrix], and the target in [change-request]. Each service must be
+  assigned exactly one listed version and exactly one wave. A wave completes before the next begins;
+  every service not yet upgraded keeps its current version. [candidate-schedules] are proposals, not
+  authorities.
+
+  1. Give the unique valid assignment of version and wave for all six services.
+  2. After each wave, list the deployed version of every service and which wire protocol each edge
+     actually uses. Show why every intermediate edge is compatible.
+  3. Evaluate schedules A-E independently and cite the first violated numbered policy constraint for
+     each invalid schedule. If one is valid, prove that it satisfies every constraint.
+  4. Explain why `identity` and `ledger` must occupy wave 1 even though neither directly serves the UI.
+  5. Determine the earliest wave at which `gateway` may emit P2 and the earliest wave at which
+     `notifier` may require schema S2. Distinguish "can parse" from "is allowed to emit/require."
+  6. Review [shortcut-diff]: state whether it creates any additional valid schedule and identify the
+     exact unchanged constraint that decides the question.
+artifacts:
+  - id: topology
+    type: spec
+    label: Complete runtime dependency graph
+    content: |
+      The complete directed call/event graph is:
+        web -> gateway -> identity
+        gateway -> ledger
+        ledger -> worker -> notifier
+
+      An arrow A -> B means A sends requests or events to B. There are no other runtime edges. During
+      a wave, all upgrades are treated as atomic; compatibility is checked only before wave 1 and
+      after each completed wave, never halfway through a wave.
+  - id: current-state
+    type: config
+    label: Versions before wave 1
+    content: |
+      web=1.4, gateway=2.7, identity=3.2, ledger=4.8, worker=2.5, notifier=1.9
+      All current versions use protocol P1 and schema S1. The starting deployment is healthy.
+  - id: release-matrix
+    type: table
+    label: Complete candidate-version capabilities
+    content: |
+      service  | version | accepts/reads                 | emits/requires after activation
+      identity | 3.2     | P1                            | P1
+      identity | 4.0     | P1,P2                         | P1 responses until gateway emits P2; then P2
+      gateway  | 2.7     | web P1                        | P1 to identity and ledger
+      gateway  | 3.0     | web P1,P2                     | P2 to identity; S2 writes to ledger
+      web      | 1.4     | P1 responses                  | P1 requests
+      web      | 2.0     | P1,P2 responses               | P2 requests when gateway 3.0 is present
+      ledger   | 4.8     | S1 writes; emits S1 events    | S1
+      ledger   | 5.0     | S1,S2 writes; emits S1 events | S1 until worker 3.0 is present, then S2
+      worker   | 2.5     | S1 events                     | S1 notification payloads
+      worker   | 3.0     | S1,S2 events                  | S2 notification payloads
+      notifier | 1.9     | S1 payloads                   | requires S1
+      notifier | 2.0     | S1,S2 payloads                | requires S2 only after worker 3.0 is present
+
+      Only the two versions shown for each service exist. "Accepts" is backward-read compatibility;
+      it does not waive rollout-policy activation gates.
+  - id: rollout-policy
+    type: spec
+    label: Complete numbered rollout constraints
+    content: |
+      C1. Exactly three waves run, and exactly two services upgrade in each wave.
+      C2. Each service upgrades once, from its current version to the higher version in release-matrix.
+      C3. Before gateway 3.0 may be deployed, identity 4.0 and ledger 5.0 must already be deployed in
+          an earlier completed wave. Same-wave deployment does not satisfy "already".
+      C4. web 2.0 and gateway 3.0 must be deployed in the same wave. This is the audited atomic P2
+          request cutover; gateway's ability to accept P1 does not relax it.
+      C5. Before worker 3.0 may be deployed, ledger 5.0 and gateway 3.0 must already be deployed in an
+          earlier completed wave. Worker 3.0 activates S2 acknowledgements that traverse ledger back
+          through gateway, so same-wave deployment does not satisfy this prerequisite.
+      C6. notifier 2.0 and worker 3.0 must be deployed in the same wave. This is the audited atomic
+          notification cutover; backward parsing support does not relax it.
+      C7. Every edge in topology must have a sender emission that the receiver accepts after each wave.
+      C8. No feature flag, fourth wave, temporary bridge version, partial wave, or rollback is allowed.
+
+      These constraints are exhaustive. A schedule is valid if and only if it satisfies C1-C8.
+  - id: change-request
+    type: note
+    label: Approved target state
+    content: |
+      Upgrade all six services to the higher listed version. Finish with web speaking P2 through
+      gateway to identity, gateway writing S2 to ledger, ledger emitting S2 to worker, and worker
+      sending S2 payloads to notifier. Product has approved no alternative target or skipped service.
+  - id: candidate-schedules
+    type: table
+    label: Proposed wave assignments
+    content: |
+      plan | wave 1              | wave 2             | wave 3
+      A    | identity,ledger      | gateway,web         | worker,notifier
+      B    | identity,gateway     | ledger,worker       | web,notifier
+      C    | identity,ledger      | gateway,worker      | web,notifier
+      D    | ledger,worker        | identity,gateway    | web,notifier
+      E    | identity,ledger      | worker,notifier     | gateway,web
+
+      Every name means its higher version. Plans claim wave-atomic deployment but must still satisfy
+      the "earlier completed wave" wording and the notification same-wave constraint.
+  - id: shortcut-diff
+    type: diff
+    label: Proposed parser backport to current notifier
+    content: |
+      A developer proposes this pre-rollout code change to notifier 1.9:
+        - acceptedPayloadSchemas = ["S1"]
+        + acceptedPayloadSchemas = ["S1", "S2"]
+
+      The change only adds parsing. It does not change notifier's deployed version, C1-C8, the
+      approved target, or C6's audited requirement that notifier 2.0 and worker 3.0 cut over together.
+tags: [rollout, constraints, protocol-compatibility, expand-contract, deployment]

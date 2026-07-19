@@ -1,0 +1,195 @@
+id: fix-adequacy-retry-jitter
+version: 1.1.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Partial Recommendation Service Outage Cascades Into a 47-Minute Full Failure
+summary: >-
+  A partial reco-svc outage at 09:00 became a full outage by 09:03 and lasted 47 minutes until
+  manual intervention. Five fixes are proposed; only one resolves the cause without regression.
+  Reconcile the retry configuration, traffic metrics, incident timeline, circuit-breaker state, and
+  downstream logs to identify the defect, explain the amplification, and evaluate each fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (retry-config, incident-timeline,
+  traffic-metrics, service-topology, cb-state, downstream-log, fixes). Cite the artifact id(s) for
+  every claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  reco-svc experienced a partial outage (elevated latency, ~40% error rate) at 09:00. listing-svc's
+  retry behavior amplified the partial outage into a full cascading failure by 09:03. reco-svc
+  could not recover because the retry traffic exceeded its capacity even after the original trigger
+  resolved. The outage lasted 47 minutes until manual intervention killed the retry traffic.
+
+  1. ROOT CAUSE. Name the single retry-configuration defect and cite the exact artifact id and
+     configuration values. State precisely why the retry behavior turns a partial outage into a
+     full cascading failure.
+  2. AMPLIFICATION MECHANISM. From traffic-metrics and incident-timeline, trace the amplification
+     from the initial 40% error rate to the full outage. Cite the specific numbers showing
+     (a) normal request volume, (b) retry-amplified volume, (c) the amplification factor, and
+     (d) the point where retry traffic alone exceeds reco-svc capacity.
+  3. SYNCHRONIZED RETRIES. Explain why the retries are synchronized (all instances retry at the
+     same times), citing retry-config and traffic-metrics. State the observable traffic pattern
+     that proves synchronization and why it is worse than uniformly distributed retries.
+  4. CIRCUIT BREAKER INEFFECTIVENESS. Explain why the existing circuit breaker did not prevent the
+     cascade, citing cb-state. State the specific misconfiguration that kept it from tripping.
+  5. RECOVERY PREVENTION. From downstream-log, explain why reco-svc could not self-heal even after
+     the original trigger resolved. State the specific resource exhaustion caused by retry traffic.
+  6. ADEQUATE FIX. From fixes, name the one option that resolves the root cause without regression.
+     State the invariant it enforces about retry volume under failure and why it allows reco-svc
+     to recover.
+  7. SHALLOW/HARMFUL FIXES. For each of the other four options in fixes, state why it is shallow
+     or harmful, naming the specific regression or the reason it leaves the cause intact.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: retry-config
+    type: config
+    label: listing-svc/retry-policy.yaml — retry configuration for reco-svc calls (complete)
+    content: |
+      # This is the COMPLETE retry configuration for listing-svc -> reco-svc calls. There is no
+      # other retry mechanism, no middleware retry, no service-mesh retry, and no client-library
+      # retry. This configuration is the sole source of retries for reco-svc calls.
+      retryPolicy:
+        maxRetries: 3                       # up to 3 retries per failed request (4 total attempts)
+        backoffStrategy: none               # retries fire with 0ms delay
+        jitter: none                        # no randomization of retry delays
+        retryOn: [500, 502, 503, 504, timeout]
+        requestTimeoutMs: 2000              # per-attempt timeout
+      circuitBreaker:
+        enabled: true
+        failureThresholdPercent: 80         # circuit trips at 80% failure rate
+        evaluationWindowSeconds: 60         # measured over a 60-second rolling window
+        resetTimeoutSeconds: 30             # after tripping, half-open after 30s
+      instances: 12                         # 12 listing-svc instances, all with identical config
+  - id: incident-timeline
+    type: note
+    label: incident INC-7703 timeline (complete)
+    content: |
+      08:55:00  Steady state. reco-svc handles ~1200 req/s from listing-svc. Error rate <0.1%.
+                listing-svc retry rate: ~1 req/s.
+      09:00:00  reco-svc partial outage begins — one of three reco-svc pods enters a GC pause.
+                Error rate rises to ~40%.
+      09:00:01  listing-svc retries begin. Total reco-svc inbound: 2640 req/s.
+      09:01:00  reco-svc error rate rises to 65%. Total inbound: 6348 req/s.
+      09:02:00  reco-svc error rate: 92%. Connection pools exhausted. Request queue depth: 4000+.
+                pod-1's GC pause ends at 09:02:00.
+      09:03:00  reco-svc error rate: 99%. Circuit breaker state: still CLOSED at 09:03:00.
+      09:03:30  Circuit breaker trips at 80% sustained over 60s. Retries stop. reco-svc's
+                connection pools and request queues remain saturated.
+      09:04:00  Circuit breaker half-opens after 30s. Sends probe request. Probe fails (reco-svc
+                still draining its queue). Circuit re-opens. Retries remain stopped.
+      09:10:00  reco-svc queue drains. Next half-open probe succeeds. Circuit closes. Retries resume
+                from all 12 instances.
+      09:10:05  reco-svc error rate spikes back to 85%. Circuit trips again.
+      09:10:00 - 09:47:00  Circuit repeatedly cycles: open(30s) -> half-open -> probe succeeds ->
+                close -> error rate > 80% -> trip again. 7 cycles. reco-svc never stabilizes.
+      09:47:00  Manual intervention: listing-svc retry policy set to maxRetries=0. reco-svc recovers
+                within 15 seconds. Error rate drops to <1%.
+  - id: traffic-metrics
+    type: table
+    label: reco-svc inbound traffic (1-minute buckets, 08:55–09:12)
+    content: |
+      bucket   original_req/s  retry_req/s  total_req/s  error_rate%  cb_state  reco_capacity_req/s
+      08:55    1200             1            1201          0.1          closed    1200
+      08:56    1200             1            1201          0.1          closed    1200
+      08:57    1200             1            1201          0.1          closed    1200
+      08:58    1200             1            1201          0.1          closed    1200
+      08:59    1200             1            1201          0.1          closed    1200
+      09:00    1200             1440         2640          40.0         closed    800
+      09:01    1200             5148         6348          65.0         closed    800
+      09:02    1200             15200        16400         92.0         closed    800
+      09:03    1200             18600        19800         99.0         open      800
+      09:04    0                0            0             —            open      800 (draining)
+      09:05    0                0            0             —            open      800 (draining)
+      09:10    1200             4800         6000          85.0         closed->open  800
+      09:11    0                0            0             —            open      800
+      09:12    1200             3600         4800          78.0         closed->open  800
+  - id: service-topology
+    type: note
+    label: service dependency topology (relevant to the incident)
+    content: |
+      listing-svc (12 instances) --[HTTP]--> reco-svc (3 pods, capacity ~400 req/s each = 1200 total)
+                                                 |
+                                                 +--> reco-model (ML inference, not involved in outage)
+                                                 +--> reco-cache (Redis, not involved in outage)
+
+      # listing-svc is the ONLY client of reco-svc. No other service calls reco-svc.
+      # reco-svc's capacity is ~400 req/s per pod (3 pods = 1200 req/s total).
+      # When one pod is impaired (GC pause), capacity drops to ~800 req/s.
+  - id: cb-state
+    type: log
+    label: circuit breaker state transitions during the incident
+    content: |
+      # listing-svc circuit breaker for reco-svc calls:
+      # Configuration: failureThresholdPercent=80, evaluationWindowSeconds=60, resetTimeoutSeconds=30
+
+      09:00:00  CB state: CLOSED. Failure rate over last 60s: 0.1%.
+      09:00:30  CB state: CLOSED. Failure rate over last 60s: 22%.
+      09:01:00  CB state: CLOSED. Failure rate over last 60s: 38%.
+      09:01:30  CB state: CLOSED. Failure rate over last 60s: 52%.
+      09:02:00  CB state: CLOSED. Failure rate over last 60s: 68%.
+      09:02:30  CB state: CLOSED. Failure rate over last 60s: 76%.
+      09:03:00  CB state: CLOSED. Failure rate over last 60s: 81%.
+      09:03:30  CB state: OPEN. (tripped at 80% sustained over 60s)
+
+      09:04:00  CB state: OPEN. (waiting resetTimeoutSeconds=30)
+      09:04:30  CB state: HALF-OPEN. Probe request sent to reco-svc.
+                Probe: 503 (reco-svc request queue depth: 2400). CB re-opens.
+      09:05:00  CB state: OPEN.
+      09:09:30  CB state: HALF-OPEN. Probe: 200 OK. CB closes.
+      09:10:00  CB state: CLOSED. All 12 instances resume sending.
+      09:10:30  CB state: CLOSED. Failure rate rising: 65%.
+      09:11:00  CB state: CLOSED. Failure rate: 78%.
+      09:11:30  CB state: OPEN. (tripped again at 80%)
+  - id: downstream-log
+    type: log
+    label: reco-svc pod logs during the incident (showing resource exhaustion)
+    content: |
+      # reco-svc pod-2 (one of two healthy pods during the initial GC pause on pod-1):
+      09:00:01  pod-2  Inbound request rate: 1320 req/s
+      09:00:05  pod-2  WARNING: request queue depth 200 (threshold: 500)
+      09:00:30  pod-2  Inbound request rate: 3200 req/s. Queue depth: 800. Rejecting excess.
+      09:01:00  pod-2  Inbound request rate: 8100 req/s. Queue depth: 2000. Connection pool: 50/50 (FULL).
+      09:01:00  pod-2  ERROR: connection pool exhausted. Rejecting all new connections with 503.
+      09:01:30  pod-2  Inbound request rate: 9900 req/s. All requests rejected (503). CPU: 12% (idle —
+                       all time spent in connection accept/reject, not in actual request processing).
+      09:02:00  pod-2  GC pod-1 recovered from pause. pod-1 capacity restored.
+      09:02:00  pod-1  Inbound request rate: 8200 req/s. Queue depth: 1500 on first second back.
+      09:02:30  pod-1  Connection pool: 50/50 (FULL). Rejecting with 503.
+  - id: fixes
+    type: note
+    label: candidate fixes under discussion (pick the one that holds)
+    content: |
+      F1: Replace the retry policy with exponential backoff, decorrelated jitter, and a properly
+          tuned circuit breaker:
+            retryPolicy:
+              maxRetries: 3
+              backoffStrategy: exponential        # base=200ms, multiplier=2, max=4000ms
+              jitter: decorrelated                # randomize each retry delay within [0, currentBackoff]
+            circuitBreaker:
+              failureThresholdPercent: 50
+              evaluationWindowSeconds: 10
+              resetTimeoutSeconds: 30
+              halfOpenMaxRequests: 3               # at most 3 probe requests while half-open
+
+      F2: Add exponential backoff but no jitter. Keep the current circuit breaker settings
+          (80% / 60s).
+
+      F3: Keep the current retry policy (immediate, no backoff, no jitter) but lower the circuit
+          breaker threshold to 50% and shorten the window to 10s.
+
+      F4: Remove all retries (maxRetries=0). No backoff, no jitter, no circuit breaker needed.
+
+      F5: Keep the current retry and circuit breaker configuration but scale reco-svc from 3 pods
+          to 12 pods to absorb the retry traffic.
+
+      Constraints:
+        - Transient failures (network blips, momentary pod restarts) currently account for ~0.1%
+          of traffic (traffic-metrics steady state). Retries successfully recover ~95% of these
+          transient failures. Removing retries entirely would surface these transient errors to
+          end users.
+        - reco-svc capacity is provisioned for steady-state traffic (1200 req/s) plus 50% headroom
+          (1800 req/s). Scaling to absorb worst-case retry traffic is not economically viable
+          (19800 req/s = 16.5x provisioning).
+        - The fix must prevent retry-induced cascading failure during partial outages while
+          preserving retry-based recovery for transient errors.
+tags: [debugging, fix-adequacy, retry, circuit-breaker, cascading-failure, backoff, jitter]

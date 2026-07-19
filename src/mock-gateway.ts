@@ -9,6 +9,12 @@ import type {
 export interface MockOpenRouterOptions {
   competitorText?: string;
   judgeWinner?: 'MODEL_A' | 'MODEL_B';
+  /**
+   * Deterministically vary the mock verdict per judge (checksum of the judge
+   * model id) so panels split and adaptive adjudication escalates — used to
+   * demonstrate the best-of-5 path without paid runs. Overrides judgeWinner.
+   */
+  splitPanel?: boolean;
   chunkDelayMs?: number;
 }
 
@@ -40,7 +46,23 @@ export class MockOpenRouterGateway implements OpenRouterGateway {
     }
 
     if (request.structured) {
-      const winner = this.options.judgeWinner ?? 'MODEL_A';
+      const judgeChecksum = [...request.model.id].reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+      const winner = this.options.splitPanel
+        ? judgeChecksum % 2 === 0
+          ? 'MODEL_A'
+          : 'MODEL_B'
+        : (this.options.judgeWinner ?? 'MODEL_A');
+      // Cite a real artifact id from the judge payload so the parser's
+      // decisive-difference ID validation passes, exactly like a live judge.
+      let artifactId = 'artifact-1';
+      try {
+        const payload = JSON.parse(request.user) as {
+          task?: { artifacts?: Array<{ id?: string }> };
+        };
+        artifactId = payload.task?.artifacts?.[0]?.id ?? artifactId;
+      } catch {
+        // Non-JSON judge payloads keep the fallback id.
+      }
       const payload = {
         winner,
         confidence: 0.9,
@@ -52,6 +74,14 @@ export class MockOpenRouterGateway implements OpenRouterGateway {
           completeness: 'Complete.',
         },
         violations: [],
+        decisiveDifference: {
+          deliverableId: 'd1',
+          winnerClaim: 'Matches the mock reference resolution.',
+          loserError: 'Missed the mock discriminating evidence.',
+          artifactIds: [artifactId],
+          rubricCriterion: 'correctness',
+        },
+        abstainReason: null,
       };
       void judgeVerdictJsonSchema();
       return baseCompletion(JSON.stringify(payload), `mock-judge-${request.model.id}`);
@@ -72,7 +102,9 @@ export class MockOpenRouterGateway implements OpenRouterGateway {
       this.options.competitorText ?? (checksum % 2 === 0 ? variantA : variantB).join(' ');
     const delayMs =
       Number(process.env.MOCK_CHUNK_DELAY_MS ?? '') || this.options.chunkDelayMs || 40;
-    const parts = text.match(/.{1,24}/g) ?? [text];
+    // [\s\S] so newlines survive chunking — `.` would silently drop them,
+    // which collapses multi-line fixtures (e.g. UI Bench HTML) onto one line.
+    const parts = text.match(/[\s\S]{1,24}/g) ?? [text];
     let cumulative = '';
     for (const part of parts) {
       if (request.signal?.aborted) {

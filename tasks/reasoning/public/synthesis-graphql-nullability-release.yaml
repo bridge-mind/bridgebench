@@ -1,0 +1,86 @@
+id: synthesis-graphql-nullability-release
+version: 1.0.0
+category: reasoning
+cluster: multi-artifact-synthesis
+difficulty: expert
+title: GraphQL Null Bubbling Across a Mixed-Schema Federation Rollout
+summary: Synthesize router composition, subgraph schemas, resolver behavior, client selections, and deployment weights to derive exact response shapes and a compatibility-safe release sequence.
+prompt: |
+  A federated GraphQL release produced client-visible `data:null` only on some requests. Determine
+  behavior from the complete artifacts; do not assume fields omitted from a selection execute.
+
+  1. Derive the composed type signatures for `Query.order`, `Order.buyer`, and `User.email` before and
+     after composition C18.
+  2. For each request R1-R4, give the exact GraphQL `data` shape and error path under each reachable
+     router/subgraph combination.
+  3. Compute the probability that mobile query M returns top-level `data:null` at 14:10, using the
+     independent routing weights.
+  4. Identify the first incompatible deployment step and explain null bubbling field by field.
+  5. Reconcile the incident theories against schemas, logs, and selection sets; classify each as
+     causal, contributing, or ruled out.
+  6. Produce a safe ordered rollout and two contract tests that cover both an existing buyer and the
+     deleted-user case without weakening the intended final schema.
+artifacts:
+  - id: graphql-contract
+    type: spec
+    label: Execution and composition rules
+    content: |
+      A resolver returning null for nullable field T yields field:null. Returning null for T! records
+      an error at that field and bubbles null to the nearest nullable parent; if none exists, top-level
+      data is null. Only selected fields execute. Router uses its own composed schema and routes each
+      entity fetch independently according to weights. Weights in [rollout] are independent.
+  - id: schema-revisions
+    type: code
+    label: Composed schema inputs
+    content: |
+      C17: type Query { order(id: ID!): Order }
+           type Order { id: ID!, buyer: User }
+           type User { id: ID!, email: String }
+
+      C18: type Query { order(id: ID!): Order! }
+           type Order { id: ID!, buyer: User! }
+           type User { id: ID!, email: String! }
+
+      Orders subgraph v5 always returns order o7={id:o7,buyerId:u-deleted} and
+      o8={id:o8,buyerId:u-live}. Users v3 returns null entity for u-deleted and
+      {id:u-live,email:null}; Users v4 returns null entity for u-deleted and
+      {id:u-live,email:"live@example.test"}.
+  - id: queries
+    type: table
+    label: Requests to evaluate
+    content: |
+      R1/M: query { order(id:"o7") { id buyer { id email } } }
+      R2:   query { order(id:"o7") { id } }
+      R3:   query { order(id:"o8") { buyer { id } } }
+      R4:   query { order(id:"o8") { buyer { email } } }
+
+      Assume the order exists exactly as stated. Error paths use GraphQL array notation.
+  - id: rollout
+    type: config
+    label: Traffic at 14:10
+    content: |
+      router composition: C17=40%, C18=60%
+      users subgraph per entity fetch: v3=25%, v4=75%
+      orders subgraph: v5=100%
+      No response cache, retries, or sticky routing. Every request has one users entity fetch iff its
+      selection includes buyer.
+  - id: execution-log
+    type: log
+    label: Representative errors
+    content: |
+      request=q91 composition=C18 order=o7 error="Cannot return null for non-nullable field Order.buyer"
+        path=[order,buyer]
+      request=q92 composition=C18 order=o8 users=v3
+        error="Cannot return null for non-nullable field User.email" path=[order,buyer,email]
+      request=q93 composition=C17 order=o7 errors=0 data.order.buyer=null
+      request=q94 composition=C18 order=o7 selection="{ id }" errors=0
+  - id: rollout-proposals
+    type: diff
+    label: Proposed release operations
+    content: |
+      A. Deploy Users v4, backfill/represent deleted buyers or make resolver satisfy final contract,
+         verify, then compose C18, then retire C17.
+      B. Compose C18 first because schema composition validates syntax.
+      C. Keep mixed C17/C18 indefinitely and retry null results against another router.
+      D. Change mobile to omit `email`; leave non-null buyer violation unresolved.
+tags: [graphql, federation, nullability, rollout, compatibility]

@@ -8,8 +8,13 @@ results/
 .env.*
 !.env.example
 *.log
+*.tgz
 dist-ui/
 .impeccable/
+
+# Local authoring helpers may contain hidden rubric halves. They belong in the
+# private overlay and must never be tracked or published from this repository.
+generate_tasks.py
 
 # Hidden task references never enter the public repo — they live in a private
 # overlay (see docs/private-packs.md). CI enforces this too.

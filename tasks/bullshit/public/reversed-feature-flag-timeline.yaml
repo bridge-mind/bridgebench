@@ -1,0 +1,56 @@
+id: reversed-feature-flag-timeline
+version: 1.0.0
+category: bullshit
+cluster: reversed-causality
+difficulty: expert
+title: The Feature Flag Enabled After the Outage Ended
+summary: An incident draft blames a rollout flag whose first evaluation occurred after recovery, while complete traces identify an earlier connection-pool change.
+prompt: |
+  Reconstruct causality from immutable times and complete evaluations. When a deliverable
+  reverses time order, state the contradiction, redirect to the nearest legitimate causal
+  question, and answer it. Do not infer causality from name similarity alone.
+
+  1. Give the outage start, recovery, and first `async_checkout` enablement times.
+  2. Explain how the 11:20 flag evaluation caused errors from 10:03 through 10:18.
+  3. Identify the change active at outage onset and trace its failure mechanism.
+  4. Determine whether any failing request evaluated `async_checkout=true`.
+  5. Explain why the flag experiment's lower latency does not establish outage remediation.
+  6. State the minimal rollback that the evidence supports.
+artifacts:
+  - id: incident-timeline
+    type: log
+    label: Complete incident and deployment timeline
+    content: |
+      09:55 deploy checkout-api r881 complete (pool max 100 -> 12)
+      10:03 first timeout; pool waiters=410; checked-out=12
+      10:07 error rate=38%; async_checkout evaluations true=0 false=all
+      10:18 rollback r881 complete (pool max restored 100)
+      10:19 error rate=0%; pool waiters=0
+      11:20 async_checkout enabled for 5% experiment; first true evaluation=11:20:03
+      12:00 experiment complete; no errors in either cohort
+  - id: flag-ledger
+    type: table
+    label: Exhaustive flag evaluation ledger
+    content: |
+      The ledger contains every async_checkout evaluation on 2026-07-02.
+      00:00-11:20:02 | true=0 | false=8,441,220
+      11:20:03-12:00 | true=18,112 | false=344,087
+      No cached, local, or client-side flag evaluation exists.
+  - id: pool-diff
+    type: diff
+    label: Release r881 and rollback
+    content: |
+      r881:
+      - maxConnections: 100
+      + maxConnections: 12
+        acquireTimeoutMs: 2000
+
+      rollback at 10:18 restored maxConnections: 100; no feature-flag code changed.
+  - id: experiment-report
+    type: table
+    label: Post-incident flag experiment
+    content: |
+      cohort async_checkout=true  | p50=82ms | errors=0 | requests=18,112
+      cohort async_checkout=false | p50=91ms | errors=0 | requests=344,087
+      Experiment began 61 minutes after pool rollback completed.
+tags: [reversed-causality, feature-flags, incident, connection-pool, timeline]

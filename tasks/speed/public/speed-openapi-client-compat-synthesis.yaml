@@ -1,0 +1,60 @@
+id: speed-openapi-client-compat-synthesis
+version: 1.0.0
+category: speed
+cluster: retrieval-synthesis
+difficulty: expert
+title: Synthesize an OpenAPI Client Compatibility Review
+summary: Cross-check an API diff, generated clients, wire captures, and rollout constraints to identify source and wire compatibility breaks.
+prompt: |
+  Review all artifacts and produce exactly:
+
+  1. A compatibility matrix with rows `old-client/new-server`, `new-client/old-server`,
+     and `new-client/new-server`; columns `request`, `response`, `source`, `verdict`, `evidence`.
+  2. A numbered list of every breaking change, each tied to artifact IDs.
+  3. A minimal staged rollout plan of at most six steps.
+  4. Final line `VERDICT: block` or `VERDICT: compatible`.
+artifacts:
+  - id: openapi-diff
+    type: diff
+    label: API contract v2 to v3
+    content: |
+      POST /reports request:
+      - format: enum [csv, json], optional default csv
+      + format: enum [csv, json, parquet], required
+      response 202:
+      - { id: string, status: "queued" }
+      + { reportId: string, state: "pending", expiresAt: date-time }
+      GET /reports/{id}:
+      - parameter id
+      + parameter reportId
+      server routing note: path shape unchanged; parameter name affects generated APIs only.
+  - id: generated-clients
+    type: code
+    label: Generated client signatures
+    content: |
+      // v2 TypeScript
+      createReport(body?: { format?: "csv" | "json" }): Promise<{ id: string; status: "queued" }>;
+      getReport(id: string): Promise<Report>;
+
+      // v3 TypeScript
+      createReport(body: { format: "csv" | "json" | "parquet" }): Promise<{ reportId: string; state: "pending"; expiresAt: string }>;
+      getReport(reportId: string): Promise<Report>;
+  - id: wire-captures
+    type: table
+    label: Compatibility rehearsal
+    content: |
+      old client -> v3 POST body={}              | 400 format required
+      old client -> v3 POST body={format:"csv"} | 202 response lacks id/status; runtime decode error
+      new client -> v2 POST parquet              | 400 unknown enum
+      new client -> v2 POST csv                  | 202 response lacks reportId/state/expiresAt; runtime decode error
+      GET path from either client                | route matched; response model unchanged
+  - id: rollout-contract
+    type: spec
+    label: Required compatibility window
+    content: |
+      Old and new clients coexist for 30 days. A server release must accept both request
+      shapes and return fields required by both client generations during that window.
+      Additive fields are allowed. Removing/renaming fields or making optional input required
+      requires a compatibility phase. Client source signature changes may ship only after a
+      compatible server is fully deployed.
+tags: [openapi, api-compatibility, generated-client, rollout, synthesis]

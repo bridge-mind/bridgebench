@@ -1,16 +1,14 @@
 id: taint-config-proto-pollution
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: taint-flow
 difficulty: expert
 title: Loomstate Settings-Merge Prototype-Pollution Taint Flow
 summary: >-
   Trace five tenant-supplied objects through the Loomstate settings service and
-  classify each source-to-sink path. A key-guarded merge, an allowlisted assign, a
-  read-only echo, and an internal loopback-only merge surround one field that
-  reaches a recursive merge with no dangerous-key guard. Identify the single
-  reachable, unsafe prototype-pollution path — reachability reasoning only, no
-  payloads.
+  classify each source-to-sink path against the merge helpers that handle them.
+  Determine which fields, if any, reach a dangerous merge sink unguarded —
+  reachability reasoning only, no payloads.
 prompt: |
   You are reviewing "Loomstate", a per-tenant settings service. Tenants submit JSON
   objects that the service merges into stored settings. The security concern is

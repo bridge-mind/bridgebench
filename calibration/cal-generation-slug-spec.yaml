@@ -1,0 +1,74 @@
+id: cal-generation-slug-spec
+task:
+  public:
+    id: cal-generation-slug-spec
+    version: 1.0.0
+    category: generation
+    cluster: spec-conformance
+    difficulty: hard
+    title: Slug generator conformance review
+    summary: Check two slugify implementations against every numbered spec rule and the acceptance table.
+    prompt: |
+      Review the candidate `slugify` implementation in each response against the spec. Deliverables:
+      1. For each spec rule (S1-S4), state whether the implementation satisfies it.
+      2. Overall verdict: conformant or non-conformant, citing the acceptance-table row that decides it.
+    artifacts:
+      - id: slug-spec
+        type: spec
+        label: Slug rules
+        content: |
+          S1: Lowercase all letters.
+          S2: Replace every run of non-alphanumeric characters with a single hyphen.
+          S3: Trim leading and trailing hyphens.
+          S4: If the result is empty, return "untitled".
+      - id: acceptance-table
+        type: table
+        label: Acceptance cases
+        content: |
+          input               | expected
+          "Hello, World!"     | "hello-world"
+          "  --  "            | "untitled"
+          "A  B"              | "a-b"
+  private:
+    id: cal-generation-slug-spec
+    version: 1.0.0
+    expectedResolution: |
+      The reference implementation must lowercase (S1), collapse non-alphanumeric runs to one hyphen
+      (S2), trim edge hyphens (S3), and fall back to "untitled" when empty (S4). The decisive
+      acceptance row is "  --  " → "untitled": an implementation without the S4 fallback returns ""
+      and is non-conformant regardless of the other rules.
+    requiredEvidence:
+      - slug-spec
+      - acceptance-table
+    disqualifyingErrors:
+      - Passing an implementation that returns "" for "  --  ".
+      - Claiming S2 requires per-character hyphens (it requires collapsing runs).
+    rubric:
+      correctness: Rule-by-rule findings must match the actual code behavior.
+      evidenceGrounding: Each finding must trace the code against a spec rule or acceptance row.
+      constraintHandling: All four rules and all three acceptance rows must be applied.
+      completeness: Both deliverables answered.
+strongResponse: |
+  Implementation under review:
+    const slugify = (s) => {
+      const out = s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      return out === '' ? 'untitled' : out;
+    };
+  1. S1 satisfied (toLowerCase). S2 satisfied — `[^a-z0-9]+` collapses each run to one hyphen.
+     S3 satisfied — the second replace trims edge hyphens. S4 satisfied — empty result maps to
+     "untitled".
+  2. Conformant. All acceptance rows pass, including the decisive "  --  " → "untitled" row
+     (the run collapses to "-", trimming yields "", and the S4 fallback returns "untitled").
+weakResponse: |
+  Implementation under review:
+    const slugify = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  1. S1 satisfied (toLowerCase). S2 satisfied — non-alphanumeric runs collapse to a single hyphen.
+     S3 satisfied — edge hyphens are trimmed. S4 satisfied — after trimming, hyphen-only inputs
+     reduce to a clean minimal slug.
+  2. Conformant. "Hello, World!" → "hello-world" and "A  B" → "a-b" both pass, which covers the
+     interesting behavior; the remaining row is a degenerate whitespace case with no bearing on
+     real inputs.
+knownDifference: >
+  The weak response's implementation has no S4 fallback: "  --  " reduces to "" and the acceptance
+  table demands "untitled". It waves the decisive row away as degenerate. The strong response
+  implements and verifies the fallback.

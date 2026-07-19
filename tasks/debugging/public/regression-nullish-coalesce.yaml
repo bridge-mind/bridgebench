@@ -1,0 +1,211 @@
+id: regression-nullish-coalesce
+version: 1.1.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: Profile API Stops Falling Back to Handles for Blank Display Names
+summary: >-
+  Imported profiles with blank or whitespace-only display names now render as empty labels instead
+  of falling back to their handles. Five recent commits are suspects, including a package upgrade, a
+  table migration, a serializer refactor, a UI patch, and a caching change. Reconcile the CI matrix,
+  commit diffs, contract, test cases, and candidate fixes to identify the introducing commit and the
+  minimal contract-preserving fix.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (ci-matrix, c1-diff, c2-diff, c3-diff,
+  c4-diff, c5-diff, contract, failing-tests, data-sample, fixes). Cite the artifact id(s) for every
+  claim. Use this vocabulary for verdicts: root-cause, red-herring, adequate-fix, shallow-fix.
+
+  The profile API has always promised a non-empty `displayLabel`: a trimmed display name when it has
+  visible content, otherwise the immutable account handle. A legacy import can store `NULL`, `''`,
+  or whitespace-only display names. After a recent set of commits, only blank and whitespace-only
+  profiles render with empty labels; names such as "0" remain valid display names. Identify the
+  change that introduced the regression and the minimal contract-preserving fix.
+
+  1. INTRODUCING COMMIT. Name the single commit that introduced the regression. Cite ci-matrix for
+     the exact test that changed state, its last passing commit, and its first failing commit.
+  2. MECHANISM. From the culprit diff and contract, explain precisely why nullish coalescing changes
+     the behavior for `''` and whitespace-only display names after trimming, while `NULL` and a
+     meaningful string behave differently. State why the string "0" must not be treated as blank.
+  3. RED HERRING: SERIALIZER PACKAGE UPGRADE. Explain why c1 is not the cause, citing c1-diff and
+     ci-matrix. State what changed and why the contract test remained passing.
+  4. RED HERRING: PROFILE TABLE MIGRATION. Explain why c2 is not the cause, citing c2-diff and
+     ci-matrix. State why making the column nullable neither creates the new empty output nor
+     explains the first failing commit.
+  5. RED HERRING: UI AND CACHE COMMITS. Explain why c4 and c5 cannot be introducing changes,
+     citing ci-matrix and their diffs. State why the server-side contract was already failing.
+  6. ADEQUATE FIX. From fixes, name the one option that restores the stated API contract without
+     overwriting stored profile data or broadening the regression. State the exact predicate used
+     to decide whether to return a display name or handle.
+  7. SHALLOW OR HARMFUL FIXES. For each other option in fixes, explain why it is shallow or harmful,
+     naming the specific API, data-integrity, or regression consequence.
+
+  Exactly one resolution is defensible per deliverable; it is fully determined by the artifacts.
+artifacts:
+  - id: ci-matrix
+    type: table
+    label: CI results per commit in chronological order
+    content: |
+      commit  message                                      display-label-contract  profile-json-schema  auth-session  profile-page-e2e
+      c1      "chore: upgrade superjson 1.13 -> 2.2"       PASS                    PASS                 PASS          PASS
+      c2      "migration: permit legacy null display_name" PASS                    PASS                 PASS          PASS
+      c3      "refactor: simplify label fallback"          FAIL                    PASS                 PASS          PASS
+      c4      "fix: profile header avatar spacing"         FAIL                    PASS                 PASS          PASS
+      c5      "perf: add ETag to profile GET"              FAIL                    PASS                 PASS          PASS
+
+      # display-label-contract covers every persisted legacy shape:
+      #   NULL          -> handle
+      #   ''            -> handle
+      #   '   '         -> handle
+      #   'Avery Chen'  -> 'Avery Chen'
+      #   '  Avery  '   -> 'Avery'
+      #   '0'           -> '0'
+  - id: c1-diff
+    type: diff
+    label: "c1 serializer package upgrade"
+    content: |
+      # Files changed: package.json and package-lock.json only.
+      --- a/package.json
+      +++ b/package.json
+       "dependencies": {
+      -  "superjson": "^1.13.3",
+      +  "superjson": "^2.2.1",
+          "zod": "^3.23.0"
+       }
+
+      # Release note verified in this repository's upgrade record:
+      # SuperJSON serializes a returned JavaScript string unchanged. No profile mapper or
+      # serializer source file changed in c1.
+  - id: c2-diff
+    type: diff
+    label: "c2 profile table migration"
+    content: |
+      -- The legacy importer already emitted NULL for some records. This migration aligns the
+      -- database column with that existing import format; it does not write or transform values.
+      ALTER TABLE profiles ALTER COLUMN display_name DROP NOT NULL;
+
+      -- No application code, profile mapper, trigger, default, or backfill changed.
+      -- Existing empty-string and whitespace-only values are unchanged.
+  - id: c3-diff
+    type: diff
+    label: "c3 label fallback refactor"
+    content: |
+      --- a/src/profile/to-profile-response.ts
+      +++ b/src/profile/to-profile-response.ts
+       export function toProfileResponse(profile: Profile) {
+         const normalizedDisplayName = profile.displayName?.trim();
+         return {
+           id: profile.id,
+           handle: profile.handle,
+      -    displayLabel: normalizedDisplayName || profile.handle,
+      +    displayLabel: normalizedDisplayName ?? profile.handle,
+         };
+       }
+
+      # Intended motivation in the commit message:
+      # "Use nullish coalescing so legitimate falsy values are not replaced by defaults."
+  - id: c4-diff
+    type: diff
+    label: "c4 profile header CSS fix"
+    content: |
+      --- a/src/app/profile/ProfileHeader.module.css
+      +++ b/src/app/profile/ProfileHeader.module.css
+       .identity {
+      -  gap: 6px;
+      +  gap: 8px;
+       }
+       .avatar {
+      -  flex: 0 0 32px;
+      +  flex: 0 0 36px;
+       }
+
+      # c4 changes CSS only.
+  - id: c5-diff
+    type: diff
+    label: "c5 profile response ETag optimization"
+    content: |
+      --- a/src/profile/profile.controller.ts
+      +++ b/src/profile/profile.controller.ts
+       const response = toProfileResponse(profile);
+      +res.setHeader('ETag', `"profile-${profile.updatedAt.getTime()}"`);
+       return response;
+
+      # c5 adds a response cache validator after the mapper has constructed the body.
+  - id: contract
+    type: spec
+    label: profile API displayLabel contract and complete legacy input domain
+    content: |
+      GET /v1/profiles/:id response field: displayLabel
+
+      The profile service MUST return a non-empty displayLabel:
+        1. Let trimmed = display_name?.trim().
+        2. If trimmed is a non-empty string, displayLabel MUST equal trimmed.
+        3. If trimmed is undefined or the empty string, displayLabel MUST equal handle.
+        4. A non-empty string is valid even if it looks falsy in another context. In particular,
+           display_name = '0' MUST yield displayLabel = '0', not the handle.
+
+      Complete persisted legacy domain for display_name:
+        NULL, empty string, whitespace-only string, or arbitrary text up to 80 characters.
+
+      handles are immutable, non-empty, and unique. This response mapping is read-only: it MUST NOT
+      alter display_name, fill blank values in storage, or change any account identity field.
+  - id: failing-tests
+    type: log
+    label: display label contract failures captured at c3
+    content: |
+      FAIL  toProfileResponse > display-label-contract > falls back for empty legacy display name
+        profile.displayName: ''
+        profile.handle:      'mika-r'
+        expected displayLabel: 'mika-r'
+        received displayLabel: ''
+
+      FAIL  toProfileResponse > display-label-contract > falls back after trimming whitespace-only name
+        profile.displayName: '   '
+        profile.handle:      'alix-ops'
+        expected displayLabel: 'alix-ops'
+        received displayLabel: ''
+
+      PASS  toProfileResponse > display-label-contract > preserves meaningful zero string
+        profile.displayName: '0'
+        profile.handle:      'zero-user'
+        expected displayLabel: '0'
+        received displayLabel: '0'
+
+      PASS  toProfileResponse > display-label-contract > falls back for null
+        profile.displayName: null
+        profile.handle:      'no-name'
+        expected displayLabel: 'no-name'
+        received displayLabel: 'no-name'
+  - id: data-sample
+    type: table
+    label: representative profile values before and after c3
+    content: |
+      profile_id  stored_display_name  handle      response_before_c3  response_after_c3
+      p-101       NULL                 no-name     no-name             no-name
+      p-102       ''                   mika-r      mika-r              ''
+      p-103       '   '                alix-ops    alix-ops            ''
+      p-104       '  Avery  '          avery-c     Avery               Avery
+      p-105       '0'                  zero-user   0                   0
+
+      # Stored values are identical before and after the deploy.
+  - id: fixes
+    type: note
+    label: candidate fixes for the profile label regression
+    content: |
+      F1: Keep the normalization step and use an explicit non-empty-string fallback:
+            const trimmed = profile.displayName?.trim();
+            const displayLabel = trimmed ? trimmed : profile.handle;
+
+      F2: Add a NOT NULL constraint with DEFAULT '' to profiles.display_name.
+
+      F3: Patch ProfileHeader to render `profile.displayLabel || profile.handle` when it receives an
+          empty displayLabel from the API.
+
+      F4: Backfill every NULL, empty, and whitespace-only display_name by writing its handle into
+          the display_name column, then keep c3 unchanged.
+
+      Constraints:
+        - Every API consumer, not only the web profile page, relies on the displayLabel contract.
+        - The profile mapper must remain read-only; legacy source values are retained for audit and
+          import reconciliation.
+        - The fix must preserve '0' and any other non-empty trimmed string as a chosen display name.
+tags: [debugging, regression-introduction, nullish-coalescing, api-contract, serialization, git-bisect]

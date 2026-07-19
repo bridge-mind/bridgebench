@@ -1,0 +1,113 @@
+id: semantic-equivalence-rust-raw-entry
+version: 1.0.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Collapse Rust Cache Lookups Without Adding Allocation or Eager Loading
+summary: >-
+  A Rust cache lookup deliberately avoids key allocation and loading on hits. Four one-lookup
+  refactors use entry or raw_entry_mut in subtly different ways; exact instrumentation exposes
+  allocation, hashing, loader evaluation, insertion, and return behavior.
+prompt: |
+  Use only original-function, observable-contract, traces, rewrites, and manifest. Cite artifact ids.
+  Give behavior-preserving / changes-behavior and meets-goal / fails-goal for every rewrite.
+
+  1. Classify rewrite-a through rewrite-d on both axes.
+  2. For every change, give the first R1..R5 trace and exact log/return/map difference.
+  3. Identify the unique rewrite satisfying both behavior and one-probe goal.
+  4. Trace R3 under the original and accepted rewrite.
+  5. Explain why Entry::or_insert_with can still change hit behavior before its closure is considered.
+  6. Evaluate reviewer Mei's claim that key allocation is unobservable and therefore irrelevant.
+artifacts:
+  - id: original-function
+    type: code
+    label: Existing Rust cache function
+    content: |
+      use hashbrown::HashMap;
+      fn resolve(cache: &mut HashMap<Key, Value>, borrowed: &str) -> Value {
+          if let Some(value) = cache.get(borrowed) {
+              return value.clone();
+          }
+          let value = load(borrowed);
+          cache.insert(Key::owned(borrowed), value.clone());
+          value
+      }
+
+      HashMap supports Borrow<str>. Instrumentation logs hash_probe at the beginning of get,
+      contains_key, insert, entry, or raw lookup; alloc_key in Key::owned; load before work;
+      clone_value in Value::clone; and insert_new/replace when mutation occurs.
+  - id: observable-contract
+    type: spec
+    label: Complete behavior and refactoring goal
+    content: |
+      E1 on hit: one hash_probe, no alloc_key/load/mutation, one clone_value, return equal clone.
+      E2 on miss: get probe, load, alloc_key, clone_value, insert probe, insert_new, return original
+         loaded Value. This exact event order and two-probe miss behavior are original observables.
+      E3 if load panics, cache is unchanged and alloc_key has not occurred.
+      E4 if Key::owned panics, load already occurred but cache remains unchanged.
+      E5 existing key/value identity is not replaced on hit.
+
+      Goal G: reduce both hit and miss to one hash-table probe using hashbrown's stable raw_entry_mut,
+      while
+      preserving allocation/loading order and all other E1..E5 events except removal of the miss's
+      second hash_probe. The intentionally removed probe is the only permitted trace difference.
+  - id: traces
+    type: table
+    label: Authoritative instrumented witnesses
+    content: |
+      R1 hit k->V: hash_probe,clone_value; return clone V; map unchanged.
+      R2 miss k, load->N: hash_probe,load,alloc_key,clone_value,hash_probe,insert_new; return original N.
+         Goal-adjusted accepted trace removes only the second hash_probe.
+      R3 miss k, load panics P: hash_probe,load; throw P; map unchanged.
+      R4 miss k, Key::owned panics A: hash_probe,load,alloc_key; throw A; map unchanged.
+      R5 hit k where a fresh Key would compare equal but allocate: allocation must not occur.
+  - id: rewrites
+    type: code
+    label: Four proposed stable-Rust rewrites
+    content: |
+      // rewrite-a
+      match cache.raw_entry_mut().from_key(borrowed) {
+          RawEntryMut::Occupied(e) => e.get().clone(),
+          RawEntryMut::Vacant(e) => {
+              let value=load(borrowed);
+              let key=Key::owned(borrowed);
+              let stored=value.clone();
+              e.insert(key, stored);
+              value
+          }
+      }
+
+      // rewrite-b
+      cache.entry(Key::owned(borrowed))
+           .or_insert_with(|| load(borrowed)).clone()
+
+      // rewrite-c
+      if cache.contains_key(borrowed) { cache.get(borrowed).unwrap().clone() }
+      else { let v=load(borrowed); cache.insert(Key::owned(borrowed),v.clone()); v }
+
+      // rewrite-d
+      let loaded=load(borrowed);
+      cache.entry(Key::owned(borrowed)).or_insert(loaded).clone()
+
+      For raw vacant insert, the frozen instrumentation logs alloc_key then insert_new without another
+      hash_probe. Raw occupied performs no Key construction. Value clone returns a distinct Value.
+  - id: evaluation-order
+    type: table
+    label: Frozen Rust evaluation and API facts
+    content: |
+      Method receiver/arguments are evaluated before entry/or_insert methods run.
+      Key::owned in rewrite-b/d therefore runs on hits.
+      or_insert's value expression in rewrite-d is eager; or_insert_with's closure body is lazy.
+      contains_key then get in rewrite-c performs two hit probes and its miss insert performs a third
+      total probe. Stable raw_entry_mut supports borrowed lookup followed by owned insertion.
+  - id: manifest
+    type: note
+    label: Completeness and observability claim
+    content: |
+      rewrite-a through rewrite-d are complete. To align returned identity with original miss behavior,
+      rewrite-a clones the value for storage and returns the original loaded value. Hash seeds and
+      panics are fixed by traces.
+
+      Mei's claim conflicts with the explicit instrumentation and panic schedules. Allocation is a
+      declared lifecycle observable, not merely a performance detail.
+tags: [refactoring, semantic-equivalence, rust, hash-map, evaluation-order]

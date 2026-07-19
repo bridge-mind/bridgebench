@@ -1,0 +1,29 @@
+id: speed-clamp-number
+version: 1.0.0
+category: speed
+cluster: short-completion
+difficulty: hard
+title: Implement a Numeric Clamp Utility With Edge-Case Checks
+summary: >-
+  Write a tiny TypeScript helper that clamps a number into an inclusive range, including explicit
+  handling for invalid bounds, plus four assertion-style examples for boundary behavior.
+prompt: |
+  Implement `clamp` from [clamp-spec] in TypeScript.
+
+  1. Output only a typed `function clamp(value: number, min: number, max: number): number`.
+  2. If `min > max`, throw `new RangeError("min must be <= max")`.
+  3. Add four lines of `expect(clamp(...)).toBe(...)` covering: below-range, above-range, in-range,
+     and exact-boundary inputs.
+artifacts:
+  - id: clamp-spec
+    type: spec
+    label: Clamp rules
+    content: |
+      clamp(value, min, max)
+      - returns min when value < min
+      - returns max when value > max
+      - otherwise returns value unchanged
+      - comparisons are inclusive on both bounds
+      - inputs are numbers; no string coercion
+      - invalid bounds (min > max) must throw RangeError("min must be <= max")
+tags: [typescript, utility, numeric]

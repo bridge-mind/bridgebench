@@ -1,16 +1,16 @@
 id: taint-webhook-outbound-fetch
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: taint-flow
 difficulty: expert
 title: Relaypoint Webhook Outbound-Fetch Taint Flow
 summary: >-
   Relaypoint delivers webhooks to tenant-supplied callback URLs behind an
-  allowlist plus private-range guard. Trace every tenant URL to its outbound
-  fetch and classify each path. The primary delivery and icon fetch are guarded,
-  metadataUrl is never fetched, and an unguarded internal preview is loopback-only
-  — but the retry worker re-fetches the callback URL without re-running the guard.
-  Find the single reachable unvalidated fetch. Reachability reasoning only.
+  allowlist plus private-range guard. Three tenant URL fields (callbackUrl,
+  iconUrl, metadataUrl) flow through a primary delivery path, a dashboard icon
+  fetch, a background retry worker, and an internal preview route. Trace every
+  tenant URL to its outbound fetch, classify each path, and find the single
+  reachable unvalidated fetch. Reachability reasoning only.
 prompt: |
   You are reviewing "Relaypoint", a webhook delivery service. Tenants register hooks
   with URLs; the service makes outbound HTTP requests to them. The only SSRF control is

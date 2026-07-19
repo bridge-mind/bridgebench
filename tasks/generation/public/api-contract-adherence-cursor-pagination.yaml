@@ -1,10 +1,10 @@
 id: api-contract-adherence-cursor-pagination
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: api-contract-adherence
 difficulty: expert
 title: GET /v1/events — Which Handler Obeys Every Ordering And Cursor Term
-summary: A cursor-pagination contract fixes total ordering with an id tie-break, limit clamping (not rejection) at the max, exclusive cursors with no cross-page duplicates, a null next_cursor on the last page, and a 400 status for an unknown cursor. Six handler submissions are under review; exactly one obeys every term while each decoy breaks exactly one. Classify all six against the contract and a fixed dataset.
+summary: A cursor-pagination contract fixes total ordering with an id tie-break, limit clamping (not rejection) at the max, exclusive cursors with no cross-page duplicates, a null next_cursor on the last page, and a 400 status for an unknown cursor. Six handler submissions are under review. Classify all six against the contract and a fixed dataset, naming the term any non-conformer breaks.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (api-contract, sample-data-and-pages,
   handlers-a, handlers-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
@@ -12,9 +12,9 @@ prompt: |
   vocabulary is exactly: conforms / violates. A handler `conforms` only if it satisfies EVERY term
   T1..T5 in api-contract.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
-  obeys every term. No code is executed; reason about each handler's output for the fixed dataset
-  and page requests in sample-data-and-pages.
+  submission-manifest declares candidate-1..candidate-6 the complete set. No code is executed;
+  reason about each handler's output for the fixed dataset and page requests in
+  sample-data-and-pages.
 
   1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
 
@@ -22,7 +22,7 @@ prompt: |
      breaks and cite the sample-data-and-pages request (page or vector) that exposes it. State the
      contract-correct output and the candidate's output.
 
-  3. Exactly one candidate `conforms`. Identify it.
+  3. Identify which candidates, if any, `conform`.
 
   4. In reviewer-thread, reviewer @priya argues candidate-4 conforms because "it returns rows in
      the right order and stops at the right place." State candidate-4's verdict and cite the term
@@ -108,22 +108,22 @@ artifacts:
         if (limit === undefined) limit = DEFAULT_LIMIT;
         else if (!Number.isInteger(limit) || limit < 1)
           return { status: 422, body: { error: 'invalid_limit' } };
-        else if (limit > MAX) limit = MAX;                                  // T2 clamp
-        const sorted = [...EVENTS].sort(cmpAsc);                            // T1
+        else if (limit > MAX) limit = MAX;
+        const sorted = [...EVENTS].sort(cmpAsc);
         let start = 0;
         if (cursor !== undefined) {
           const anchor = sorted.find((e) => e.id === cursor);
-          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };  // T5
-          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);          // T3 strictly after
+          if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);
           if (start === -1) start = sorted.length;
         }
         const page = sorted.slice(start, start + limit);
-        const next = page.length < limit ? null : page[page.length - 1].id; // T4
+        const next = page.length < limit ? null : page[page.length - 1].id;
         return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
       }
 
       // ---- candidate-2 ----
-      function cmpTieDesc(a, b) {                   // ties broken by id DESCENDING
+      function cmpTieDesc(a, b) {
         if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
         return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
       }
@@ -132,7 +132,7 @@ artifacts:
         else if (!Number.isInteger(limit) || limit < 1)
           return { status: 422, body: { error: 'invalid_limit' } };
         else if (limit > MAX) limit = MAX;
-        const sorted = [...EVENTS].sort(cmpTieDesc);                        // wrong tie-break order
+        const sorted = [...EVENTS].sort(cmpTieDesc);
         let start = 0;
         if (cursor !== undefined) {
           const anchor = sorted.find((e) => e.id === cursor);
@@ -151,7 +151,7 @@ artifacts:
         else if (!Number.isInteger(limit) || limit < 1)
           return { status: 422, body: { error: 'invalid_limit' } };
         else if (limit > MAX)
-          return { status: 422, body: { error: 'invalid_limit' } };        // rejects instead of clamping
+          return { status: 422, body: { error: 'invalid_limit' } };
         const sorted = [...EVENTS].sort(cmpAsc);
         let start = 0;
         if (cursor !== undefined) {
@@ -181,7 +181,7 @@ artifacts:
         if (cursor !== undefined) {
           const anchor = sorted.find((e) => e.id === cursor);
           if (!anchor) return { status: 400, body: { error: 'invalid_cursor' } };
-          start = sorted.findIndex((e) => cmpAsc(e, anchor) >= 0);          // inclusive: includes the cursor item
+          start = sorted.findIndex((e) => cmpAsc(e, anchor) >= 0);
           if (start === -1) start = sorted.length;
         }
         const page = sorted.slice(start, start + limit);
@@ -204,7 +204,7 @@ artifacts:
           if (start === -1) start = sorted.length;
         }
         const page = sorted.slice(start, start + limit);
-        const next = page.length === 0 ? null : page[page.length - 1].id;   // returns last id even on a short page
+        const next = page.length === 0 ? null : page[page.length - 1].id;
         return { status: 200, body: { rows: page.map((e) => e.id), next_cursor: next } };
       }
 
@@ -218,7 +218,7 @@ artifacts:
         let start = 0;
         if (cursor !== undefined) {
           const anchor = sorted.find((e) => e.id === cursor);
-          if (!anchor) return { status: 200, body: { rows: [], next_cursor: null } };  // unknown cursor -> 200 empty
+          if (!anchor) return { status: 200, body: { rows: [], next_cursor: null } };
           start = sorted.findIndex((e) => cmpAsc(e, anchor) > 0);
           if (start === -1) start = sorted.length;
         }
@@ -250,8 +250,7 @@ artifacts:
       candidate-4, candidate-5, candidate-6. This is the COMPLETE set; no other implementation is
       being considered.
 
-      Acceptance rule: exactly one submission satisfies ALL terms T1..T5 (it reproduces the
-      contract-correct output for P1, P2, P3, and the additional vectors) and is to be accepted.
-      Each of the other five breaks exactly one term. The process assumes precisely one such
-      all-terms-correct submission exists.
+      Acceptance rule: submissions are evaluated against ALL terms T1..T5 (a submission must
+      reproduce the contract-correct output for P1, P2, P3, and the additional vectors);
+      submissions that satisfy every term are accepted.
 tags: [generation, api-contract-adherence, pagination, ordering, code-review]

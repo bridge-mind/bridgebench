@@ -1,10 +1,10 @@
 id: dead-code-plugin-registry-reflection
-version: 1.0.0
+version: 1.1.0
 category: refactoring
 cluster: dead-code-elimination
 difficulty: expert
 title: Auditing a plugin cleanup PR where classes are constructed by name at Solstice Export
-summary: A cleanup PR deletes six items from an export service whose plugins are constructed by string name from a registry. One exporter is enabled at startup, one is reachable only through a request-format allow-list, one is truly dead, and a core plugin is constructed directly. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
+summary: A cleanup PR deletes six items from an export service whose plugins are constructed by string name from a registry. Reachability runs through startup-enabled plugin names, a request-format allow-list, and a directly constructed core plugin. Classify each removal as behavior-preserving or changes-behavior, and judge whether the PR meets the elimination goal.
 prompt: |
   Solstice Export constructs its plugins by string name from REGISTRY. A cleanup PR (removal-pr)
   deletes six items, each labelled "unused." Reachability is fully determined by three
@@ -100,13 +100,10 @@ artifacts:
       export class YamlExporter { run(d: Data) { return toYaml(d); } }
       export class XmlExporter  { run(d: Data) { warmCache(); return toXml(d); } }
 
-      // Called ONLY from XmlExporter.run above; no other caller.
       function warmCache(): void { cache.preload(); }
 
-      // No caller anywhere; not in REGISTRY; not a core plugin.
       function deprecatedThumbnailer(img: Image): Buffer { return render(img, 64); }
 
-      // No caller anywhere; not in REGISTRY; not a core plugin.
       function legacyManifestWriter(pkg: Pkg): string { return `MANIFEST ${pkg.id}`; }
   - id: removal-pr
     type: diff

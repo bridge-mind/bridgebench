@@ -1,0 +1,121 @@
+id: root-cause-grpc-ack-cycle
+version: 1.0.0
+category: debugging
+cluster: root-cause-isolation
+difficulty: expert
+title: gRPC Replication Stalls When Receive Waits for EOF Before Sending Required Acknowledgements
+summary: >-
+  A bidirectional replication service receives chunks into a bounded apply queue and buffers applied
+  acknowledgements, but the handler does not send any acknowledgements until the client half-closes. The
+  client protocol requires an acknowledgement every 16 chunks before sending more or EOF. Reconcile
+  goroutine stacks, channel capacities, HTTP/2 windows, and control clients to isolate the application-level
+  wait cycle behind an apparent transport flow-control incident.
+prompt: |
+  Diagnose the fictional QuorumMirror incident using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. State the replication ordering, acknowledgement, bounded-memory, cancellation, and half-close invariants.
+  2. Trace schedule T0 through T9. Track client permit count, recv loop, applyQ, ackQ, applier, send loop, EOF,
+     and HTTP/2 stream/connection windows.
+  3. Identify the minimal wait-for cycle and the exact handler control-flow edge that creates it. Explain why
+     ackQ capacity changes where the stall appears but not whether it exists.
+  4. Rule out HTTP/2 window exhaustion, packet loss, CPU, disk, and protobuf-size limits using the controls.
+     Explain why WINDOW_UPDATE frames cannot satisfy an application acknowledgement contract.
+  5. Classify fixes F1 through F4 and select the adequate fix. Describe error arbitration and goroutine
+     termination when receive, apply, send, or client cancellation fails.
+  6. Give deterministic tests for 15/16/17/64 chunks, slow receiver, slow applier, slow client reads, early
+     EOF, receive error, send error, cancellation, and two simultaneous streams.
+
+  Protocol-contract and handler-code are exhaustive; the same HTTP/2 connection carries the control stream.
+artifacts:
+  - id: protocol-contract
+    type: spec
+    label: authoritative replication protocol
+    content: |
+      Replicate is bidirectional. Client may have at most 16 unacknowledged chunks. After sending chunk 16 it
+      waits until Ack(applied_through>=16) before sending chunk 17; it follows the same rule for each window.
+      Client half-closes only after all chunks are sent. Server applies chunks in sequence, sends monotonic
+      acknowledgements as progress occurs, and sends final status after receive EOF and all applies complete.
+      Queues must stay bounded. Any receive/apply/send failure cancels sibling work and returns one error.
+  - id: handler-code
+    type: code
+    label: Go gRPC server implementation
+    content: |
+      func (s *Server) Replicate(stream Mirror_ReplicateServer) error {
+        ctx, cancel := context.WithCancel(stream.Context()); defer cancel()
+        applyQ := make(chan *Chunk, 8)
+        ackQ := make(chan *Ack, 8)
+        g, ctx := errgroup.WithContext(ctx)
+
+        g.Go(func() error { // receiver
+          defer close(applyQ)
+          for { c, err := stream.Recv(); if err == io.EOF { return nil }; if err != nil { return err }
+            select { case applyQ <- c: case <-ctx.Done(): return ctx.Err() }
+          }
+        })
+        g.Go(func() error { // applier
+          defer close(ackQ)
+          for c := range applyQ { if err := s.apply(c); err != nil { return err }
+            select { case ackQ <- &Ack{AppliedThrough:c.Seq}: case <-ctx.Done(): return ctx.Err() }
+          }
+          return nil
+        })
+
+        if err := g.Wait(); err != nil { return err } // waits for receiver EOF and applier completion
+        for ack := range ackQ { if err := stream.Send(ack); err != nil { return err } }
+        return nil
+      }
+      stream.Send is never called before g.Wait returns. apply preserves sequence and commits each chunk once.
+  - id: wait-trace
+    type: log
+    label: deterministic 64-chunk stall
+    content: |
+      T0 client permits=16, sends chunks 1..16; permits=0; waits Ack>=16 before chunk17/EOF
+      T1 receiver enqueues 1..8, then continues as applier drains
+      T2 applier commits 1..8, fills ackQ with Ack1..Ack8
+      T3 receiver enqueues through chunk16; then blocks in Recv waiting chunk17 or EOF
+      T4 applier commits chunks9..16 but blocks sending Ack9 because ackQ remains full
+      T5 g.Wait waits for receiver and applier
+      T6 handler has not entered `for ack := range ackQ`
+      T7 client waits for Ack>=16 and will not send chunk17 or EOF
+      T8 HTTP/2 send/receive windows remain nonzero; PING and control RPCs succeed
+      T9 deadline expires; cancellation unwinds all waits; retry repeats at the same boundary
+  - id: telemetry
+    type: table
+    label: incident and transport evidence
+    content: |
+      metric/control                       observed
+      stall boundary                      exactly 16 client chunks
+      server CPU / disk p99               18% / 3ms
+      packet loss / retransmits            0 / baseline
+      HTTP/2 stream send window            1,048,576 bytes available
+      HTTP/2 connection send window        8,388,608 bytes available
+      WINDOW_UPDATE/PING                   exchanged throughout stall
+      ack messages placed in ackQ          8
+      ack messages passed to stream.Send   0
+      legacy client sending all chunks then EOF  completes (receiver returns, though not contract compliant)
+  - id: goroutine-dump
+    type: log
+    label: stacks at 20 seconds
+    content: |
+      Replicate main goroutine: errgroup.(*Group).Wait
+      receiver goroutine: grpc.(*serverStream).RecvMsg
+      applier goroutine: chan send ackQ <- Ack{9}
+      client sender: semaphore acquire permit (0 available)
+      client receiver: grpc.(*clientStream).RecvMsg
+      No goroutine is blocked in HTTP/2 write, disk I/O, protobuf marshal, or mutex acquisition.
+  - id: candidate-fixes
+    type: note
+    label: proposed repairs
+    content: |
+      F1 Increase HTTP/2 stream and connection windows tenfold. Application never calls Send, so no window
+          value can produce the required Ack.
+      F2 Increase ackQ to 65. A 64-chunk fixture may pass if client violated its permit rule, but compliant
+          client still waits at 16 and main still waits for EOF.
+      F3 Run receive, apply, and ack-send concurrently under one cancellation/error group; sender drains ackQ
+          as applier produces it, preserving sequence. Receiver closes applyQ on EOF, applier closes ackQ after
+          drain, sender exits after ackQ close. Any first substantive error cancels all stream/channel waits;
+          wait for goroutines before returning a deterministic error/final status.
+      F4 Tell clients to send all chunks and EOF before reading. This violates the bounded 16-in-flight
+          protocol and can make client/server memory unbounded.
+tags: [debugging, root-cause-isolation, grpc, flow-control, deadlock]

@@ -1,9 +1,9 @@
 id: root-keepalive-connection-reset
-version: 1.0.0
+version: 1.1.0
 category: reasoning
 cluster: root-cause-reasoning
 difficulty: expert
-title: Intermittent Edge 502s From a Keep-Alive Idle-Timeout Ordering Between Load Balancer and Server
+title: Intermittent Edge 502s After Idle Gaps
 summary: >-
   An edge load balancer returns sporadic 502s to clients with zero application errors, a green
   deploy minutes earlier, flat CPU and DNS, and the failures clustering in low-traffic windows.
@@ -59,24 +59,18 @@ artifacts:
         - LB upstream idle timeout: after this many ms idle, the LB closes and discards the pooled
           connection (see [lb-config]).
 
-      THE RACE. If the LB's idle timeout is LONGER than the server's keep-alive timeout, the server
-      closes idle connections first, while the LB still believes them usable. When the LB then
-      dispatches a new request onto such a just-closed connection, the write races the server's close:
-      the server has already half-closed the socket, so the request is met with a TCP reset (RST) /
-      "connection reset by peer" BEFORE any response bytes. The LB, if it cannot retry (see the retry
-      policy in [lb-config]), surfaces this to the client as HTTP 502. No request bytes ever reach the
-      application: the failure is entirely at the LB<->server transport layer.
-
-      When the LB idle timeout is SHORTER than the server keep-alive timeout, the LB always closes and
-      refreshes the connection first, so it never dispatches onto a server-closed socket and the race
-      cannot occur.
+      GENERAL PROTOCOL FACTS. An idle-timeout close is unilateral: the closing side sends FIN, and the
+      peer learns of the close only when it next touches the socket. A request written onto a
+      connection the peer has already closed is met with a TCP reset (RST) / "connection reset by
+      peer" before any response bytes; whether such a failure is retried or surfaced to the client is
+      governed by the dispatching side's retry policy. Whichever side holds the shorter idle timeout
+      closes and refreshes its connections first.
 
       CONTROL SURFACE (exhaustive). The server keep-alive timeout is pinned at 5000 ms by the shared
       runtime base image under platform policy; this service CANNOT override it. The ONLY timeout under
       this team's control is the edge LB's upstream idle timeout. There is no application code path in
       this stack that emits 502: the app returns 200, 4xx, or 5xx, and every 5xx it emits is written to
-      [app-log]. A client-visible 502 in this stack is produced only by the LB, only by the reuse race
-      above.
+      [app-log]. A client-visible 502 in this stack can be produced only by the LB.
   - id: lb-config
     type: config
     label: Edge load balancer upstream configuration
@@ -93,7 +87,6 @@ artifacts:
         do_not_retry_on: [reset_after_dispatch, upstream_closed]   # NOT retried once a request is
                                              # dispatched onto a pooled connection (avoids double-send
                                              # on non-idempotent requests) -> surfaced as 502
-      # Note: upstream_idle_timeout_ms (60000) is far larger than the server's keep-alive timeout.
   - id: server-config
     type: config
     label: quote-api server runtime configuration
@@ -113,7 +106,7 @@ artifacts:
       10:12:03 | c17 | reuse-pooled | 8200  | -   | 502 | r-9001 | RST before response; upstream closed idle conn; not retried
       10:12:04 | c22 | reuse-pooled | 1100  | 200 | 200 | r-9002 | ok
       10:12:05 | c09 | new-conn     | -     | 200 | 200 | r-9003 | ok (fresh connection)
-      10:19:47 | c05 | reuse-pooled | 3200  | 200 | 200 | r-9021 | ok (idle < 5000 ms; server had not closed)
+      10:19:47 | c05 | reuse-pooled | 3200  | 200 | 200 | r-9021 | ok
       10:31:20 | c31 | reuse-pooled | 12500 | -   | 502 | r-9040 | RST before response; upstream closed idle conn; not retried
       10:31:21 | c33 | reuse-pooled | 900   | 200 | 200 | r-9041 | ok
       10:40:10 | --  | deploy-note  | -     | -   | -   | -      | quote-api v2.7.0 rollout complete (see deploy-diff)
@@ -121,9 +114,6 @@ artifacts:
       10:52:43 | c46 | new-conn     | -     | 200 | 200 | r-9106 | ok
       11:07:55 | c50 | reuse-pooled | 41000 | -   | 502 | r-9188 | RST before response; upstream closed idle conn; not retried
       11:08:00 | c51 | reuse-pooled | 2100  | 200 | 200 | r-9190 | ok
-      # Every 502 row: a pooled connection reused after being idle > 5000 ms, upstream_status "-" (no
-      # response line was ever received), reset before any bytes. Every reuse with idle < 5000 ms and
-      # every new connection succeeded. upstream_response_time was "-" for all 502 rows.
   - id: app-log
     type: log
     label: quote-api application request log (app clock; NTP healthy)

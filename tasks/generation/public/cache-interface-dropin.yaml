@@ -1,10 +1,10 @@
 id: cache-interface-dropin
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: interface-compatibility
 difficulty: expert
 title: Which Cache Implementation Is a Drop-In Replacement for the Declared Cache Interface
-summary: A frozen Cache<V> interface and its existing call sites are declared complete. Five candidate implementations are proposed as drop-in replacements. Some match exactly; decoys break compatibility subtly — one renames delete to remove, one narrows get to V | null, one makes the ttlMs argument required. One conformer adds an extra method beyond the interface. Classify each conforms/violates against the interface and name the exact call site each violator breaks.
+summary: A frozen Cache<V> interface and its existing call sites are declared complete. Five candidate implementations are proposed as drop-in replacements. Classify each as conforms or violates against the interface and name the exact call site each violator breaks.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (interface, call-sites,
   candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite

@@ -28,6 +28,53 @@ export const TaskPublicSchema = z
   .strict();
 export type TaskPublic = z.infer<typeof TaskPublicSchema>;
 
+/**
+ * The closed set of ground-truth labels a structured deliverable may carry.
+ * One vocabulary across categories keeps judge verdicts machine-comparable:
+ * security uses real-vulnerability / false-positive / mitigated / benign,
+ * refactoring uses behavior-preserving / changes-behavior / meets-goal /
+ * fails-goal, hallucination uses supported / unsupported / conflicting,
+ * bullshit uses legitimate / nonsense, and determinable / underdetermined
+ * covers reasoning, debugging, and generation deliverables.
+ */
+export const DELIVERABLE_CLASSIFICATIONS = [
+  'determinable',
+  'underdetermined',
+  'supported',
+  'unsupported',
+  'conflicting',
+  'real-vulnerability',
+  'false-positive',
+  'mitigated',
+  'benign',
+  'legitimate',
+  'nonsense',
+  'behavior-preserving',
+  'changes-behavior',
+  'meets-goal',
+  'fails-goal',
+] as const;
+export type DeliverableClassification = (typeof DELIVERABLE_CLASSIFICATIONS)[number];
+
+/**
+ * A machine-readable rubric row for one numbered deliverable of a task.
+ * Prose fields (expectedResolution, disqualifyingErrors) stay authoritative
+ * for tasks that predate structured deliverables; when a task carries
+ * deliverables, every judge decisiveDifference must reference one of these
+ * IDs, and each evidence artifact ID must resolve against the public task.
+ */
+export const TaskDeliverableSchema = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+    classification: z.enum(DELIVERABLE_CLASSIFICATIONS),
+    expectedAnswer: z.string().min(1).max(4_000),
+    evidenceArtifactIds: z.array(z.string().min(1).max(80)).min(1).max(10),
+    disqualifiers: z.array(z.string().min(1).max(500)).default([]),
+    weight: z.number().positive().max(10).default(1),
+  })
+  .strict();
+export type TaskDeliverable = z.infer<typeof TaskDeliverableSchema>;
+
 export const TaskPrivateSchema = z
   .object({
     id: z.string().min(1),
@@ -35,6 +82,11 @@ export const TaskPrivateSchema = z
     expectedResolution: z.string().min(1).max(10_000),
     requiredEvidence: z.array(z.string().min(1)).min(1),
     disqualifyingErrors: z.array(z.string().min(1)).default([]),
+    /**
+     * Structured per-deliverable rubric. Optional while packs migrate from
+     * prose; present means decisive differences are validated against it.
+     */
+    deliverables: z.array(TaskDeliverableSchema).min(1).max(20).optional(),
     rubric: z
       .object({
         correctness: z.string().min(1),

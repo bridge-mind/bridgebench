@@ -1,0 +1,64 @@
+id: crossed-oci-cookie-attributes
+version: 1.0.0
+category: bullshit
+cluster: crossed-domains
+difficulty: expert
+title: The SameSite Attribute of an OCI Image Layer
+summary: A deployment audit mixes legitimate container and browser-cookie properties with requests that assign one domain's controls to the other.
+prompt: |
+  Use all artifacts and the exhaustive property map. For category errors, name both object
+  kinds, explain why the requested property is undefined, and redirect to the nearest
+  legitimate question with its answer. Answer supported audit items directly.
+
+  1. Identify the immutable image digest deployed to production.
+  2. Report the SameSite and HttpOnly attributes of layer `sha256:bbb`.
+  3. Determine the total compressed image size.
+  4. Report the OCI media type of the `session` cookie.
+  5. Determine whether the captured cross-site POST sends the session cookie.
+  6. Identify the container control that prevents writes outside `/tmp` and the cookie
+     control that prevents JavaScript reads.
+artifacts:
+  - id: property-map
+    type: spec
+    label: Exhaustive OCI and cookie property map
+    content: |
+      OCI image properties: manifest digest, config digest, ordered layers, media types,
+      compressed sizes, architecture, and annotations. Runtime container properties include
+      root filesystem mutability and writable mounts. OCI objects have no Domain, Path,
+      SameSite, Secure, HttpOnly, or browser send policy.
+
+      HTTP cookie properties: name, value, Domain, Path, SameSite, Secure, HttpOnly,
+      expiration. Cookies have no OCI digest, layer media type, architecture, or filesystem.
+      SameSite=Lax excludes a cookie from a cross-site POST. HttpOnly blocks script reads.
+  - id: image-manifest
+    type: config
+    label: Production OCI manifest and pod controls
+    content: |
+      deployment image: registry.example/app@sha256:manifest99
+      architecture: linux/amd64
+      layers:
+        - digest: sha256:aaa
+          mediaType: application/vnd.oci.image.layer.v1.tar+gzip
+          size: 12000000
+        - digest: sha256:bbb
+          mediaType: application/vnd.oci.image.layer.v1.tar+gzip
+          size: 8000000
+      securityContext.readOnlyRootFilesystem: true
+      writable mount: /tmp (emptyDir)
+  - id: cookie-capture
+    type: log
+    label: Browser cookie and request capture
+    content: |
+      Set-Cookie: session=opaque; Path=/; Secure; HttpOnly; SameSite=Lax
+      navigation origin=https://merchant.example
+      request=POST https://app.example/checkout (cross-site)
+      request Cookie header: absent
+      document.cookie result: "theme=dark" (session omitted because HttpOnly)
+  - id: audit-draft
+    type: note
+    label: Unreviewed combined checklist
+    content: |
+      The draft asks for cookie security attributes on each image layer and OCI media types
+      on every response cookie, then asks legitimate size, digest, filesystem, and send-policy
+      questions. No other object registry exists.
+tags: [crossed-domains, oci, containers, cookies, browser-security]

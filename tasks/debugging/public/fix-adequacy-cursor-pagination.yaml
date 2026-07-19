@@ -1,10 +1,10 @@
 id: fix-adequacy-cursor-pagination
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: fix-adequacy
 difficulty: expert
 title: Feed Pagination Duplicates And Skips Items, With Four Candidate Fixes To Judge
-summary: A feed paginated by OFFSET over created_at DESC returns duplicate and skipped items when rows are inserted or deleted between page requests. Four candidate fix diffs are on the table. Exactly one resolves the root cause without reintroducing a regression the contract describes; one masks, one is per-request only, and one switches to keyset on a non-unique column and drops rows at a tie boundary. Judge each and name the disqualifying over-rejection.
+summary: The streamly feed at GET /v2/feed returns some items twice and skips others while a user scrolls. Four candidate fix diffs are on the table; exactly one resolves the root cause without reintroducing a regression the contract describes. Using the contract, the current code, the reproduction, and the boundary data, judge each candidate and name the disqualifying over-rejection.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (contract, current-code,
   bug-report, boundary-data, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for every
@@ -68,8 +68,6 @@ artifacts:
         `);
         return { rows, cursor: encodeOffset(offset + rows.length) };
       }
-      // The next page is "the same ORDER BY, skip N rows". N is a position, not an anchor to
-      // a specific row.
   - id: bug-report
     type: note
     label: reproduction of the duplicate and the skip
@@ -81,15 +79,11 @@ artifacts:
       DUPLICATE case: before page 2, two new posts I11, I12 are inserted at the head.
       Feed now:                [I12, I11, I10, I9, I8, I7, I6, ...]
       Page 2 (offset 3):       returns I9, I8, I7  -> I9 and I8 were ALREADY shown on page 1
-                               (duplicates), because inserting 2 rows above shifted every
-                               row's offset by +2.
+                               (duplicates).
 
       SKIP case: instead, before page 2, two head posts I10, I9 are deleted.
       Feed now:                [I8, I7, I6, I5, ...]
-      Page 2 (offset 3):       returns I5, I4, I3  -> I8, I7, I6 were never shown (skipped),
-                               because removing 2 rows above pulled every row's offset by -2.
-      Both come from the same cause: OFFSET counts positions in a list that changes between
-      requests.
+      Page 2 (offset 3):       returns I5, I4, I3  -> I8, I7, I6 were never shown (skipped).
   - id: boundary-data
     type: table
     label: rows around the page-1/page-2 boundary (note the created_at tie)
@@ -98,12 +92,10 @@ artifacts:
       ---  --------------------------  -------------------------------
       I10  2026-07-10T10:00:00.002Z    page 1, row 1
       I9   2026-07-10T10:00:00.001Z    page 1, row 2
-      I8   2026-07-10T10:00:00.000Z    page 1, row 3  <-- LAST row of page 1 (the anchor)
-      I7   2026-07-10T10:00:00.000Z    page 2, row 1  <-- SAME created_at as I8 (tie)
-      I6   2026-07-10T10:00:00.000Z    page 2, row 2  <-- SAME created_at as I8 (tie)
+      I8   2026-07-10T10:00:00.000Z    page 1, row 3 (last row of page 1)
+      I7   2026-07-10T10:00:00.000Z    page 2, row 1 (same created_at as I8)
+      I6   2026-07-10T10:00:00.000Z    page 2, row 2 (same created_at as I8)
       I5   2026-07-09T09:59:59.998Z    page 2, row 3
-      # Under the R3 total order (created_at DESC, id DESC) the correct sequence is
-      # I8, I7, I6 (10:00:00.000, ids 8 > 7 > 6), so page 2 must start at I7.
   - id: fix-a
     type: diff
     label: candidate fix A
@@ -113,7 +105,7 @@ artifacts:
       +   const seen = new Set(renderedIds);
       +   const deduped = page.rows.filter(r => !seen.has(r.id));   // drop ids already shown
           render(deduped);
-      # Server query is unchanged (still OFFSET). Only the client hides repeats.
+      # Server query is unchanged (still OFFSET).
   - id: fix-b
     type: diff
     label: candidate fix B
@@ -126,8 +118,6 @@ artifacts:
             return { rows, cursor: encodeOffset(offset + rows.length) };
       +   });
         }
-      # Each page request is its own transaction/snapshot; there is no shared snapshot across
-      # the separate page-1 and page-2 requests.
   - id: fix-c
     type: diff
     label: candidate fix C

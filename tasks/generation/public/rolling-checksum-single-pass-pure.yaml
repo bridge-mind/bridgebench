@@ -1,10 +1,10 @@
 id: rolling-checksum-single-pass-pure
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: constraint-satisfaction
 difficulty: expert
 title: Which rollingChecksum Candidate Is Single-Pass, O(1)-Memory, Pure, and Reentrant
-summary: A spec defines a Fletcher-style rollingChecksum(bytes) under four declared constraints — single pass, bounded O(1) working memory, purity/reentrancy, and an exact arithmetic contract. Five candidates are submitted; one keeps a per-byte history array, one carries accumulators in module-level state so a second call drifts, one swaps the update order and computes the wrong value. Classify each conforms/violates, cite the exact construct, and give the concrete symptom of the reentrancy defect.
+summary: A spec defines a Fletcher-style rollingChecksum(bytes) under four declared constraints — single pass, bounded O(1) working memory, purity/reentrancy, and an exact arithmetic contract. Five candidates are submitted. Classify each as conforms or violates against the constraints and cite the exact construct responsible for any violation.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, worked-example,
   candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, reading-guide). Cite
@@ -119,7 +119,7 @@ artifacts:
     label: candidate-c
     content: |
       // candidate-c
-      let _a = 0, _b = 0;               // module scope, outside the function
+      let _a = 0, _b = 0;
       function rollingChecksum(bytes) {
         for (let i = 0; i < bytes.length; i++) {
           _a = (_a + bytes[i]) % 255;
@@ -135,7 +135,7 @@ artifacts:
       function rollingChecksum(bytes) {
         let a = 0, b = 0;
         for (let i = 0; i < bytes.length; i++) {
-          b = (b + a) % 255;             // folds in the OLD a
+          b = (b + a) % 255;
           a = (a + bytes[i]) % 255;
         }
         return b * 256 + a;

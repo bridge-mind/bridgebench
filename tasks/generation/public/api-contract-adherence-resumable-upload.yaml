@@ -1,0 +1,116 @@
+id: api-contract-adherence-resumable-upload
+version: 1.0.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: Append Resumable Upload Chunks With Atomic Offsets and Replay-Safe Completion
+summary: >-
+  Four REST handlers accept checksum-bound upload chunks under concurrent retries. Only one enforces
+  tenant ownership, exact offsets, byte-preserving replay, atomic append/finalize, and the required
+  status/header contract without duplicating object publication.
+prompt: |
+  Use only endpoint-contract, store-api, request-sequences, handlers, and manifest. Cite artifact ids.
+  Verdicts are conforms / violates.
+
+  1. Classify handler-a through handler-d against U1..U9.
+  2. For every violation, give the first Q1..Q7 sequence and exact status/header/body/store effect.
+  3. Identify the unique conforming handler and trace both concurrent calls in Q5.
+  4. State when a stale offset is a replay versus an offset conflict.
+  5. Explain why publishing the object inside the database transaction is forbidden.
+  6. Evaluate reviewer Pax's claim that a successful final-chunk replay should return 201 again.
+artifacts:
+  - id: endpoint-contract
+    type: spec
+    label: Complete PATCH upload endpoint contract
+    content: |
+      PATCH /v1/uploads/:id accepts raw bytes with headers Upload-Offset (canonical unsigned decimal)
+      and Upload-Checksum ("sha256 " plus unpadded base64 digest). Upload length was fixed at creation.
+      Server-issued ids have syntax <tenantHint>~<opaque>, for example T~A. tenantHint equals the
+      owner's tenantId when issued but is an untrusted routing hint supplied in the URL, never proof
+      of ownership. tenantHint(id) returns the text before the one '~'; malformed ids resolve as 404.
+
+      U1 authenticate before reading body; load by (tenantId,id), otherwise 404. Cross-tenant existence
+         is not disclosed.
+      U2 validate both headers and body length 1..1MiB before writes; bad input is 400.
+      U3 checksum must match raw body bytes using constant-time digest comparison; mismatch 460 and no write.
+      U4 expected offset equal current length atomically appends bytes once. End may not exceed total.
+      U5 offset below current is replay only if the stored bytes at that exact range equal body and the
+         range ends <= current; return 204 current offset, no append. Otherwise 409 current offset.
+      U6 offset above current is 409 current offset. Every 204/409 includes Upload-Offset current decimal.
+      U7 append reaching total atomically marks complete and creates one outbox Publish row. Response is
+         201 {id,state:'complete'} with Upload-Offset total. Nonfinal append is 204 empty body.
+      U8 a replay after completion that matches stored bytes is 204, never another 201/outbox row.
+      U9 two concurrent identical expected-offset calls serialize: one append result, one replay result.
+  - id: store-api
+    type: spec
+    label: Frozen transactional upload primitive
+    content: |
+      store.applyChunk({tenantId,id,offset,body}) runs one serializable transaction after U1-U3 and returns:
+        {kind:'appended',current,completedNow,response?}
+        {kind:'replay',current}
+        {kind:'conflict',current}
+        {kind:'notFound'}
+      It implements U4/U5/U7/U9, stores exact bytes, and creates the outbox row in the same transaction.
+      notFound covers foreign ids. publishObject is performed later by the outbox worker and is never
+      called by this HTTP handler. Exact header parsers and sha256 helper are supplied.
+  - id: request-sequences
+    type: table
+    label: Authoritative upload sequences
+    content: |
+      Upload A has id T~A, owner tenant T, total=5, and is initially empty.
+      Q1 T patches T~A at offset 0 body "ab" valid digest -> 204, Upload-Offset:2, one stored append.
+      Q2 repeat Q1 -> 204, Upload-Offset:2, no append.
+      Q3 offset 0 body "ax" -> 409, Upload-Offset:2; offset 3 body "z" -> same 409.
+      Q4 T patches T~A at offset 2 body "cde" -> 201 {id:'T~A',state:'complete'},
+         Upload-Offset:5, one outbox row.
+      Q5 from empty upload T~B owned by T, two concurrent offset 0 body "full" calls for total=4
+         -> one 201 and one 204 replay; one byte range and one outbox row.
+      Q6 tenant X sends a valid replay of Q1 to id T~A -> 404 before byte-range read. Handler c instead
+         trusts tenantHint(T~A)=T, reads T's upload, and returns 204 Upload-Offset:5 with no write,
+         disclosing/crossing tenant ownership.
+      Q7 bad checksum at current offset -> 460; current and outbox unchanged.
+  - id: handlers
+    type: code
+    label: Four complete endpoint handlers
+    content: |
+      handler-a:
+        auth; ownership lookup by authenticated tenant/id or 404; then parse headers/read body;
+        validate digest; applyChunk scoped by tenant
+        notFound->404; conflict->409+current; replay->204+current
+        appended completedNow->201 stored response+current; otherwise 204+current
+
+      handler-b:
+        same ownership lookup, validation, and store primitive
+        maps both completedNow and any replay whose current==total to 201 complete
+
+      handler-c:
+        auth; parse tenantHint(id); lookup using that hint as tenantId rather than authenticated tenant;
+        validate exactly; call applyChunk with tenantHint(id)
+        map results like handler-a
+
+      handler-d:
+        auth/load current scoped by authenticated tenant; if offset equals current call appendBytes transaction
+        after commit, if new current==total call publishObject then markComplete in a second transaction
+        lower offsets always return 409; maps other statuses and headers as declared
+  - id: state-machine
+    type: table
+    label: Frozen distinctions among outcomes
+    content: |
+      appended nonfinal: 204 + new current.
+      appended and completedNow: 201 exactly once + one transactional outbox record.
+      exact historical byte replay, including after complete: 204 + current.
+      stale differing bytes or future offset: 409 + current.
+      digest mismatch is decided before applyChunk: 460 and no store access beyond ownership lookup.
+  - id: manifest
+    type: note
+    label: Complete concurrency and publication assumptions
+    content: |
+      handler-a through handler-d are complete. applyChunk is trusted and exact; appendBytes in d is
+      atomic only for bytes, not completion/outbox. publishObject is an external side effect and can
+      fail or be duplicated, which is why U7 requires the outbox transaction.
+      The tenant hint is only a routing optimization. Handlers a/b/d scope lookup by authenticated
+      tenantId and the full id; only handler c treats the hint as authorization.
+
+      Pax's 201 replay proposal conflicts with U8. 201 means this request caused completion; replay
+      communicates current progress without recreating the completion event.
+tags: [generation, api-contract-adherence, uploads, idempotency, transactions]

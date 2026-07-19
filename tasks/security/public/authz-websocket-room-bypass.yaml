@@ -1,0 +1,115 @@
+id: authz-websocket-room-bypass
+version: 1.1.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: ChatMesh WebSocket — Room Authorization Bypass
+summary: Review a fictional "ChatMesh" real-time messaging module. Reconstruct guard
+  chains and room scoping. Decoys include a secure HTTP upgrade, a protected REST
+  API, and a bounded room creator. Exactly one path allows unauthorized room joining
+  over WebSockets. Find the single reachable bypass.
+prompt: |-
+  You are performing a defensive security review of "ChatMesh", an internal real-time messaging service. Seven artifacts describe it: ws-server, http-upgrade, rest-api, room-manager, message-broker, routes-config, and service-note.
+
+  Access to chat rooms is strictly limited to room members. Exactly one of the behaviors in these artifacts is a real, reachable authorization bypass vulnerability; the others are look-alikes that are neutralized somewhere in the same artifacts.
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you rely on for every claim. If something is not defined, not a sink, or not reachable in the artifacts, say so explicitly. Reason about reachability ONLY — do NOT write an exploit payload.
+
+  1. Name the single real vulnerability class present in the module, using standard terminology, and point to the exact code behavior that constitutes it (name the artifact and the specific line/behavior).
+
+  2. State the precondition / exploitability chain: the specific facts across the artifacts that together make it reachable by an external caller.
+
+  3. A reviewer flags the WebSocket HTTP upgrade process as vulnerable to unauthenticated access. Rule it in or out and cite the mechanism that decides it.
+
+  4. A reviewer flags the REST API `/api/rooms/:id/messages` as vulnerable to IDOR (Insecure Direct Object Reference). Rule it in or out and cite the evidence.
+
+  5. A reviewer flags the `createRoom` function as vulnerable to quota bypass. Rule it in or out and cite the mechanism that decides it.
+
+  6. A reviewer flags the `message-broker` as vulnerable to leaking messages to unauthorized sockets. Rule it in or out, citing the evidence.
+
+  7. Give the severity of the one real vulnerability and the minimal control that closes it.
+artifacts:
+- id: ws-server
+  type: code
+  label: ChatMesh WebSocket Server
+  content: "// chatmesh/ws-server.ts\nimport { WebSocketServer } from 'ws';\nimport\
+    \ { isUserInRoom } from './room-manager';\nimport { broadcastToRoom } from './message-broker';\n\
+    \nexport const wss = new WebSocketServer({ noServer: true });\n\nwss.on('connection',\
+    \ (ws, request, user) => {\n  // user object is attached during the HTTP upgrade\
+    \ process\n  ws.user = user;\n  ws.activeRooms = new Set();\n\n  ws.on('message',\
+    \ async (data) => {\n    const msg = JSON.parse(data);\n    \n    if (msg.type\
+    \ === 'JOIN_ROOM') {\n      ws.activeRooms.add(msg.roomId);\n      ws.send(JSON.stringify({\
+    \ type: 'JOINED', roomId: msg.roomId }));\n    }\n    \n    if (msg.type === 'SEND_MESSAGE')\
+    \ {\n      // User can only send to rooms they have joined in this session\n \
+    \     if (ws.activeRooms.has(msg.roomId)) {\n        broadcastToRoom(msg.roomId,\
+    \ { from: ws.user.id, text: msg.text });\n      }\n    }\n  });\n});"
+- id: http-upgrade
+  type: code
+  label: ChatMesh HTTP Upgrade Handler
+  content: "// chatmesh/http-upgrade.ts\nimport { verifyToken } from './auth-utils';\n\
+    import { wss } from './ws-server';\n\nexport function handleUpgrade(request, socket,\
+    \ head) {\n  const url = new URL(request.url, 'http://localhost');\n  const token\
+    \ = url.searchParams.get('token');\n  \n  const user = verifyToken(token);\n  if (!user) {\n\
+    \    socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n');\n    socket.destroy();\n\
+    \    return;\n  }\n\n  wss.handleUpgrade(request, socket, head, (ws) => {\n  \
+    \  wss.emit('connection', ws, request, user);\n  });\n}"
+- id: rest-api
+  type: code
+  label: ChatMesh REST API
+  content: "// chatmesh/rest-api.ts\nimport { isUserInRoom, saveMessage } from './room-manager';\n\
+    \nexport async function postMessage(req, res) {\n  const { roomId } = req.params;\n\
+    \  const { text } = req.body;\n  const userId = req.user.id;\n  \n  if (!isUserInRoom(userId,\
+    \ roomId)) {\n    return res.status(403).send('Forbidden: Not a member of this\
+    \ room');\n  }\n  \n  await saveMessage(roomId, userId, text);\n  return res.send('Message\
+    \ posted');\n}"
+- id: room-manager
+  type: code
+  label: ChatMesh Room Manager
+  content: "// chatmesh/room-manager.ts\nimport { db } from './db';\n\nexport function\
+    \ isUserInRoom(userId: string, roomId: string): boolean {\n  const membership\
+    \ = db.query('SELECT 1 FROM room_members WHERE user_id = ? AND room_id = ?', [userId,\
+    \ roomId]);\n  return !!membership;\n}\n\nexport function createRoom(userId: string,\
+    \ name: string) {\n  const\
+    \ count = db.query('SELECT COUNT(*) FROM rooms WHERE owner_id = ?', [userId]);\n\
+    \  if (count >= 10) throw new Error('Quota exceeded');\n  \n  return db.query('INSERT\
+    \ INTO rooms (owner_id, name) VALUES (?, ?) RETURNING id', [userId, name]);\n}"
+- id: message-broker
+  type: code
+  label: ChatMesh Message Broker
+  content: |-
+    // chatmesh/message-broker.ts
+    import { wss } from './ws-server';
+
+    export function broadcastToRoom(roomId: string, message: any) {
+      for (const client of wss.clients) {
+        if (client.activeRooms && client.activeRooms.has(roomId)) {
+          client.send(JSON.stringify({ type: 'NEW_MESSAGE', roomId, message }));
+        }
+      }
+    }
+- id: routes-config
+  type: config
+  label: ChatMesh Routes
+  content: |
+    # chatmesh/routes-config.yaml
+    http_routes:
+      - POST /api/rooms/:id/messages -> rest-api.postMessage
+      - POST /api/rooms              -> room-manager.createRoom
+    websocket_routes:
+      - /ws                          -> http-upgrade.handleUpgrade
+- id: service-note
+  type: note
+  label: ChatMesh Architecture Note
+  content: |-
+    ChatMesh Architecture Note
+
+    - WebSockets are used for real-time delivery. Clients must send a JOIN_ROOM message to start receiving broadcasts for a room.
+    - The REST API is used for fallback message posting.
+    - All HTTP routes are protected by a global authentication middleware that populates `req.user`.
+    - There are no other WebSocket handlers or message brokers.
+tags:
+- security
+- authz-boundary
+- websocket
+- idor
+- reachability

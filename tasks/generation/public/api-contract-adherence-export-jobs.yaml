@@ -1,0 +1,186 @@
+id: api-contract-adherence-export-jobs
+version: 1.0.0
+category: generation
+cluster: api-contract-adherence
+difficulty: expert
+title: Create Tenant Export Jobs With Correct Idempotency and Snapshot Semantics
+summary: >-
+  A POST endpoint must authenticate, validate, reserve a tenant-scoped idempotency key atomically,
+  freeze an export watermark, and reproduce the original response on replay. Four handlers differ
+  in scoping, transaction boundaries, or replay status; one honors the full contract.
+prompt: |
+  Use only the complete endpoint-contract, store-api, request-matrix, candidates, and manifest.
+  Reason by inspection; do not execute code. Cite artifacts. Verdicts are conforms / violates.
+
+  1. Classify candidate-a through candidate-d against A1..A8.
+  2. For each violating handler, identify the first distinguishing request sequence Q1..Q6 and
+     state both required and candidate-observable status/body or side effect.
+  3. Identify the unique conforming handler and trace Q2 from authentication through replay.
+  4. State the idempotency identity and request fingerprint for Q3 and Q4.
+  5. Decide whether signing a queue payload before commit is permitted, distinguishing a pure
+     calculation from an external enqueue.
+  6. Evaluate reviewer Niko's claim that every successful replay should return 201.
+artifacts:
+  - id: endpoint-contract
+    type: spec
+    label: Complete POST /v1/exports contract
+    content: |
+      POST /v1/exports creates an asynchronous tenant export. The complete contract is:
+
+      A1 authenticate(request) runs before body parsing or store access. Failure returns 401.
+      A2 Body must be exactly { format: 'jsonl'|'csv', includeDeleted: boolean }. Unknown fields,
+         missing fields, or other values return 400 with { code:'invalid_request' } and no writes.
+      A3 Header Idempotency-Key is required, visible ASCII 1..80 chars. Missing/invalid returns 400.
+      A4 Idempotency identity is (authenticated tenantId, route id 'create-export', key). The request
+         fingerprint is canonical JSON of format and includeDeleted; actor id is not part of either.
+      A5 reserveExport executes atomically. On first use it stores one job with the transaction's
+         current tenant watermark and returns created. Same identity+fingerprint returns replay
+         with the exact stored response. Same identity+different fingerprint returns conflict.
+      A6 created maps to HTTP 201. replay maps to HTTP 200 with the exact original body plus header
+         Idempotent-Replayed:true. conflict maps to 409 { code:'idempotency_conflict' }.
+      A7 Only after a created reservation commits, enqueue({tenantId,jobId,watermark}) is called
+         exactly once. Replays/conflicts/invalid requests never enqueue. If enqueue fails, return
+         503 {code:'queue_unavailable'}; the reservation remains, so retry is replay 200 and does
+         not enqueue again. A repair worker owns redelivery.
+      A8 Response body is exactly { id, state:'queued', format, includeDeleted, watermark }. The
+         watermark is the one atomically stored by reserveExport, never read separately.
+  - id: store-api
+    type: spec
+    label: Exhaustive store and queue API semantics
+    content: |
+      authenticate(req): Promise<{tenantId:string, actorId:string}> throws Unauthorized.
+      parseExact(body): ExportRequest throws ValidationError and enforces A2.
+      validKey(value): boolean enforces A3.
+
+      store.reserveExport({
+        tenantId, route, key, fingerprint, format, includeDeleted
+      }): Promise<
+        | {kind:'created', response:ExportResponse}
+        | {kind:'replay', response:ExportResponse}
+        | {kind:'conflict'}
+      >
+
+      reserveExport is one serializable database transaction. For created it reads the tenant's
+      current committed watermark inside that transaction, inserts one job and idempotency row,
+      commits, then resolves. Concurrent calls on one identity serialize. replay returns the exact
+      stored response object. No other store method is needed.
+
+      store.getWatermark(tenantId) reads the current value outside reserveExport and may race.
+      enqueue(message) is the only external side effect. canonicalFingerprint(req) returns canonical
+      JSON with keys format then includeDeleted. send(status, body, headers?) sends exactly once.
+      All candidate catches map Unauthorized to 401 and ValidationError to 400 identically; those
+      catch blocks are omitted. No hidden middleware changes statuses.
+  - id: request-matrix
+    type: table
+    label: Authoritative request sequences
+    content: |
+      Q1 tenant T1, key K, body {jsonl,false}, watermark 40:
+         first call -> 201 body job J1 watermark 40; enqueue(T1,J1,40) once.
+      Q2 repeat Q1 after watermark advances to 44:
+         -> 200 exact J1 body with watermark 40 and Idempotent-Replayed:true; no enqueue.
+      Q3 tenant T1, key K, body {csv,false} after Q1:
+         -> 409 idempotency_conflict; no enqueue.
+      Q4 tenant T2, key K, body {csv,false}:
+         identity differs by tenant, so -> 201 new job J2; enqueue T2 once.
+      Q5 two concurrent T3/key Z/{jsonl,true} requests:
+         one 201, one 200 replay; one job and one enqueue total.
+      Q6 first T4/key P reservation commits but enqueue fails:
+         first -> 503 and reservation remains. Retry -> 200 stored body, replay header, no enqueue.
+  - id: candidates
+    type: code
+    label: Four complete endpoint handlers
+    content: |
+      async function candidateA(req) {
+        const auth = await authenticate(req);
+        const body = parseExact(req.body);
+        const key = req.headers['idempotency-key'];
+        if (!validKey(key)) return send(400, { code: 'invalid_request' });
+        const result = await store.reserveExport({
+          tenantId: auth.tenantId, route: 'create-export', key,
+          fingerprint: canonicalFingerprint(body),
+          format: body.format, includeDeleted: body.includeDeleted,
+        });
+        if (result.kind === 'conflict')
+          return send(409, { code: 'idempotency_conflict' });
+        if (result.kind === 'replay')
+          return send(200, result.response, { 'Idempotent-Replayed': 'true' });
+        try {
+          await enqueue({
+            tenantId: auth.tenantId, jobId: result.response.id,
+            watermark: result.response.watermark,
+          });
+        } catch {
+          return send(503, { code: 'queue_unavailable' });
+        }
+        return send(201, result.response);
+      }
+
+      async function candidateB(req) {
+        const auth = await authenticate(req);
+        const body = parseExact(req.body);
+        const key = req.headers['idempotency-key'];
+        if (!validKey(key)) return send(400, { code: 'invalid_request' });
+        const result = await store.reserveExport({
+          tenantId: auth.tenantId, route: 'create-export', key,
+          fingerprint: canonicalFingerprint(body),
+          format: body.format, includeDeleted: body.includeDeleted,
+        });
+        if (result.kind === 'conflict')
+          return send(409, { code: 'idempotency_conflict' });
+        if (result.kind === 'replay') return send(201, result.response);
+        await enqueue({ tenantId: auth.tenantId, jobId: result.response.id,
+          watermark: result.response.watermark });
+        return send(201, result.response);
+      }
+
+      async function candidateC(req) {
+        const auth = await authenticate(req);
+        const body = parseExact(req.body);
+        const key = req.headers['idempotency-key'];
+        if (!validKey(key)) return send(400, { code: 'invalid_request' });
+        const result = await store.reserveExport({
+          tenantId: 'global', route: 'create-export', key,
+          fingerprint: canonicalFingerprint(body),
+          format: body.format, includeDeleted: body.includeDeleted,
+        });
+        if (result.kind === 'conflict')
+          return send(409, { code: 'idempotency_conflict' });
+        if (result.kind === 'replay')
+          return send(200, result.response, { 'Idempotent-Replayed': 'true' });
+        await enqueue({ tenantId: auth.tenantId, jobId: result.response.id,
+          watermark: result.response.watermark });
+        return send(201, result.response);
+      }
+
+      async function candidateD(req) {
+        const auth = await authenticate(req);
+        const body = parseExact(req.body);
+        const key = req.headers['idempotency-key'];
+        if (!validKey(key)) return send(400, { code: 'invalid_request' });
+        const watermark = await store.getWatermark(auth.tenantId);
+        const result = await store.reserveExport({
+          tenantId: auth.tenantId, route: 'create-export', key,
+          fingerprint: canonicalFingerprint(body),
+          format: body.format, includeDeleted: body.includeDeleted,
+        });
+        if (result.kind === 'conflict')
+          return send(409, { code: 'idempotency_conflict' });
+        if (result.kind === 'replay')
+          return send(200, { ...result.response, watermark },
+            { 'Idempotent-Replayed': 'true' });
+        await enqueue({ tenantId: auth.tenantId, jobId: result.response.id, watermark });
+        return send(201, { ...result.response, watermark });
+      }
+  - id: candidate-manifest
+    type: note
+    label: Complete submission inventory and review notes
+    content: |
+      candidate-a through candidate-d are the only handlers. Omitted catches have the identical
+      behavior declared in store-api. No proxy rewrites responses.
+
+      Niko argues any response representing an existing successful creation should be 201, including
+      a replay. API review records that A6 intentionally distinguishes a new creation from replay.
+
+      Queue payload construction is pure and may occur before commit, but enqueue itself may only
+      occur after reserveExport resolves created. Every shown enqueue is after resolution.
+tags: [generation, api-contract-adherence, idempotency, transactions, multi-tenant]

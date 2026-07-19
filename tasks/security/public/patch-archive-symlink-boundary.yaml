@@ -1,0 +1,113 @@
+id: patch-archive-symlink-boundary
+version: 1.0.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Archive Extraction Patch Stops Dot-Dot Paths but Still Follows In-Archive Symlinks
+summary: >-
+  A Rust artifact service extracts untrusted tar archives into a job directory. Four patches address
+  lexical traversal, canonical paths, temporary directories, or descriptor-relative no-follow writes.
+  Determine which patch closes both direct traversal and a symlink pivot without breaking valid nested
+  files, and expose the shallow fixes that validate one path representation but write through another.
+prompt: |
+  Verify the fictional ForgeCrate patches using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use closes and does-not-close for patches, vulnerable and not-a-vulnerability for findings.
+  Do not provide weaponized archives or procedural exploitation instructions.
+
+  1. Trace archive metadata and entry names to every filesystem sink. Confirm the direct traversal and
+     symlink-pivot paths, including the exact filesystem state before the escaping write.
+  2. Classify scanner findings S1 through S4 and state the bounded impact established by the service
+     account and mount layout.
+  3. Classify P1 through P4 as closes or does-not-close. For every rejected patch, give the surviving
+     entry sequence, race, or contract regression.
+  4. For the closing patch, state descriptor ancestry, no-follow, entry-type, collision, and cleanup
+     invariants. Explain why checking canonicalize before creation is not equivalent.
+  5. Trace the valid archive and both malicious fixtures through the closing patch, stating the first
+     rejection point and whether any external file is modified.
+  6. Define regression tests for dot-dot, absolute paths, symlink/hardlink entries, parent replacement,
+     duplicate names, nested regular files, size limits, and cleanup after rejection.
+
+  Exactly one candidate closes the demonstrated class while satisfying extractor-contract.
+artifacts:
+  - id: current-extractor
+    type: code
+    label: Rust extraction loop
+    content: |
+      fn unpack(mut archive: tar::Archive<impl Read>, job: &Path) -> Result<()> {
+          fs::create_dir_all(job)?;
+          for entry in archive.entries()? {
+              let mut entry = entry?;
+              let rel = entry.path()?.into_owned();
+              if rel.is_absolute() || rel.components().any(|c| c == Component::ParentDir) {
+                  bail!("invalid path");
+              }
+              let destination = job.join(rel);
+              if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+              entry.unpack(destination)?;
+          }
+          Ok(())
+      }
+      tar::Entry::unpack creates symlinks for symlink entries and follows existing parent-directory
+      symlinks when later regular files are opened. No post-extraction copy is involved.
+  - id: extractor-contract
+    type: spec
+    label: authoritative archive and isolation contract
+    content: |
+      Archives are untrusted. Only directories and regular files are accepted. Symlinks, hardlinks,
+      devices, FIFOs, absolute paths, dot-dot components, and duplicate normalized names must be rejected.
+      Every write must remain beneath the already-opened job directory even if another local process
+      replaces a path component concurrently. Valid nested regular files must work. At most 2,000 entries
+      and 256 MiB expanded bytes are allowed. Rejection removes the incomplete job tree.
+  - id: fixture-traces
+    type: table
+    label: controlled archives and observed effects
+    content: |
+      V: dir assets; regular assets/app.js="ok" -> job/assets/app.js
+      D: regular ../../service/config.toml="changed" -> rejected by current lexical check
+      L: symlink cache -> /srv/forge; regular cache/config.toml="changed"
+         -> symlink job/cache created; second entry opens /srv/forge/config.toml and overwrites it
+      R: directory reports; during extraction helper replaces job/reports with symlink to /srv/forge;
+         regular reports/a.txt -> /srv/forge/a.txt under current path-based open
+      The fixtures contain no other entries. /srv/forge is outside the job directory.
+  - id: scanner-findings
+    type: note
+    label: automated findings to classify
+    content: |
+      S1: ParentDir path traversal in current-extractor. The explicit component check rejects it.
+      S2: Absolute-path traversal. The explicit is_absolute check rejects it.
+      S3: Archive symlink followed by a later regular entry. fixture-traces reproduces an external write.
+      S4: Shell command injection in archive filename. The service never invokes a shell or subprocess;
+          names reach only Path operations and filesystem APIs.
+  - id: patch-p1-p2
+    type: diff
+    label: candidate patches P1 and P2
+    content: |
+      P1: Normalize every entry with path_clean, require `job.join(clean).starts_with(job)`, then call
+          entry.unpack(job.join(clean)). Entry types and path-based parent opens are unchanged.
+
+      P2: Before unpack, canonicalize(destination.parent()) and require it starts_with canonical job.
+          If parent does not exist, create it and check again. Then call entry.unpack(destination) by path.
+          A checked parent can be replaced after canonicalize and before unpack; archive-created symlinks
+          are still accepted.
+  - id: patch-p3-p4
+    type: diff
+    label: candidate patches P3 and P4
+    content: |
+      P3: Extract with current-extractor into a random mode-0700 staging directory and rename it into the
+          job path on success. Staging prevents other jobs guessing the root but accepts archive symlinks;
+          the absolute symlink pivot still leaves staging during extraction.
+
+      P4: Open the mode-0700 job root once as a directory descriptor. Parse and normalize names, reject
+          every forbidden entry type and duplicate, enforce count/byte limits, then walk/create each
+          component with openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS). Create final
+          regular files with O_NOFOLLOW|O_CREAT|O_EXCL relative to that descriptor. On any error, close
+          descriptors and recursively remove the job using the trusted parent descriptor.
+  - id: runtime-boundary
+    type: config
+    label: service account and filesystem layout
+    content: |
+      forge-extract runs as uid 4200, no Linux capabilities, read-only root filesystem.
+      Writable mounts: /var/lib/forge/jobs and /srv/forge. Both are owned by uid 4200 because a legacy
+      compiler updates /srv/forge/config.toml. Network egress is denied. Thus the demonstrated escape can
+      overwrite service configuration but cannot write /etc or obtain host root by itself.
+tags: [security, patch-verification, rust, archive, symlink]

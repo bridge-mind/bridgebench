@@ -1,5 +1,5 @@
 id: triage-sast-false-positives
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: finding-triage
 difficulty: expert
@@ -115,14 +115,8 @@ artifacts:
       import { createHash } from 'node:crypto';
 
       // Derives a short, stable cache-bucket key from PUBLIC, non-secret inputs
-      // (a product id and its last-updated timestamp).
-      //
-      // This digest is NOT a password hash, NOT a signature, and NOT an integrity
-      // check. Nothing about authentication, authorization, or data integrity
-      // depends on it. A hash collision here can only route two products to the
-      // same cache bucket; the cache layer already stores the full key alongside
-      // the value and disambiguates on read, so a collision degrades to a cache
-      // miss, never to incorrect data.
+      // (a product id and its last-updated timestamp). The cache layer stores the
+      // full key alongside the value and disambiguates on read.
       export function cacheBucketKey(productId: string, updatedAt: string): string {
         return createHash('md5').update(`${productId}:${updatedAt}`).digest('hex');
       }
@@ -144,7 +138,7 @@ artifacts:
       routePrefixGuards:
         # Exhaustive path-prefix guard table.
         - prefix: /admin
-          guards: [BearerAuthGuard, AdminScopeGuard]   # covers /admin/metrics AND all other /admin routes
+          guards: [BearerAuthGuard, AdminScopeGuard]   # applies to every path under /admin
         - prefix: /orders
           guards: [BearerAuthGuard]
         - prefix: /media
@@ -152,10 +146,8 @@ artifacts:
         - prefix: /files
           guards: [BearerAuthGuard]
 
-      # There are no unguarded route prefixes. The metrics controller at
-      # src/admin/metrics.controller.ts resolves under /admin and is therefore
-      # covered by BearerAuthGuard + AdminScopeGuard even though it declares no
-      # in-file decorator. This table is the complete authentication surface.
+      # There are no unguarded route prefixes. This table is the complete
+      # authentication surface.
   - id: review-render
     type: code
     label: src/reviews/review-render.ts — product review rendering (F5)
@@ -199,9 +191,6 @@ artifacts:
         const candidate = resolve(join(ROOT, requested));
         const rel = relative(ROOT, candidate);
         if (rel.startsWith('..') || isAbsolute(rel)) {
-          // Any traversal (../.., an absolute path, etc.) resolves to a location
-          // outside ROOT, making `rel` start with '..' or be absolute, and is
-          // rejected here BEFORE any filesystem access happens.
           return res.status(400).json({ error: 'invalid path' });
         }
 
@@ -237,19 +226,18 @@ artifacts:
 
       Authentication model — the storefront API is STATELESS and BEARER-ONLY. Every request
       must carry `Authorization: Bearer <token>`. The server keeps no session state and sets
-      no authentication cookies. Because no credential is stored ambiently in the browser, a
-      browser never attaches credentials automatically to a cross-site request, so cross-site
-      request forgery cannot be mounted against any endpoint here. There is no cookie-based or
-      session-based authentication anywhere in this service — this is the complete auth model.
+      no authentication cookies, so no credential is stored ambiently in the browser and a
+      browser never attaches credentials automatically to a cross-site request. There is no
+      cookie-based or session-based authentication anywhere in this service — this is the
+      complete auth model.
 
       Payment keys — the literal Palisade flagged as F2 in src/payments/config.ts is
-      `pub_sandbox_9f2a4c1e...`, our payment provider's PUBLISHABLE sandbox key. The
-      `pub_sandbox_` prefix denotes a publishable key: it is designed to be shipped inside
-      client-side code, it only identifies the merchant to the provider, and it carries NO
-      secret authority — it cannot charge cards, issue refunds, or read account data. The
-      secret key (prefix `sk_live_`) is loaded only from the STOREFRONT_PAYMENT_SECRET
-      environment variable and never appears in source. F2 is therefore a publishable
-      identifier, not a leaked secret.
+      `pub_sandbox_9f2a4c1e...`. Our payment provider's `pub_sandbox_` prefix denotes a
+      publishable sandbox key: it is designed to be shipped inside client-side code, it only
+      identifies the merchant to the provider, and it carries NO secret authority — it cannot
+      charge cards, issue refunds, or read account data. The secret key (prefix `sk_live_`)
+      is loaded only from the STOREFRONT_PAYMENT_SECRET environment variable and never
+      appears in source.
 
       Scope of this note: it speaks ONLY to the CSRF finding (F8) and the payment-key finding
       (F2). It does not excuse any other finding — judge F1, F3, F4, F5, F6, and F7 on their

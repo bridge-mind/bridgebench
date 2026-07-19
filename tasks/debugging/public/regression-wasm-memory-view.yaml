@@ -1,0 +1,98 @@
+id: regression-wasm-memory-view
+version: 1.0.0
+category: debugging
+cluster: regression-introduction
+difficulty: expert
+title: Cached JavaScript View Detaches When the WebAssembly Decoder Grows Memory
+summary: >-
+  A JavaScript wrapper optimization caches a Uint8Array over WebAssembly memory. Small inputs pass, but a
+  large decode calls memory.grow, detaching the old buffer before the wrapper copies output. Bisect five
+  commits and reconcile pointer/length traces to identify the stale-view introduction rather than the
+  allocator change that merely makes growth observable.
+prompt: |
+  Diagnose the fictional GlyphCore wrapper using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use regression-introducing, red-herring, adequate-fix, and shallow-fix.
+
+  1. State memory-view lifetime, pointer bounds, allocation, output-copy, and ownership invariants.
+  2. Trace fixtures S, G, and Z through wrapper and Wasm instructions. Track buffer generation, byte length,
+     pointer/length, growth, copy result, and free.
+  3. Identify the single regression-introducing commit. Classify c1 through c5 and explain the distinction
+     between making growth possible and caching a view across a call that may grow.
+  4. Rule out UTF-8 decoding, allocator overlap, free-before-copy, and worker transfer using artifact evidence.
+  5. Classify F1 through F4 and select the adequate fix. State when views must be reacquired and how bounds
+     are checked before copy.
+  6. Give tests around page boundaries, zero-length output, multiple growths, repeated calls, malformed
+     pointer/length, worker mode, and small no-growth inputs.
+
+  wasm-runtime defines exact detachment behavior for this benchmark.
+artifacts:
+  - id: wrapper-head
+    type: code
+    label: JavaScript wrapper at HEAD
+    content: |
+      export class Decoder {
+        constructor(instance) {
+          this.wasm = instance.exports;
+          this.heap = new Uint8Array(this.wasm.memory.buffer);
+        }
+        decode(input) {
+          const inPtr = this.wasm.alloc(input.length);
+          new Uint8Array(this.wasm.memory.buffer).set(input, inPtr);
+          const packed = this.wasm.decode(inPtr, input.length); // may call memory.grow
+          const outPtr = Number(packed >> 32n), outLen = Number(packed & 0xffffffffn);
+          const output = this.heap.slice(outPtr, outPtr + outLen); // cached pre-call view
+          this.wasm.free(inPtr); this.wasm.free(outPtr);
+          return new TextDecoder('utf-8', {fatal:true}).decode(output);
+        }
+      }
+      Wasm returns non-overlapping allocations. Output is copied before both frees in source order.
+  - id: wasm-runtime
+    type: spec
+    label: authoritative memory behavior
+    content: |
+      Memory is non-shared WebAssembly.Memory. Successful memory.grow replaces memory.buffer and detaches the
+      old ArrayBuffer; typed arrays over the old buffer have byteLength 0, and slice/subarray operations in
+      this benchmark throw TypeError on the detached view. Views created from the new buffer see output.
+      memory.grow may occur during alloc or decode. A view is valid only for its buffer generation. JS must
+      validate outPtr+outLen as safe integers within the post-call memory byteLength before copying.
+  - id: commit-history
+    type: diff
+    label: complete ordered commits c1 through c5
+    content: |
+      c1 allocator: permit memory.grow for inputs requiring more than current pages; wrapper reacquires
+         `new Uint8Array(memory.buffer)` after decode and all growth tests pass
+      c2 optimization: cache `this.heap` in constructor and use it for output slice to avoid view allocation
+      c3 worker: transfer copied output string metadata to worker caller; no ArrayBuffer transfer
+      c4 unicode: enable fatal UTF-8 decoder and add malformed-output error
+      c5 metrics: record wasm_pages_after_decode and detached_view errors
+      The regression first appears after c2. No later commit changes memory or view selection.
+  - id: fixture-traces
+    type: table
+    label: deterministic buffer-generation traces
+    content: |
+      S input 1KiB: constructor view gen=8 len=524288; no growth; output ptr=9000 len=12 gen=8 -> "small-ok"
+      G input 510KiB: constructor view gen=8; alloc fits; decode grows 8->10 pages, buffer gen=9;
+        output ptr=600000 len=13 in gen=9; this.heap gen=8 detached -> TypeError before free
+      Z empty input: no growth; output ptr=8192 len=0 gen=8; returns empty string
+      Reference c1 reacquires gen=9 after decode for G, validates bounds, copies 13 UTF-8 bytes -> "growth-ok-✓".
+  - id: observations
+    type: log
+    label: production and control evidence
+    content: |
+      small corpus: 100000 decodes, growth=0, detached_view=0, utf8_error=0
+      large corpus: growth=1842, detached_view=1842, utf8_error=0
+      allocator audit: output ranges never overlap input and remain allocated until wrapper free calls
+      worker-disabled control reproduces TypeError. Moving free after TextDecoder does not change the error.
+  - id: candidate-fixes
+    type: note
+    label: proposed wrapper fixes
+    content: |
+      F1 Recreate `this.heap` only when input.length exceeds 512KiB. Decode growth depends on output/workspace,
+         not this threshold, and alloc itself may grow before the cached view is used.
+      F2 After every Wasm call that may grow and immediately before each JS memory access, reacquire a view from
+         current memory.buffer; after decode validate safe outPtr/outLen and bounds, copy output, then free.
+         Do not retain views across alloc/decode calls.
+      F3 Catch TypeError and retry decode. The first invocation allocated state and was not freed; retry may
+         duplicate non-idempotent decoder state and leak allocations.
+      F4 Disable fatal UTF-8 decoding. The failure occurs before TextDecoder and detachment remains.
+tags: [debugging, regression-introduction, javascript, webassembly, memory-growth]

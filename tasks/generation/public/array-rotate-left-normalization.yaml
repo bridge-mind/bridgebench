@@ -1,10 +1,10 @@
 id: array-rotate-left-normalization
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: algorithmic-correctness
 difficulty: expert
 title: Which rotateLeft Candidate Normalizes Shift and Preserves the Input on Every Case
-summary: A spec defines rotateLeft(a, k) — rotate an array left by k, where k may be zero, negative (rotate right), or larger than the length, and the input must not be mutated. A complete acceptance vector gives exact expected arrays. Five candidates are submitted; some normalize the shift correctly, some fail on k>=length, some rotate the wrong direction, and one produces correct values but mutates the caller's array. Classify each conforms/violates and cite the disproving case.
+summary: A spec defines rotateLeft(a, k) — rotate an array left by k, where k may be zero, negative (rotate right), or larger than the length, and the input must not be mutated. A complete acceptance vector gives exact expected arrays. Five candidates are submitted. Classify each as conforms or violates and cite the disproving case for each violator.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (spec, acceptance-vector,
   candidate-a, candidate-b, candidate-c, candidate-d, candidate-e, judging-notes). Cite
@@ -100,7 +100,7 @@ artifacts:
       function rotateLeft(a, k) {
         const n = a.length;
         if (n === 0) return [];
-        return a.slice(k).concat(a.slice(0, k));   // no modular normalization of k
+        return a.slice(k).concat(a.slice(0, k));
       }
   - id: candidate-c
     type: code
@@ -122,7 +122,7 @@ artifacts:
         const n = a.length;
         if (n === 0) return [];
         const s = ((k % n) + n) % n;
-        for (let i = 0; i < s; i++) a.push(a.shift());   // operates on a
+        for (let i = 0; i < s; i++) a.push(a.shift());
         return a;
       }
   - id: candidate-e

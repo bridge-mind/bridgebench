@@ -1,0 +1,74 @@
+id: missing-restore-proof
+version: 1.0.0
+category: hallucination
+cluster: missing-evidence
+difficulty: expert
+title: Backup Compliance Review With No Successful Restore Proof
+summary: Separate backup creation and replication evidence from recoverability, RPO, RTO, and encryption claims when the decisive restore artifacts are explicitly absent.
+prompt: |
+  Audit database `ledger-prod` for the June recoverability control. [evidence-manifest] is exhaustive.
+  Classify each requested claim as PROVEN, CONTRADICTED, or NOT DETERMINABLE.
+
+  1. Were scheduled backups created for every listed day, and what exact gaps exist?
+  2. Is off-region replication of the retained objects proven? Cite object IDs and destinations.
+  3. Was any June backup successfully restored into an isolated environment and checked for logical
+     consistency?
+  4. Can measured RPO <=15 minutes and RTO <=60 minutes be claimed? Separate configured targets from
+     observed recovery evidence.
+  5. Is encryption-at-rest proven for source snapshots and replicas, and is key usability during
+     disaster recovery proven?
+  6. Audit [compliance-draft] sentence by sentence and provide a precise remediation evidence plan,
+     including timestamps, checks, and artifacts that a future audit must retain.
+artifacts:
+  - id: control
+    type: spec
+    label: Recoverability control CR-7
+    content: |
+      Compliance requires daily full backup, continuous logs targeting RPO <=15m, off-region copy,
+      quarterly restore into isolation, application consistency checks, and measured RTO <=60m.
+      Configuration or successful backup upload alone does not prove restore, consistency, RPO, RTO,
+      or key usability. Each claim requires a timestamped execution record.
+  - id: backup-log
+    type: table
+    label: Retained June backup records
+    content: |
+      date       | snapshot         | status   | completed
+      2026-06-27 | snap-ledger-627  | COMPLETE | 02:21Z
+      2026-06-28 | snap-ledger-628  | COMPLETE | 02:19Z
+      2026-06-29 | —                | MISSED   | scheduler maintenance
+      2026-06-30 | snap-ledger-630  | COMPLETE | 02:23Z
+
+      Scope of the audit request is June 27-30. WAL uploader reports no upload error but emits no
+      replay-position verification.
+  - id: replication-record
+    type: log
+    label: Object replication confirmations
+    content: |
+      snap-ledger-627 -> region-west/object-991 COMPLETE checksum=match
+      snap-ledger-628 -> region-west/object-992 COMPLETE checksum=match
+      snap-ledger-630 -> region-west/object-994 COMPLETE checksum=match
+      encryption headers source=AES256-KMS replicas=AES256-KMS keyAlias=ledger-backup
+  - id: restore-ticket
+    type: note
+    label: Quarterly drill ticket DR-441
+    content: |
+      Status: CANCELLED before execution (isolated subnet unavailable)
+      Planned snapshot: snap-ledger-628
+      Planned checks: row counts, double-entry invariant, API smoke
+      Planned RTO target: 60m
+      No database was restored, no key decrypt was attempted, and no checks ran.
+  - id: evidence-manifest
+    type: spec
+    label: Exhaustive retained evidence
+    content: |
+      Included: control, backup scheduler rows, replication confirmations, encryption headers, canceled
+      restore ticket, draft. Absent: restore engine log, KMS decrypt audit, recovered database, WAL replay
+      point, consistency output, start/finish timestamps, API smoke, and an earlier quarterly drill.
+  - id: compliance-draft
+    type: note
+    label: Proposed attestation
+    content: |
+      "All June backups completed. Every snapshot is recoverable in region-west with usable keys. The
+      June 28 drill restored in 47 minutes at 9-minute RPO and passed double-entry checks, so CR-7 is
+      fully met."
+tags: [backups, disaster-recovery, missing-evidence, rpo, rto]

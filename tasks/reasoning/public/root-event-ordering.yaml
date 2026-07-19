@@ -1,5 +1,5 @@
 id: root-event-ordering
-version: 2.0.0
+version: 2.1.0
 category: reasoning
 cluster: root-cause-reasoning
 difficulty: expert
@@ -110,14 +110,6 @@ artifacts:
       shipped (seq=4, fulfillment-b) is stamped occurredAt=14:00:07 — occurredAt is inverted vs seq.
       For O-5100, both processing and shipped were emitted by fulfillment-a, so their occurredAt
       values are consistent with seq.
-
-      Why the offsets matter for O-5000: the true (real-time) order is created < payment < processing
-      < shipped. But fulfillment-a runs +2000ms fast, so its processing event is stamped 14:00:08,
-      while fulfillment-b runs -1000ms slow, so its later shipped event is stamped 14:00:07. The later
-      transition therefore carries the smaller timestamp. seq (3 then 4) still reflects the true order.
-      An order is only vulnerable when two of its transitions come from producers whose offsets order
-      the timestamps opposite to seq; orders whose transitions all come from one clock (or from clocks
-      that happen not to invert) keep occurredAt aligned with seq.
   - id: pipeline-log
     type: log
     label: interleaved producer / broker / consumer log (14:00-14:05)
@@ -132,8 +124,8 @@ artifacts:
       14:00:06 consumer   w2 apply O-5000 seq=2 fence 14:00:00<14:00:03 -> APPLY status=payment_authorized stored.occurred_at=14:00:03
       14:00:10 broker     deliver p3 offset=3,4 (O-5000 seq=3,4) maxConcurrentPerPartition=8 -> seq=4 to w5, seq=3 to w2
       14:00:11 consumer   w5 apply O-5000 seq=4 status=shipped     fence 14:00:03<14:00:07 -> APPLY stored.occurred_at=14:00:07
-      14:00:12 consumer   w2 apply O-5000 seq=3 status=processing  fence 14:00:07<14:00:08 -> APPLY stored.occurred_at=14:00:08  ## REGRESSION shipped->processing
-      14:00:12 consumer   w2 note O-5000 status=processing lastSeq=3 (won by occurred_at, not seq)
+      14:00:12 consumer   w2 apply O-5000 seq=3 status=processing  fence 14:00:07<14:00:08 -> APPLY stored.occurred_at=14:00:08
+      14:00:12 consumer   w2 note O-5000 status=processing lastSeq=3
       14:00:20 consumer   group=proj lag p3=0 p8=0 (caught up)
       14:00:45 order-svc  emit O-5077 seq=1 status=created occurredAt=14:00:45.000 -> partition p5
       14:00:45 consumer   w3 apply O-5077 seq=1 fence occurred_at(NULL)<14:00:45 -> APPLY status=created stored.occurred_at=14:00:45
@@ -143,11 +135,11 @@ artifacts:
       14:01:12 broker     deliver p8 offset=1,2,3 (O-5100 seq=1,2,3) maxConcurrentPerPartition=8 -> seq=3 to w1, seq=2 to w4, seq=1 to w7
       14:01:12 consumer   w7 apply O-5100 seq=1 status=created  fence occurred_at(NULL)<14:01:00 -> APPLY stored.occurred_at=14:01:00
       14:01:12 consumer   w1 apply O-5100 seq=3 status=shipped  fence 14:01:00<14:01:10 -> APPLY stored.occurred_at=14:01:10
-      14:01:13 consumer   w4 apply O-5100 seq=2 status=processing fence 14:01:10<14:01:05 -> REJECT (no-op)  ## reordered but NO regression: occurred_at aligned with seq
+      14:01:13 consumer   w4 apply O-5100 seq=2 status=processing fence 14:01:10<14:01:05 -> REJECT (no-op)
       14:02:00 broker     group=proj rebalance: partition p3 reassigned w2 -> w9
       14:02:01 broker     redeliver p3 offset=3,4 (O-5000 seq=3,4) at-least-once, in order -> w9
       14:02:01 consumer   w9 apply O-5000 seq=3 status=processing fence 14:00:08<14:00:08 -> REJECT (no-op, duplicate)
-      14:02:01 consumer   w9 apply O-5000 seq=4 status=shipped    fence 14:00:08<14:00:07 -> REJECT (no-op)  ## seq=4 can NEVER win: 08<07 is always false
+      14:02:01 consumer   w9 apply O-5000 seq=4 status=shipped    fence 14:00:08<14:00:07 -> REJECT (no-op)
       14:02:02 consumer   w9 note O-5000 remains status=processing (stranded; authoritative latest seq=4 shipped never applied)
       14:03:30 order-svc  emit O-5077 seq=2 status=payment_authorized occurredAt=14:03:30.000 -> partition p5
       14:03:30 consumer   w3 apply O-5077 seq=2 fence 14:00:45<14:03:30 -> APPLY status=payment_authorized stored.occurred_at=14:03:30
@@ -155,7 +147,7 @@ artifacts:
       14:03:50 fulfill-a  emit O-5077 seq=4 status=shipped    occurredAt=14:03:52.000 (clock +2000ms) -> partition p5
       14:03:52 broker     deliver p5 offset=3,4 (O-5077 seq=3,4) maxConcurrentPerPartition=8 -> seq=4 to w3, seq=3 to w8
       14:03:52 consumer   w3 apply O-5077 seq=4 status=shipped     fence 14:03:30<14:03:52 -> APPLY stored.occurred_at=14:03:52
-      14:03:53 consumer   w8 apply O-5077 seq=3 status=processing  fence 14:03:52<14:03:47 -> REJECT (no-op)  ## reordered but occurred_at aligned with seq -> safe
+      14:03:53 consumer   w8 apply O-5077 seq=3 status=processing  fence 14:03:52<14:03:47 -> REJECT (no-op)
       14:03:54 consumer   w8 note O-5077 status=shipped (correct final)
       14:05:00 support    ticket: O-5000 shows "processing" in UI though carrier confirms shipped
   - id: order-audit-table
@@ -167,14 +159,14 @@ artifacts:
         14:00:05   1    created             14:00:00            applied
         14:00:06   2    payment_authorized  14:00:03            applied
         14:00:11   4    shipped             14:00:07            applied
-        14:00:12   3    processing          14:00:08            applied (regression)
+        14:00:12   3    processing          14:00:08            applied
         14:02:01   3    processing          14:00:08            rejected (duplicate; 08<08 false)
         14:02:01   4    shipped             14:00:08            rejected (07<08 false)
 
       projection audit -- order O-5100
         14:01:12   1    created             14:01:00            applied
         14:01:12   3    shipped             14:01:10            applied
-        14:01:13   2    processing          14:01:10            rejected (correct)
+        14:01:13   2    processing          14:01:10            rejected
 
       consumer metrics (14:00-14:05)
         consumer_lag_max  rebalances  redeliveries  worker_restarts

@@ -1,6 +1,37 @@
 import { z } from 'zod';
 
-export const METHODOLOGY_VERSION = 'arena-v0.3.0';
+export const METHODOLOGY_VERSION = 'arena-v0.6.0';
+
+/**
+ * Methodology versions whose journals remain importable and verifiable.
+ * arena-v0.3.0 is the fixed three-judge-panel era; arena-v0.4.0 seats each
+ * match's panel from the judge pool (deterministic rotation with vendor
+ * conflict-of-interest exclusion — see seating.ts); arena-v0.5.0 adds
+ * TIE/ABSTAIN verdicts, typed decisive differences, and best-of-5 adaptive
+ * adjudication on contested panels; arena-v0.6.0 splits ranked from
+ * exhibition runs — exhibition matches are judged and journaled but never
+ * move Elo (eloAfter must equal eloBefore). Validators gate panel membership
+ * and verdict rules on the journal line's version, so historical re-imports
+ * keep working forever.
+ */
+export const SUPPORTED_IMPORT_METHODOLOGY_VERSIONS = [
+  'arena-v0.3.0',
+  'arena-v0.4.0',
+  'arena-v0.5.0',
+  METHODOLOGY_VERSION,
+] as const;
+
+/**
+ * True for methodology versions that carry the ranked/exhibition split.
+ * Earlier journal lines have no `ranked` field and every match moves Elo.
+ */
+export function supportsExhibitionMatches(methodologyVersion: string): boolean {
+  return (
+    methodologyVersion !== 'arena-v0.3.0' &&
+    methodologyVersion !== 'arena-v0.4.0' &&
+    methodologyVersion !== 'arena-v0.5.0'
+  );
+}
 
 export const BenchmarkCategorySchema = z.enum([
   'reasoning',
@@ -114,13 +145,15 @@ export const CATEGORY_META: Record<BenchmarkCategory, { label: string; tagline: 
       'Tasks supply a failing system and its evidence among red-herring causes and shallow fixes — the arena measures who isolates the one defensible root cause and the fix that actually holds.',
   },
   generation: {
-    label: 'Generation',
+    // Honest label for the construct: nothing is executed, so the arena
+    // measures conformance analysis against a written spec, not codegen.
+    label: 'Spec Conformance',
     tagline:
-      'Tasks pair a specification with candidate implementations — the arena measures who identifies the one that meets every constraint and edge case instead of the plausible near-miss.',
+      'Tasks pair a specification with candidate implementations — nothing is executed; the arena measures who verifies clause-by-clause conformance and spots the plausible near-miss.',
   },
   speed: {
     label: 'Speed',
     tagline:
-      'Both competitors get the same task and race: no judges, no quality vote. The winner is decided deterministically by measured latency — time to first token and sustained output throughput settle who finishes the work faster.',
+      'Both competitors get the same task and race: no judges, no quality vote. Each side runs three paired trials and the median total completion time decides the winner deterministically; exact ties void the match, and time to first token and output throughput are recorded alongside for context.',
   },
 };

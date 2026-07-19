@@ -1,0 +1,105 @@
+id: fix-adequacy-kafka-db-offset
+version: 1.0.0
+category: debugging
+cluster: fix-adequacy
+difficulty: expert
+title: Kafka Offset Retry Applies a Database Transfer Twice
+summary: >-
+  A consumer commits a PostgreSQL balance transfer before asynchronously committing its Kafka offset.
+  A coordinator failure replays the record and applies the transfer twice. Compare local caches,
+  reordered commits, Kafka transactions, and a database inbox/outbox design to decide which fix preserves
+  at-most-once business effect without losing a record across either system's failure boundary.
+prompt: |
+  Evaluate the fictional RiverLedger fixes using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use adequate-fix and shallow-fix.
+
+  1. State the business, database, Kafka-offset, acknowledgement, and crash-recovery invariants.
+  2. Trace schedules A through E through current-code, including database state, committed offset, broker
+     redelivery, and emitted notification count.
+  3. Identify why a transaction local to PostgreSQL cannot atomically include a Kafka offset commit, and
+     why Kafka exactly-once mode cannot roll back an external database transaction.
+  4. Classify patches P1 through P4. For each shallow fix, provide the surviving crash/interleaving or
+     durability violation from the artifacts.
+  5. For the adequate fix, trace first delivery, concurrent duplicate, crash before DB commit, crash after
+     DB commit, outbox-worker retry, and offset-commit failure. State every uniqueness key.
+  6. Give deterministic integration tests with failpoints at each schedule boundary and assertions over
+     account balances, inbox rows, outbox rows, notifications, and committed offsets.
+
+  The broker and database contracts are exhaustive. transfer_id is globally unique and immutable.
+artifacts:
+  - id: current-code
+    type: code
+    label: Kotlin Kafka record handler
+    content: |
+      suspend fun handle(record: ConsumerRecord<String, Transfer>) {
+        db.transaction {
+          accounts.debit(record.value.from, record.value.cents)
+          accounts.credit(record.value.to, record.value.cents)
+          notifications.insert(record.value.transferId, "completed")
+        }
+        consumer.commitAsync(mapOf(record.partition() to OffsetAndMetadata(record.offset() + 1))) { _, e ->
+          if (e != null) log.warn("offset commit failed", e)
+        }
+      }
+      The database has no inbox table. notifications.transfer_id is indexed but not unique. Balance updates
+      and notification insert are atomic within one local transaction.
+  - id: delivery-contract
+    type: spec
+    label: authoritative event and effect contract
+    content: |
+      Kafka provides at-least-once delivery. transfer_id is globally unique, immutable, and identifies one
+      authorized transfer. Each transfer must affect balances and create one notification at most once.
+      A consumed offset may advance only after the corresponding business effect is durable or durably known
+      as a duplicate. Crashes may occur at any boundary. Notification publication may be asynchronous but
+      accepted work must survive restart and be emitted at most once.
+  - id: failure-schedules
+    type: table
+    label: deterministic current-handler schedules
+    content: |
+      A DB commit T-1 -> commitAsync success -> offset 51; no replay
+      B DB commit T-2 -> coordinator rejects commit -> process crash -> offset remains 51 -> T-2 replayed
+      C process crash before DB commit -> transaction rollback -> offset unchanged -> replay safe
+      D DB commit T-3 -> commit callback delayed; rebalance assigns partition elsewhere -> offset unchanged
+      E two consumers receive duplicate transfer_id on different partitions -> both DB transactions commit
+      For B, replay commits a second debit, credit, and notification. Kafka key partitioning is by account,
+      so producer bugs can place the same transfer_id on different partitions as in E.
+  - id: observed-trace
+    type: log
+    label: transfer T-2 incident
+    content: |
+      partition=3 offset=51 transfer=T-2 DB COMMIT balances A:10000->7500 B:2000->4500
+      commitAsync offset=52 error=NOT_COORDINATOR; worker terminated during deploy
+      restart reads committed offset=51
+      partition=3 offset=51 transfer=T-2 DB COMMIT balances A:7500->5000 B:4500->7000
+      notifications rows for T-2=2; broker offset finally commits 52
+  - id: patch-p1-p2
+    type: diff
+    label: candidate patches P1 and P2
+    content: |
+      P1: Keep a ConcurrentHashMap of seen transfer ids and skip repeats. The cache is per replica, empty
+          after restart, and set before database durability.
+      P2: Commit the Kafka offset synchronously before opening the database transaction. A crash after the
+          offset commit but before DB commit permanently loses the business effect.
+  - id: patch-p3-p4
+    type: diff
+    label: candidate patches P3 and P4
+    content: |
+      P3: Enable Kafka idempotent producer and transactions; perform the PostgreSQL transaction inside the
+          Kafka transaction callback, then send notification and offsets to the Kafka transaction. Kafka
+          abort cannot roll back an already committed PostgreSQL transaction.
+
+      P4: In one PostgreSQL transaction, insert inbox(provider,transfer_id) with a unique key; only the winner
+          applies both balances and inserts a unique outbox(kind,transfer_id,payload). A duplicate observes
+          the durable inbox and performs no balance change. After commit, commit the consumed offset; failure
+          may replay safely. An outbox worker atomically claims rows, publishes with deterministic message id,
+          and marks sent; the notification sink deduplicates that id. Failed DB transaction creates neither
+          inbox nor effect. Unique keys span all Kafka partitions.
+  - id: database-constraints
+    type: config
+    label: capabilities available to patches
+    content: |
+      PostgreSQL supports SERIALIZABLE transactions, INSERT ON CONFLICT, unique composite indexes, and
+      FOR UPDATE SKIP LOCKED. Kafka and PostgreSQL have no distributed transaction coordinator. Notification
+      service accepts a deterministic idempotency key and retains deduplication records for seven years,
+      longer than event retention. Offset commits may fail or succeed independently after a DB commit.
+tags: [debugging, fix-adequacy, kafka, postgres, idempotency]

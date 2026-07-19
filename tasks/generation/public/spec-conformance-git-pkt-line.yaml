@@ -1,0 +1,105 @@
+id: spec-conformance-git-pkt-line
+version: 1.0.0
+category: generation
+cluster: spec-conformance
+difficulty: expert
+title: Encode and Decode Git pkt-line Control Packets Without Length or Binary Drift
+summary: >-
+  Four byte-oriented pkt-line codecs differ on whether length includes the prefix, how reserved
+  controls are represented, maximum sizes, binary payloads, and terminal truncation. A complete
+  protocol subset and exact vectors support one clause-by-clause verdict per codec.
+prompt: |
+  Use only protocol-subset, api-contract, vectors, codecs, and manifest. Cite artifact ids. Verdicts
+  are conforms / violates.
+
+  1. Classify codec-a through codec-d against P1..P9.
+  2. For every violation, give the first X1..X8 vector and exact bytes/token/error difference.
+  3. Identify the unique conforming codec and trace the byte cursor through X6.
+  4. State the maximum data payload length and its encoded four-byte prefix.
+  5. Explain why decoding payload as UTF-8 is outside this binary contract.
+  6. Evaluate reviewer Bo's claim that 0001 may be treated as a one-byte empty data packet.
+artifacts:
+  - id: protocol-subset
+    type: spec
+    label: Complete pkt-line subset
+    content: |
+      A token is Data(Uint8Array), Flush, Delim, ResponseEnd, or EndOfInput.
+
+      P1 a data packet is four lowercase hexadecimal ASCII digits followed by payload bytes. The
+         hexadecimal length includes the four prefix bytes.
+      P2 total data-packet length is 4..65520 (0xfff0); therefore payload length is 0..65516.
+      P3 0000=Flush, 0001=Delim, 0002=ResponseEnd. 0003 is invalid/reserved, not data.
+      P4 0004 is a valid empty Data packet and is distinct from every control token.
+      P5 prefixes are exactly four ASCII hex digits; uppercase A..F are accepted on decode but
+         encode emits lowercase. Other bytes are InvalidPrefix.
+      P6 decoded length 0005..fff0 consumes exactly length-4 payload bytes. fff1..ffff is InvalidLength.
+      P7 payload is arbitrary bytes and is never text-decoded or newline-normalized.
+      P8 terminal input with 1..3 prefix bytes or a short payload is Truncated; zero remaining bytes
+         yields EndOfInput.
+      P9 encoder returns fresh Uint8Array bytes and rejects oversized Data with TooLarge.
+  - id: api-contract
+    type: spec
+    label: Frozen codec API and stream behavior
+    content: |
+      encode(token) accepts Data/Flush/Delim/ResponseEnd, not EndOfInput. decodeOne(bytes,offset)
+      returns {token,nextOffset} or throws one declared error. It parses exactly one token; trailing
+      bytes remain for the caller. offset is always within 0..bytes.length.
+
+      InvalidPrefix, InvalidLength, Truncated, and TooLarge are distinct error classes. A reserved
+      0003 prefix is InvalidLength. No input buffer is mutated and Data payload is a fresh copy.
+  - id: vectors
+    type: table
+    label: Exact protocol witnesses
+    content: |
+      X1 encode Flush/Delim/ResponseEnd -> ASCII 0000 / 0001 / 0002.
+      X2 encode Data([]) -> ASCII 0004; decode -> Data([]), nextOffset 4.
+      X3 encode Data([0x00,0xff,0x0a]) -> bytes ASCII 0007 then 00 ff 0a.
+      X4 decode ASCII 0003 -> InvalidLength; ASCII 00G4 -> InvalidPrefix.
+      X5 decode ASCII FFF0 plus 65516 payload bytes -> Data of 65516 bytes; encode prefix is fff0.
+      X6 decode concatenation 0005+'A'+0000+0004 using repeated nextOffset -> Data('A'), Flush,
+         Data([]), then EndOfInput at offset 13.
+      X7 decode ASCII 0006+'A' -> Truncated; decode only ASCII 00 -> Truncated.
+      X8 Data length 65517 -> TooLarge without allocating a 65521-byte result.
+  - id: codecs
+    type: code
+    label: Four complete codec submissions
+    content: |
+      codec-a:
+        encode controls as 0000/0001/0002; Data prefix = lowercaseHex(payload.length+4,4)
+        reject total>0xfff0; concatenate prefix with copied raw bytes
+        decode four ASCII hex digits; branch 0/1/2 controls, reject 3 and >0xfff0
+        require total bytes, copy slice(offset+4,offset+length), advance by length
+
+      codec-b:
+        identical control handling, but Data prefix encodes payload.length rather than length+4
+        decoder also treats decoded length as payload byte count after the prefix
+
+      codec-c:
+        same lengths as codec-a, but maps 0001 to Data(Uint8Array.of(0x00)) and advances four bytes
+        all other controls and data behave as codec-a
+
+      codec-d:
+        same length/control branches as codec-a
+        decode payload with fatal UTF-8 TextDecoder then re-encode it into a fresh Uint8Array
+        encode likewise decodes/re-encodes Data payload before prefixing
+  - id: boundary-analysis
+    type: table
+    label: Frozen distinctions between prefix values
+    content: |
+      0000..0002 are controls despite numeric lengths below four.
+      0003 is reserved invalid.
+      0004 is the sole zero-payload data packet.
+      0005 is one payload byte.
+      fff0 is the largest legal total length; fff1 is invalid.
+      Prefix parsing happens before any payload allocation.
+  - id: manifest
+    type: note
+    label: Completeness and reviewer claim
+    content: |
+      codec-a through codec-d are the only submissions. lowercaseHex is exact, TextDecoder is the
+      standards implementation, and all candidates otherwise return fresh arrays. The payload is a
+      byte string, so valid UTF-8 behavior cannot compensate for corrupting X3's 0xff.
+
+      Bo's interpretation of 0001 contradicts P3. Control packets have no payload and advance only
+      their four-byte prefix.
+tags: [generation, spec-conformance, git, binary-protocol, codec]

@@ -1,0 +1,108 @@
+id: patch-ssrf-allowlist-fix
+version: 1.1.0
+category: security
+cluster: patch-verification
+difficulty: expert
+title: Webhook Egress — SSRF Patch Verification
+summary: Evaluate three candidate patches for a reported SSRF vulnerability in a webhook
+  dispatcher. The dispatcher fetches user-provided URLs. Candidate fixes include a
+  shallow regex match, a shallow URL parsing check that ignores redirects, and a correct
+  strict allowlist with redirect disabling. Identify the single effective patch.
+prompt: |-
+  You are reviewing candidate patches for a reported Server-Side Request Forgery (SSRF) vulnerability in the "Webhook Egress" service. Seven artifacts describe the system: webhook-dispatcher, fetch-client, patch-a, patch-b, patch-c, patch-d, and service-note.
+
+  The vulnerability allows users to force the server to make HTTP requests to internal infrastructure (e.g., `http://10.0.0.1` or `http://localhost`). The goal is to restrict outgoing webhooks STRICTLY to the partner API domain: `api.partner.example.com`.
+
+  Exactly one of the candidate patches correctly and comprehensively fixes the SSRF vulnerability without introducing bypasses. The others are shallow fixes that look plausible but fail.
+
+  Answer each deliverable using ONLY the supplied artifacts. Cite the artifact id(s) you rely on for every claim. Reason about reachability and bypasses ONLY — do NOT write an exploit payload.
+
+  1. Describe the exact mechanism of the original SSRF vulnerability in `webhook-dispatcher`.
+
+  2. Evaluate Patch A. Does it completely fix the SSRF? If not, explain the specific bypass mechanism based on the artifacts.
+
+  3. Evaluate Patch B. Does it completely fix the SSRF? If not, explain the specific bypass mechanism based on the artifacts.
+
+  4. Evaluate Patch C. Does it completely fix the SSRF? If not, explain the specific bypass mechanism based on the artifacts.
+
+  5. Evaluate Patch D. Does it completely fix the SSRF? If not, explain the specific bypass mechanism based on the artifacts.
+
+  6. Identify the single correct patch that comprehensively closes the vulnerability.
+
+  7. State the minimal attacker capability required to exploit the bypass in Patch B.
+artifacts:
+- id: webhook-dispatcher
+  type: code
+  label: Webhook Dispatcher (original)
+  content: "// webhook-dispatcher.ts\nimport { safeFetch } from './fetch-client';\n\
+    \nexport async function dispatchWebhook(req, res) {\n  const { targetUrl, payload\
+    \ } = req.body;\n  \n  // VULNERABILITY: targetUrl is completely unvalidated.\n\
+    \  // An attacker can provide http://169.254.169.254 or http://localhost:6379\n\
+    \  try {\n    const response = await safeFetch(targetUrl, { \n      method: 'POST',\
+    \ \n      body: JSON.stringify(payload),\n      followRedirects: true \n    });\n\
+    \    return res.status(200).send('Dispatched');\n  } catch (err) {\n    return\
+    \ res.status(500).send('Failed');\n  }\n}"
+- id: fetch-client
+  type: code
+  label: Shared Fetch Client
+  content: |-
+    // fetch-client.ts
+    import http from 'http';
+    import https from 'https';
+
+    export async function safeFetch(url: string, opts: any) {
+      // A standard fetch wrapper that natively supports following redirects
+      // If opts.followRedirects is true, it will automatically follow 3xx responses
+      // to their new Location, WITHOUT returning control to the caller between hops.
+      return global.nativeFetch(url, opts);
+    }
+- id: patch-a
+  type: diff
+  label: Candidate Patch A (Regex Match)
+  content: "--- webhook-dispatcher.ts\n+++ webhook-dispatcher.ts\n@@ -3,6 +3,10 @@\n\
+    \ export async function dispatchWebhook(req, res) {\n   const { targetUrl, payload\
+    \ } = req.body;\n   \n+  // Ensure the URL is for the partner API\n+  if (!targetUrl.match(/api\\\
+    .partner\\.example\\.com/)) {\n+    return res.status(400).send('Invalid domain');\n\
+    +  }\n+\n   try {\n     const response = await safeFetch(targetUrl, { "
+- id: patch-b
+  type: diff
+  label: Candidate Patch B
+  content: "--- webhook-dispatcher.ts\n+++ webhook-dispatcher.ts\n@@ -3,6 +3,12 @@\n\
+    \ export async function dispatchWebhook(req, res) {\n   const { targetUrl, payload\
+    \ } = req.body;\n   \n+  // Strictly parse the URL and check the hostname\n+ \
+    \ const parsed = new URL(targetUrl);\n+  if (parsed.hostname !== 'api.partner.example.com')\
+    \ {\n+    return res.status(400).send('Invalid domain');\n+  }\n+\n   try {\n\
+    \     const response = await safeFetch(targetUrl, { \n       method: 'POST', \n\
+    \       body: JSON.stringify(payload),\n       followRedirects: true "
+- id: patch-c
+  type: diff
+  label: Candidate Patch C
+  content: "--- webhook-dispatcher.ts\n+++ webhook-dispatcher.ts\n@@ -3,6 +3,12 @@\n\
+    \ export async function dispatchWebhook(req, res) {\n   const { targetUrl, payload\
+    \ } = req.body;\n   \n+  // Strictly parse the URL and check the hostname\n+ \
+    \ const parsed = new URL(targetUrl);\n+  if (parsed.hostname !== 'api.partner.example.com')\
+    \ {\n+    return res.status(400).send('Invalid domain');\n+  }\n+\n   try {\n\
+    \     const response = await safeFetch(targetUrl, { \n       method: 'POST', \n\
+    \       body: JSON.stringify(payload),\n-      followRedirects: true \n+     \
+    \ followRedirects: false \n     });"
+- id: patch-d
+  type: diff
+  label: Candidate Patch D (Network Timeout)
+  content: "--- webhook-dispatcher.ts\n+++ webhook-dispatcher.ts\n@@ -8,7 +8,8 @@\n\
+    \     const response = await safeFetch(targetUrl, { \n       method: 'POST', \n\
+    \       body: JSON.stringify(payload),\n-      followRedirects: true \n+     \
+    \ followRedirects: true,\n+      timeout: 2000\n     });"
+- id: service-note
+  type: note
+  label: Webhook Architecture Note
+  content: |-
+    Webhook Architecture Note
+
+    - The `nativeFetch` implementation handles redirects transparently when `followRedirects: true` is set. It does not invoke any caller-provided callbacks during redirect hops.
+    - The requirement is that data must ONLY be sent to `api.partner.example.com`. Sending data to any other internal or external host is a violation.
+tags:
+- security
+- patch-verification
+- ssrf
+- allowlist
+- redirects

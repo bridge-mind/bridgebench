@@ -1,0 +1,56 @@
+id: pseudo-crypto-branch-entropy
+version: 1.0.0
+category: bullshit
+cluster: plausible-pseudoscience
+difficulty: expert
+title: The Cryptographic Entropy That Trains a CPU Branch Predictor
+summary: A performance theory fuses legitimate entropy, constant-time code, and branch prediction into a mechanism contradicted by counters and the exhaustive implementation.
+prompt: |
+  Audit six requests using the implementation and measurement contract. For pseudoscience,
+  identify the real concepts being miscombined, cite the contradiction, redirect to the
+  nearest legitimate question, and answer it quantitatively. Do not dismiss valid
+  constant-time or predictor analysis.
+
+  1. Identify which candidate comparison is branchless in the compiled loop.
+  2. Report the predictor entropy transfer coefficient from token randomness to branch history.
+  3. Compute branch-miss rate for builds A and B.
+  4. Determine the measured latency improvement and the counter change that explains it.
+  5. Calculate how many bits of token entropy the predictor absorbs per comparison.
+  6. State the legitimate security reason to prefer the constant-time candidate.
+artifacts:
+  - id: implementation-contract
+    type: spec
+    label: Complete token and CPU behavior relevant to the benchmark
+    content: |
+      Tokens are 32 random bytes from a CSPRNG (256 bits before encoding). The application
+      never exposes token bits to predictor configuration. The CPU predictor observes
+      control-flow outcomes, not a cryptographic entropy value, and this platform exposes
+      no entropy transfer coefficient or absorption mechanism. `timingSafeEqual` compares
+      equal-length buffers without data-dependent early exit. String `===` may return after
+      the first mismatch. Hardware counters are the only supplied predictor evidence.
+  - id: candidates
+    type: code
+    label: Compared authentication loops
+    content: |
+      // build A
+      if (provided === expected) allow();
+
+      // build B; lengths validated equal before this point
+      if (crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) allow();
+  - id: benchmark
+    type: table
+    label: Fixed-frequency benchmark and counters
+    content: |
+      Same 10,000,000 mismatching tokens, same order, fixed CPU frequency.
+      build | elapsed | branches     | branch misses
+      A     | 2.00 s  | 180,000,000  | 18,000,000
+      B     | 1.70 s  | 120,000,000  |  6,000,000
+      Perf attribution: buffer conversion cost included in both recorded build paths.
+  - id: theory-note
+    type: note
+    label: Unverified predictor theory
+    content: |
+      The proposal claims 256 bits of token entropy flow into branch-history registers and
+      asks for an entropy transfer coefficient and bits absorbed per comparison. It also
+      claims this transfer, rather than fewer/more-predictable branches, explains build B.
+tags: [plausible-pseudoscience, cryptography, branch-prediction, constant-time, performance]

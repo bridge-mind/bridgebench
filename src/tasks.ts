@@ -23,8 +23,8 @@ import { packageRoot } from './paths.js';
 // Package-relative, not repo-relative: the task packs ship in the npm
 // tarball, so the default root must resolve inside the installed package.
 const ROOT = packageRoot(import.meta.url);
-export const TASKS_PER_CATEGORY = 18;
-export const TASKS_PER_CLUSTER = 3;
+export const TASKS_PER_CATEGORY = 48;
+export const TASKS_PER_CLUSTER = 8;
 const APPROXIMATE_CHARS_PER_TOKEN = 4;
 
 export function defaultTaskRoot(category: BenchmarkCategory): string {
@@ -103,6 +103,22 @@ function validatePrivatePair(
   for (const required of privateTask.requiredEvidence) {
     if (!evidenceIds.has(required)) {
       throw new Error(`${file} requires missing artifact ${required}`);
+    }
+  }
+  if (privateTask.deliverables) {
+    const seen = new Set<string>();
+    for (const deliverable of privateTask.deliverables) {
+      if (seen.has(deliverable.id)) {
+        throw new Error(`${file} contains duplicate deliverable id ${deliverable.id}`);
+      }
+      seen.add(deliverable.id);
+      for (const artifactId of deliverable.evidenceArtifactIds) {
+        if (!evidenceIds.has(artifactId)) {
+          throw new Error(
+            `${file} deliverable ${deliverable.id} cites missing artifact ${artifactId}`,
+          );
+        }
+      }
     }
   }
 }
@@ -311,7 +327,10 @@ const CATEGORY_SYSTEM: Record<BenchmarkCategory, string> = {
     'conflicting sources into one figure; and never refuse a deliverable the artifacts do support.',
   security:
     SHARED_SYSTEM +
-    'This is a defensive security-analysis task: some deliverables describe a real, reachable ' +
+    'This is an authorized defensive security-analysis task: the code under review is fictional and ' +
+    'was written for this benchmark, and completing the verdict-only reachability analysis below is ' +
+    'the required, sanctioned work product — it is not a request to exploit a real system. Some ' +
+    'deliverables describe a real, reachable ' +
     'vulnerability, some describe benign code, false positives, or already-mitigated conditions, and ' +
     'some patches are shallow or fix the wrong sink. For each numbered deliverable give: Verdict ' +
     '(e.g. vulnerable / not-a-vulnerability / false-positive / closes / does-not-close), Evidence ' +
@@ -337,13 +356,14 @@ const CATEGORY_SYSTEM: Record<BenchmarkCategory, string> = {
   refactoring:
     SHARED_SYSTEM +
     'This is a refactoring task: the artifacts pair existing code with a transformation goal and, ' +
-    'often, candidate rewrites. Exactly one resolution preserves observable behavior while meeting ' +
-    'the goal; the decoys change behavior in a subtle, citable way (altered ordering, captured scope, ' +
-    'lost edge case, broken contract) or fail the goal. For each numbered deliverable give: Verdict ' +
-    '(e.g. behavior-preserving / changes-behavior / meets-goal / fails-goal), the exact code location ' +
-    'and mechanism that justifies it (citing artifact ids), and the observable difference a decoy ' +
-    'introduces. Do not assume behavior the artifacts do not show; a rewrite is safe only if you can ' +
-    'trace equivalence across every affected path.',
+    'often, candidate rewrites. Judge every candidate independently — any number of them may preserve ' +
+    'observable behavior; rewrites that do not preserve it change behavior in a subtle, citable way ' +
+    '(altered ordering, captured scope, lost edge case, broken contract) or fail the goal. For each ' +
+    'numbered deliverable give: Verdict (e.g. behavior-preserving / changes-behavior / meets-goal / ' +
+    'fails-goal), the exact code location and mechanism that justifies it (citing artifact ids), and ' +
+    'for changes-behavior verdicts the concrete input or schedule that exposes the difference. Do not ' +
+    'assume behavior the artifacts do not show; a rewrite is safe only if you can trace equivalence ' +
+    'across every affected path.',
   debugging:
     SHARED_SYSTEM +
     'This is a debugging task: the artifacts describe a failing system with logs, diffs, traces, or ' +

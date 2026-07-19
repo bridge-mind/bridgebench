@@ -1,0 +1,197 @@
+id: root-queue-poison-pill
+version: 1.0.0
+category: reasoning
+cluster: root-cause-reasoning
+difficulty: expert
+title: FIFO Dispatch Group Stalls on a Schema Poison Pill That Is Retried Forever
+summary: >-
+  A single merchant's FIFO dispatch group is blocked while other groups remain healthy. Trace a
+  malformed message through exception construction, handler classification, queue semantics, and
+  incident logs to isolate the one defect that converts an expected DLQ path into an endless retry.
+prompt: |
+  ParcelRelay's `merchant-moss` dispatch group stopped advancing at 09:00. Other merchant groups
+  continued to process, worker count was increased, and the visibility timeout was later proposed as
+  a remedy. Reconstruct the incident using only these artifacts. The message contract deliberately
+  permits the system to receive invalid payloads; the required behavior for them is explicit.
+
+  1. Root cause. Name the single software defect, cite the exact expression in [consumer-handler] and
+     the runtime fact in [error-types] that makes it fail. Distinguish the trigger message from the
+     defect that makes the group stall indefinitely.
+  2. Causal chain. Trace event E-311 through validation, error classification, queue action, and FIFO
+     blocking. Cite the relevant [incident-log] facts, including why E-312 and E-313 cannot advance.
+  3. Decoy elimination. Explain why worker concurrency, visibility timeout, a consumer crash, and
+     broker redelivery are not the root cause. Use [queue-contract], [consumer-config], and the logs.
+  4. Fix review. Choose the one correct candidate in [proposed-fixes]. Explain why it is minimal and
+     why every other candidate either loses a message or leaves the same poison-pill mechanism alive.
+  5. Blast radius. State exactly which messages/groups can be blocked by this defect and which messages
+     remain unaffected. Tie the boundary to the queue's ordering key, not to queue-wide lag.
+  6. Recovery. State the ordered operational outcome after deploying the correct fix for the currently
+     stuck head message and its followers, including what must happen before E-311 can be processed as
+     a normal dispatch event.
+artifacts:
+  - id: consumer-handler
+    type: code
+    label: dispatch-consumer/src/process-message.ts (deployed)
+    content: |
+      import { decodeInbound, InboundSchemaError } from "./error-types.js";
+
+      export async function processMessage(message: QueueMessage): Promise<void> {
+        try {
+          const event = decodeInbound(message.body);
+          await applyDispatchEvent(event);
+          await queue.ack(message);
+        } catch (error) {
+          // Invalid inbound events are meant to be isolated in the DLQ.
+          if (error.name === "InboundSchemaError") {
+            await queue.deadLetter(message, { reason: "schema-invalid" });
+            return;
+          }
+
+          // Retryable dependency and transport failures are retried by application policy.
+          await queue.retry(message, { delaySeconds: 2 });
+        }
+      }
+
+      // applyDispatchEvent() is never reached if decodeInbound() throws. queue.ack(), queue.retry(),
+      // and queue.deadLetter() are mutually exclusive terminal actions for one delivery attempt.
+  - id: error-types
+    type: code
+    label: dispatch-consumer/src/error-types.ts and runtime exception facts
+    content: |
+      export class InboundSchemaError extends Error {
+        constructor(public readonly issues: string[]) {
+          super("inbound payload failed validation");
+          // This class intentionally does NOT assign this.name.
+        }
+      }
+
+      export function decodeInbound(body: unknown): DispatchEvent {
+        const parsed = DispatchEventSchema.safeParse(body);
+        if (!parsed.success) {
+          throw new InboundSchemaError(parsed.error.issues.map((issue) => issue.message));
+        }
+        return parsed.data;
+      }
+
+      Runtime facts for this deployed JavaScript:
+        new InboundSchemaError(["x"]) instanceof InboundSchemaError === true
+        new InboundSchemaError(["x"]).name === "Error"
+        new InboundSchemaError(["x"]).message === "inbound payload failed validation"
+
+      No serialization boundary exists between decodeInbound() and the catch in [consumer-handler];
+      `instanceof InboundSchemaError` in that catch tests this exact class object.
+  - id: queue-contract
+    type: spec
+    label: ParcelRelay FIFO queue and terminal-action semantics
+    content: |
+      ORDERING
+        - The FIFO ordering key is merchantId. A group's head message must reach queue.ack() or
+          queue.deadLetter() before the broker delivers that group's next message to any worker.
+        - Different merchantId groups may process concurrently. A blocked group never blocks a
+          different group merely because they share a queue.
+
+      TERMINAL ACTIONS
+        - queue.ack(message) permanently completes the delivered message.
+        - queue.deadLetter(message, metadata) moves the message to the DLQ and permanently unblocks
+          the next message in the same merchant group. The payload and metadata remain available for
+          remediation.
+        - queue.retry(message, { delaySeconds }) schedules the SAME head message for another delivery
+          after the delay. It deliberately has no automatic retry limit; application code must choose
+          ack or deadLetter to end the sequence.
+
+      OTHER DELIVERY FACTS
+        - visibilityTimeout protects only an unresponsive worker that never calls a terminal action.
+          It does not override an explicit queue.retry() from a healthy handler.
+        - Broker redelivery after a worker crash is observable as a lease expiry, not as a completed
+          queue.retry() call. Raising consumer concurrency does not skip a FIFO head.
+  - id: message-contract
+    type: spec
+    label: Complete inbound dispatch event contract
+    content: |
+      A valid dispatch event has:
+        eventId: non-empty string
+        merchantId: non-empty string
+        kind: exactly "parcel.received"
+        parcelId: non-empty string
+        receivedAt: ISO-8601 timestamp
+        destination.postalCode: non-empty string
+
+      Payloads can originate from old partner integrations and may violate this schema. Invalid payloads
+      are expected input at this boundary: decodeInbound() must raise InboundSchemaError and the consumer
+      must send them to the DLQ. They must NOT be acknowledged as a normal dispatch event and must NOT be
+      retried indefinitely. This is the complete schema and error-handling contract for the incident.
+  - id: incident-log
+    type: log
+    label: Ordered worker and broker incident log
+    content: |
+      09:00:00 broker   deliver group=merchant-moss head=E-311 attempt=1 -> worker w4
+      09:00:00 worker   w4 decode E-311 => InboundSchemaError issues=["destination.postalCode is required"]
+      09:00:00 worker   w4 caught error.name="Error"; schema-name branch=false; action=queue.retry(delay=2)
+      09:00:00 broker   merchant-moss followers queued behind E-311: E-312, E-313
+      09:00:01 broker   deliver group=merchant-cedar head=E-901 attempt=1 -> worker w7
+      09:00:01 worker   w7 decode/apply/ack E-901 success
+      09:00:02 broker   redeliver group=merchant-moss head=E-311 attempt=2 -> worker w9
+      09:00:02 worker   w9 decode E-311 => InboundSchemaError; error.name="Error"; action=queue.retry(delay=2)
+      09:00:04 broker   redeliver group=merchant-moss head=E-311 attempt=3 -> worker w2
+      09:00:04 worker   w2 decode E-311 => InboundSchemaError; error.name="Error"; action=queue.retry(delay=2)
+      09:00:06 broker   redeliver group=merchant-moss head=E-311 attempt=4 -> worker w4
+      09:00:06 worker   w4 queue.retry completed; process remained healthy
+      09:00:08 broker   redeliver group=merchant-moss head=E-311 attempt=5 -> worker w6
+      09:00:08 worker   w6 caught error.name="Error"; schema-name branch=false; action=queue.retry(delay=2)
+      09:01:00 ops      increased maxConcurrentGroups 16 -> 32; merchant-cedar continues to ack normally
+      09:02:00 broker   merchant-moss head still E-311; E-312 and E-313 have never been delivered
+      09:03:00 ops      proposed visibilityTimeoutSeconds 60 -> 300
+      09:05:00 monitor  workerRestarts=0 unhandledExceptions=0 explicitRetries=151 groupLag(moss)=3
+      09:05:00 monitor  groupLag(cedar)=0 globalQueueLag=3
+
+      E-311's decoded body is otherwise identified as merchantId=merchant-moss, kind=parcel.received,
+      parcelId=P-311, receivedAt=2026-07-16T09:00:00Z; only destination.postalCode is absent.
+  - id: consumer-config
+    type: config
+    label: Deployed consumer and broker settings
+    content: |
+      consumer:
+        maxConcurrentGroups: 16          # changed to 32 at 09:01; no other setting changed
+        visibilityTimeoutSeconds: 60
+        workers: 8
+        crashRestartPolicy: immediate
+      broker:
+        orderingKey: merchantId
+        delivery: at-least-once
+        applicationRetryLimit: unlimited # queue.retry follows queue-contract; no broker-side cap
+      incident_window:
+        workerRestarts: 0
+        unhandledExceptions: 0
+        explicitQueueRetryCalls: 151
+
+      `applicationRetryLimit: unlimited` applies only to the explicit queue.retry API. It does not
+      redefine the invalid-payload contract in [message-contract].
+  - id: proposed-fixes
+    type: diff
+    label: Candidate remediation changes
+    content: |
+      Fix A — acknowledge every caught error:
+        } catch (error) {
+          await queue.ack(message);
+        }
+
+      Fix B — classify the actual schema exception by class:
+        } catch (error) {
+          if (error instanceof InboundSchemaError) {
+            await queue.deadLetter(message, { reason: "schema-invalid" });
+            return;
+          }
+          await queue.retry(message, { delaySeconds: 2 });
+        }
+
+      Fix C — make retries slower:
+        - visibilityTimeoutSeconds: 60
+        + visibilityTimeoutSeconds: 300
+
+      Fix D — add workers:
+        - maxConcurrentGroups: 16
+        + maxConcurrentGroups: 64
+
+      No candidate modifies message order, the event contract, or queue.retry's terminal-action
+      semantics. Evaluate each against those existing rules.
+tags: [fifo, dlq, exception-handling, poison-pill, root-cause-reasoning, queues]

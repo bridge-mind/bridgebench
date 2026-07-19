@@ -8,7 +8,7 @@ Every task is split into a **public half** (what competitors and everyone else s
 
 ## Pack invariants (enforced by the loader and `npm run tasks -- validate`)
 
-- Exactly **18 tasks per category**, **3 per cluster**, unique IDs.
+- Exactly **48 tasks per category**, **8 per cluster**, unique IDs.
 - Public and private halves must agree on `id` and `version`.
 - Every `requiredEvidence` entry in the private half must name an existing public artifact ID.
 - Public artifact IDs must be unique and the YAML filename must match the task ID.
@@ -42,6 +42,13 @@ Tasks are deliberately heavyweight: five to eight interlocking artifacts (~9–1
 | `requiredEvidence[]`    | public artifact IDs a strong answer must ground itself in            |
 | `disqualifyingErrors[]` | the planted decoy conclusions, named explicitly                      |
 | `rubric`                | `{correctness, evidenceGrounding, constraintHandling, completeness}` |
+| `deliverables[]`        | optional machine-readable rubric: `{id, classification, expectedAnswer, evidenceArtifactIds, disqualifiers, weight}` — see below |
+
+### Structured `deliverables[]` (optional, since `arena-v0.5.0`)
+
+When present, each entry gives one numbered deliverable a machine-checkable shape: a unique `id` (e.g. `d1`), a `classification` from the category's trap taxonomy, the `expectedAnswer`, the public `evidenceArtifactIds` that determine it, its named `disqualifiers`, and a relative `weight`. Judges receive the array inside the hidden reference, and a decisive verdict's `decisiveDifference.deliverableId` must resolve against it — an unresolvable ID invalidates the verdict.
+
+**Deliverable IDs are part of the task's versioned contract.** Within a task version they are frozen: journaled verdicts cite them, so renaming, renumbering, adding, or removing a deliverable — like any other edit to either half — requires a `version` bump. Never reuse a retired deliverable ID for a different question within the same task lineage.
 
 ## Reasoning clusters
 
@@ -154,5 +161,5 @@ The Speed arena is not judged. Both models answer the same task and the faster c
 3. Bump `version` on any edit to either half; the journal hashes both, so silent drift is detectable.
 4. External contributors: validate and propose the public half through the task-proposal issue form. Do not include a hidden reference.
 5. After a public task is accepted, a maintainer starts a private handoff through the GitHub account attached to the issue. The private half never appears in the public issue or pull request.
-6. Replacing a live task requires a pack-rotation plan that preserves the 18-task, three-per-cluster invariant.
+6. Replacing a live task requires a pack-rotation plan that preserves the 48-task, eight-per-cluster invariant.
 7. Private halves are published when their pack retires (see [private-packs.md](private-packs.md)).

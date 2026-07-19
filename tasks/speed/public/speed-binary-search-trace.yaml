@@ -1,0 +1,36 @@
+id: speed-binary-search-trace
+version: 1.0.0
+category: speed
+cluster: stepwise-reasoning
+difficulty: hard
+title: Implement Binary Search and Trace Two Queries
+summary: >-
+  Implement deterministic binary search, then show the exact iteration-by-iteration state transitions for
+  one present target and one absent target over the same sorted array.
+prompt: |
+  Use [binary-search-spec] and [search-inputs].
+
+  1. Implement `binarySearch(nums: number[], target: number): number` in TypeScript.
+  2. Trace every loop iteration for target `41` and target `22` as a table with columns:
+     `step | left | right | mid | nums[mid] | decision`.
+  3. End each trace with the returned index (or `-1`) and the final reason for termination.
+artifacts:
+  - id: binary-search-spec
+    type: spec
+    label: Search algorithm contract
+    content: |
+      - nums is sorted ascending, with unique integers
+      - initialize left = 0, right = nums.length - 1
+      - loop while left <= right
+      - mid = Math.floor((left + right) / 2)
+      - if nums[mid] === target, return mid
+      - if nums[mid] < target, set left = mid + 1
+      - otherwise set right = mid - 1
+      - if the loop ends without a match, return -1
+  - id: search-inputs
+    type: table
+    label: Array and targets
+    content: |
+      nums = [3, 7, 11, 14, 18, 23, 27, 31, 36, 41, 46, 52, 59, 63, 70]
+      targets = [41, 22]
+tags: [algorithms, binary-search, tracing]

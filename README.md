@@ -67,7 +67,7 @@ npm run review
 `npm run review` is the shortest credential-free audit path. It:
 
 1. checks documentation links, navigation, commands, and fixture references;
-2. validates all 144 public tasks and their pack invariants;
+2. validates all 384 public tasks and their pack invariants;
 3. verifies a bundled journal line against its run manifest;
 4. replays the majority outcome, point, and Elo update.
 
@@ -127,8 +127,8 @@ never cross categories.
 | **Generation** | Specification conformance across candidate implementations, where each near-miss violates one stated constraint or edge case. | Cites the exact spec clause and the distinguishing input, and identifies the implementation that meets every requirement. |
 | **Speed** | Raw latency: both models answer the same task and the faster completion wins. Decided by measured time-to-first-token and throughput — no judges. | Answers correctly and efficiently; the arena records TTFT and tokens-per-second and awards the win to the lower total completion time. |
 
-Each judged public pack contains 18 expert tasks across six category-specific
-clusters (three per cluster); the Speed pack contains 18 public-only workload tasks. See
+Each judged public pack contains 48 expert tasks across six category-specific
+clusters (eight per cluster); the Speed pack contains 48 public-only workload tasks. See
 [Task authoring](docs/task-authoring.md) for their schemas, clusters, and
 enforced balance.
 
@@ -199,10 +199,13 @@ audits, and documentation fixes. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Project history
 
 This repository previously hosted the Season 1 `season-engine` alpha: ten
-Three.js tasks scored in a browser and ranked by community A/B voting. That
-code remains on the
+Three.js tasks scored in a browser and ranked by community A/B voting. Most
+of that engine — the other nine tasks and the live-model runner — remains on
+the
 [`season-engine-alpha` branch](https://github.com/bridge-mind/bridgebench/tree/season-engine-alpha).
-Its results never mix with arena Elo.
+One task, the lava lamp (`s1-lava-lamp-redux`), has been restored to `main`
+as a working slice — see [UI Bench](docs/ui-bench.md). Its results never mix
+with arena Elo.
 
 ## License
 

@@ -1,0 +1,104 @@
+id: error-propagation-rust-joinset
+version: 1.0.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: JoinSet Pattern Match Drops the First Parse Error and Aborts Unobserved Tasks
+summary: >-
+  A Rust batch importer uses a refutable while-let pattern over JoinSet results. The first worker error
+  ends result collection, dropping the set and aborting tasks whose results have not arrived, while the
+  parent reports success with a partial count. Trace nested Result provenance and completion order to
+  choose a fix that drains every task and returns a deterministic batch error.
+prompt: |
+  Diagnose the fictional GrainPort importer using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. Expand the exact type and variants of every value returned by JoinSet::join_next. Map parser failures,
+     task panics, cancellations, and successful row counts to their proper provenance.
+  2. Trace schedules A through D statement by statement. State when the while-let condition fails, which
+     tasks are aborted by Drop, what count remains, and what the caller receives.
+  3. Identify the root cause and explain why worker logging, input order, Tokio fairness, and the atomic
+     database writer are red herrings for the false-success signal.
+  4. State the batch contract invariants for task observation, deterministic error selection, cancellation,
+     and side-effect timing.
+  5. Classify P1 through P4 and select the adequate fix. Explain how it handles multiple parse errors and
+     JoinError without allowing a partial commit.
+  6. Give tests with controlled completion order for all-success, early/late parse error, panic, external
+     cancellation, multiple failures, and zero inputs. Assert both returned error and joined-task counts.
+
+  Tokio-semantics and importer-code are exhaustive; no worker writes to the database directly.
+artifacts:
+  - id: importer-code
+    type: code
+    label: Rust batch import implementation
+    content: |
+      async fn import_batch(files: Vec<File>) -> Result<usize, ImportError> {
+          let mut tasks = JoinSet::new();
+          for (index, file) in files.into_iter().enumerate() {
+              tasks.spawn(async move { parse(index, file).await });
+          }
+
+          let mut parsed = Vec::new();
+          while let Some(Ok(Ok(part))) = tasks.join_next().await {
+              metrics::parsed_file();
+              parsed.push(part);
+          }
+          database::insert_all_in_one_transaction(&parsed).await?;
+          Ok(parsed.iter().map(|p| p.rows.len()).sum())
+      }
+
+      parse returns Result<ParsedFile, ParseError>. insert_all writes only the supplied parsed files and is
+      fully atomic. This function is the only caller and error-conversion boundary.
+  - id: tokio-semantics
+    type: spec
+    label: authoritative JoinSet behavior and nested type
+    content: |
+      join_next() -> Option<Result<Result<ParsedFile, ParseError>, JoinError>>.
+      `None` means the set is empty. Outer Err is task cancellation or panic; inner Err is parse failure.
+      A while-let loop stops immediately when the value does not match its pattern and does not expose the
+      mismatching value in its body. Dropping JoinSet aborts all tasks still in it; completed-but-unjoined
+      outputs are discarded. Completion order, not spawn/input order, determines join_next order.
+  - id: batch-contract
+    type: spec
+    label: required importer behavior
+    content: |
+      Parse every input without database side effects. Observe every spawned task unless the caller cancels.
+      If all parse successfully, commit all files once and return total rows. If any parse fails or task
+      panics/cancels, do not call insert_all. After draining, return the failure with the lowest input index;
+      a JoinError without a recoverable index is ordered after indexed parse errors. Never report success
+      while any spawned task result is unknown. Empty input commits nothing and returns 0.
+  - id: controlled-schedules
+    type: table
+    label: deterministic completion sequences
+    content: |
+      A inputs 0,1 -> join values [Ok(Ok(P0 rows=2)), Ok(Ok(P1 rows=3)), None]
+      B inputs 0,1,2 -> [Ok(Ok(P1 rows=3)), Ok(Err(Parse index=0)), task2 still running]
+      C inputs 0,1,2 -> [Err(JoinError panic index unavailable), Ok(Ok(P0)), task2 still running]
+      D inputs 0,1,2 -> [Ok(Err(Parse index=2)), Ok(Err(Parse index=0)), Ok(Ok(P1)), None]
+      At current HEAD: A returns 5. B loop ends on second join, drops/aborts task2, inserts P1, returns 3.
+      C loop ends immediately, aborts remaining tasks, inserts empty parsed list, returns 0.
+      D loop ends on first join and never observes the lower-index failure.
+  - id: telemetry
+    type: log
+    label: incident observations and provenance
+    content: |
+      batch=G-44 files=3 worker index=0 log="invalid column 7"
+      batch=G-44 parent result=Ok(1284) parsed_file_metric=1 database_files=1
+      batch=G-45 files=3 worker index=2 panic="decoder invariant" parent result=Ok(0)
+      Database audit: every insert_all transaction committed exactly its supplied files; no lost row after
+      transaction entry. Logs are emitted inside parse before it returns Err and do not affect Result values.
+  - id: patch-candidates
+    type: diff
+    label: proposed result-collection patches
+    content: |
+      P1: Change pattern to `while let Some(result)`, push successful parts, log both error variants, then
+          always call insert_all and return the successful row count.
+      P2: On the first error, return immediately and let JoinSet Drop abort the rest. This avoids partial DB
+          commit but violates the drain and deterministic lowest-index failure contract.
+      P3: Store indexed successes and failures while `while let Some(result) = join_next().await`; explicitly
+          classify both Result layers, drain to None, and if any failure exists return the contract-ordered
+          failure without calling insert_all. Otherwise sort successes by input index, atomically insert all,
+          and return total rows. On caller cancellation, abort then drain before propagating cancellation.
+      P4: Replace JoinSet with `join_all` and unwrap every nested Result. A panic in the parent and loss of
+          typed/indexed error selection violate the contract.
+tags: [debugging, error-propagation, rust, tokio, structured-concurrency]

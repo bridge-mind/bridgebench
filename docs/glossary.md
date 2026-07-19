@@ -38,7 +38,7 @@ A verified report derived from a journal replay. Snapshots are replaceable; jour
 
 ## Point
 
-One win awarded for a judged majority or forfeit. No-contests award no point.
+One win awarded for a judged majority (or measured speed win). No-contests — including matches voided by a failed response — award no point. Historical journals may contain `forfeit` wins from before 2026-07-14, when a failed response awarded the survivor the point.
 
 ## Elo
 
@@ -47,3 +47,11 @@ The per-arena rating derived in journal order. Ratings start at 1000 and use K=3
 ## Published replica
 
 The bridgebench.ai API copy of verified engine output. Publishing does not replace the local journal as the execution authority.
+
+## UI Bench
+
+The browser-scored creative-rendering benchmark (self-contained Three.js HTML artifacts, judged by a headless-browser harness instead of a judge model). Results never mix with arena Elo. See [UI Bench](ui-bench.md).
+
+## Qualification
+
+UI Bench's objective pass/fail gate: did the artifact load, render, and stay within the harness contract. Independent of — and never gated by — hidden interaction probes.

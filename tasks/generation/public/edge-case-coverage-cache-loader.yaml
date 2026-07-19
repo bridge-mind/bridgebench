@@ -1,10 +1,10 @@
 id: edge-case-coverage-cache-loader
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: edge-case-coverage
 difficulty: expert
 title: getOrLoad — Single-Flight Cache Meeting Every Concurrency And Error Edge
-summary: An async cache spec enumerates five mandatory edges (single-flight concurrency, negative caching, non-caching of loader errors, key normalization, empty-key rejection). Six submissions are under review; exactly one satisfies all five while each of five decoys misses exactly one. Classify all six by reading the code against the behavior scenarios.
+summary: An async cache spec enumerates five mandatory edges (single-flight concurrency, negative caching, non-caching of loader errors, key normalization, empty-key rejection). Six submissions are under review. Classify all six by reading the code against the behavior scenarios, naming the edge any non-conformer misses.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (cache-spec, behavior-vectors,
   candidates-a, candidates-b, reviewer-thread, submission-manifest). Cite artifact id(s) for every
@@ -12,9 +12,8 @@ prompt: |
   vocabulary is exactly: conforms / violates. A submission `conforms` only if it satisfies EVERY
   required edge E1..E5 in cache-spec.
 
-  submission-manifest declares candidate-1..candidate-6 the complete set with exactly one that
-  satisfies all five edges. No code is executed; reason about behavior by reading each candidate
-  against the behavior-vectors scenarios.
+  submission-manifest declares candidate-1..candidate-6 the complete set. No code is executed;
+  reason about behavior by reading each candidate against the behavior-vectors scenarios.
 
   1. Classify each of candidate-1..candidate-6 as `conforms` or `violates`.
 
@@ -22,7 +21,7 @@ prompt: |
      fails and cite the behavior-vectors scenario that exposes it. Describe the conforming behavior
      and the candidate's differing behavior in that scenario.
 
-  3. Exactly one candidate `conforms` (satisfies all five edges). Identify it.
+  3. Identify which candidates, if any, `conform` (satisfy all five edges).
 
   4. In reviewer-thread, reviewer @kai says candidate-2 "is correct because once the first load
      finishes, the value is cached and later callers hit the cache." State candidate-2's verdict
@@ -108,20 +107,20 @@ artifacts:
         private values = new Map<string, { value: unknown; expiresAt: number }>();
         private inflight = new Map<string, Promise<unknown>>();
         async getOrLoad(rawKey: string, loader: Loader): Promise<unknown> {
-          const key = rawKey.trim();                                   // E4
-          if (key === '') throw new InvalidKeyError('empty key');      // E5
+          const key = rawKey.trim();
+          if (key === '') throw new InvalidKeyError('empty key');
           const c = this.values.get(key);
-          if (c && c.expiresAt > Date.now()) return c.value;           // hit (incl. cached null, E2)
+          if (c && c.expiresAt > Date.now()) return c.value;
           const existing = this.inflight.get(key);
-          if (existing) return existing;                              // E1: await in-flight load
+          if (existing) return existing;
           const p = loader(key)
             .then((value) => {
-              this.values.set(key, { value, expiresAt: Date.now() + TTL_MS });   // caches null too (E2)
+              this.values.set(key, { value, expiresAt: Date.now() + TTL_MS });
               this.inflight.delete(key);
               return value;
             })
-            .catch((err) => { this.inflight.delete(key); throw err; }); // E3: evict, do not cache
-          this.inflight.set(key, p);                                   // registered BEFORE await (E1)
+            .catch((err) => { this.inflight.delete(key); throw err; });
+          this.inflight.set(key, p);
           return p;
         }
       }
@@ -134,7 +133,7 @@ artifacts:
           if (key === '') throw new InvalidKeyError('empty key');
           const c = this.values.get(key);
           if (c && c.expiresAt > Date.now()) return c.value;
-          const value = await loader(key);                            // no in-flight registration
+          const value = await loader(key);
           this.values.set(key, { value, expiresAt: Date.now() + TTL_MS });
           return value;
         }
@@ -153,7 +152,7 @@ artifacts:
           if (existing) return existing;
           const p = loader(key)
             .then((value) => {
-              if (value != null) this.values.set(key, { value, expiresAt: Date.now() + TTL_MS }); // skips null
+              if (value != null) this.values.set(key, { value, expiresAt: Date.now() + TTL_MS });
               this.inflight.delete(key);
               return value;
             })
@@ -183,7 +182,7 @@ artifacts:
             this.values.set(key, { value, expiresAt: Date.now() + TTL_MS });
             this.inflight.delete(key);
             return value;
-          });                                          // no .catch: rejected p stays in inflight
+          });
           this.inflight.set(key, p);
           return p;
         }
@@ -194,8 +193,8 @@ artifacts:
         private values = new Map<string, { value: unknown; expiresAt: number }>();
         private inflight = new Map<string, Promise<unknown>>();
         async getOrLoad(rawKey: string, loader: Loader): Promise<unknown> {
-          const key = rawKey;                          // no trim for slotting
-          if (rawKey.trim() === '') throw new InvalidKeyError('empty key');   // E5 still enforced
+          const key = rawKey;
+          if (rawKey.trim() === '') throw new InvalidKeyError('empty key');
           const c = this.values.get(key);
           if (c && c.expiresAt > Date.now()) return c.value;
           const existing = this.inflight.get(key);
@@ -218,7 +217,6 @@ artifacts:
         private inflight = new Map<string, Promise<unknown>>();
         async getOrLoad(rawKey: string, loader: Loader): Promise<unknown> {
           const key = rawKey.trim();
-          // no empty-key rejection
           const c = this.values.get(key);
           if (c && c.expiresAt > Date.now()) return c.value;
           const existing = this.inflight.get(key);
@@ -258,7 +256,6 @@ artifacts:
       candidate-5, candidate-6. This is the COMPLETE set; no other implementation is being
       considered.
 
-      Acceptance rule: exactly one submission satisfies ALL five required edges (E1..E5) and is to
-      be accepted. Each of the other five mishandles exactly one required edge. The process assumes
-      precisely one such all-edges-correct submission exists in this set.
+      Acceptance rule: submissions are evaluated against all five required edges (E1..E5);
+      submissions that satisfy every required edge are accepted.
 tags: [generation, edge-case-coverage, concurrency, caching, code-review]

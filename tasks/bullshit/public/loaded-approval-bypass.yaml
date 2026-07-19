@@ -1,5 +1,5 @@
 id: loaded-approval-bypass
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: loaded-assumptions
 difficulty: expert
@@ -79,11 +79,7 @@ artifacts:
         submitted 2025-11-21 11:05 (j.varga) | peer approval 2025-11-21 15:45 (h.tanaka)
         change-review approval 2025-11-24 09:20 (s.petrova) | type: standard | STATUS: APPROVED
 
-      Record count: 7. For the avoidance of doubt: no change request in this window
-      disables, suspends, or removes rate limiting on any service (the sole rate-limiting
-      change is CR-8805, a ceiling raise with the limiter staying enabled); the security
-      team (k.duval) submitted zero change requests and issued zero approvals in this
-      window; and the only emergency-path change in the window is CR-8807.
+      Record count: 7.
   - id: change-policy
     type: spec
     label: Change-management policy v4.2 (approval workflow and deploy gate)
@@ -137,8 +133,6 @@ artifacts:
       2025-11-06 11:22 ledger-core         config   deploy COMPLETED (CR-8802)
       2025-11-12 10:40 api-edge            config   deploy STARTED   (CR-8805)
       2025-11-12 10:44 api-edge            config   deploy COMPLETED (CR-8805)
-                       gate note: api-edge limiter enabled=true at 10:39 and at 10:45;
-                       only rate_limit.per_client_rpm changed (300 -> 450)
       2025-11-14 14:22 payments-gateway    v4.18.1  deploy STARTED   (CR-8807, EMERGENCY-APPROVED)
       2025-11-14 14:31 payments-gateway    v4.18.1  deploy COMPLETED (CR-8807)
       2025-11-20 09:10 ledger-core         v9.3.0   deploy STARTED   (CR-8810)
@@ -146,14 +140,7 @@ artifacts:
       2025-11-24 13:00 notification-service v2.7.0  deploy STARTED   (CR-8812)
       2025-11-24 13:24 notification-service v2.7.0  deploy COMPLETED (CR-8812)
 
-      Deploy events on 2025-11-14: exactly two (the CR-8807 STARTED/COMPLETED pair above).
-      Deploy events on 2025-11-21: zero.
-
-      Infrastructure events in the window: NONE. The ledger-db cluster recorded zero
-      failover events, zero role changes, and zero node restarts; node db-1 held the
-      primary role continuously from 2025-10-19 07:33 (its last recorded role change,
-      before this window) through the end of the window. Continuous-availability probe:
-      ledger-db answered 100% of health checks for all of November.
+      Infrastructure events in the window: NONE.
 
       Deploy gate audit: 0 rejected deploy attempts in the window; every deploy above
       carried an APPROVED or EMERGENCY-APPROVED CR at its START event.

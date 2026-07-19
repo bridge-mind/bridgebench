@@ -1,10 +1,10 @@
 id: fix-adequacy-idempotency-race
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: fix-adequacy
 difficulty: expert
 title: Duplicate Webhook Deliveries Double-Credit Accounts, With Four Candidate Fixes To Judge
-summary: A payment webhook double-credits accounts when the provider redelivers an event to two of three replicas at once. Four candidate fixes are on the table. Exactly one resolves the check-then-act race across replicas without reintroducing a global lock the team deliberately removed; one dedupes only within a process, one re-adds the removed lock, and one dedupes on a brittle heuristic. Judge each and name the disqualifying over-rejection of the schema-migration fix.
+summary: A payment webhook double-credits accounts when the provider redelivers an event to two of three replicas at once. Four candidate fixes are on the table; exactly one resolves the root cause without reintroducing a regression the history describes. Using the requirements, current code, a concurrency trace, and the change history, judge each candidate and name the disqualifying over-rejection.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (requirements, current-code,
   concurrency-trace, git-history, fix-a, fix-b, fix-c, fix-d). Cite the artifact id(s) for
@@ -57,7 +57,7 @@ artifacts:
     type: code
     label: current webhook handler (buggy) and its table
     content: |
-      // paylink/webhook.ts — current, buggy. check-then-act with no unique gate.
+      // paylink/webhook.ts — current, buggy.
       async function onPaymentSucceeded(evt) {
         const seen = await db.query(
           `SELECT 1 FROM processed_events WHERE event_id = $1`, [evt.eventId]);
@@ -70,9 +70,7 @@ artifacts:
       }
       // Table today (see also git-history):
       //   processed_events(event_id text, processed_at timestamptz default now())
-      //   -- NOTE: event_id is a plain column. There is NO unique constraint/index on it.
-      // The SELECT and the INSERT are separate statements in autocommit; nothing serializes
-      // two concurrent handlers for the same event_id.
+      // The SELECT and the INSERT run as separate statements in autocommit.
   - id: concurrency-trace
     type: log
     label: two duplicate deliveries of event evt-55 (acct A-3, amount 20.00)
@@ -80,13 +78,11 @@ artifacts:
       # A-3 starts at balance 100.00. evt-55 is delivered twice (at-least-once), to r1 and r2.
       t=0.000 r1 recv payment.succeeded event_id=evt-55 acct=A-3 amount=20.00 (delivery 1)
       t=0.001 r2 recv payment.succeeded event_id=evt-55 acct=A-3 amount=20.00 (delivery 2, duplicate)
-      t=0.002 r1 SELECT ... WHERE event_id=evt-55 -> 0 rows   (not yet processed)
-      t=0.003 r2 SELECT ... WHERE event_id=evt-55 -> 0 rows   (also sees not processed)
+      t=0.002 r1 SELECT ... WHERE event_id=evt-55 -> 0 rows
+      t=0.003 r2 SELECT ... WHERE event_id=evt-55 -> 0 rows
       t=0.004 r1 INSERT processed_events(evt-55) -> ok; UPDATE accounts +20 -> balance 100->120
-      t=0.005 r2 INSERT processed_events(evt-55) -> ok (NO unique constraint, so it succeeds);
-                 UPDATE accounts +20 -> balance 120->140   ## DOUBLE CREDIT: 40 for one 20 payment
-      # Both handlers passed the SELECT before either INSERT committed (check-then-act race),
-      # and the missing unique constraint let both INSERTs land.
+      t=0.005 r2 INSERT processed_events(evt-55) -> ok;
+                 UPDATE accounts +20 -> balance 120->140
   - id: git-history
     type: note
     label: relevant change history for the handler
@@ -96,9 +92,8 @@ artifacts:
         time across all replicas and caused a 90s backlog during a payout burst (INC-4471).
         Different accounts must process in parallel." The removed code was
         `SELECT pg_advisory_lock(42)` at the top of the handler and an unlock at the end.
-        Re-introducing any fleet-wide/global lock re-creates INC-4471.
       - 2026-04-10 "add processed_events audit table (event_id text, processed_at)". The
-        table was added WITHOUT a unique index on event_id; the idempotency check was left as
+        table was added without a unique index on event_id; the idempotency check was left as
         a SELECT-then-INSERT. This is the state current-code runs today.
   - id: fix-a
     type: diff
@@ -115,7 +110,6 @@ artifacts:
           await db.query(`INSERT INTO processed_events(event_id) VALUES ($1)`, [evt.eventId]);
           await db.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`, [evt.amount, evt.accountId]);
         }
-      # Each replica has its OWN seenIds set; replicas share no memory.
   - id: fix-b
     type: diff
     label: candidate fix B
@@ -130,7 +124,6 @@ artifacts:
             await db.query(`UPDATE accounts SET balance = balance + $1 WHERE id=$2`, [evt.amount, evt.accountId]);
       +   } finally { await db.query(`SELECT pg_advisory_unlock(42)`); }
         }
-      # Key 42 is a single constant, so every webhook across the fleet serializes on it.
   - id: fix-c
     type: diff
     label: candidate fix C
@@ -147,8 +140,6 @@ artifacts:
       +       [evt.amount, evt.accountId]);
       +   });
         }
-      # The unique index makes exactly one INSERT win fleet-wide; the credit runs only for the
-      # winner, in the same transaction. No SELECT-then-INSERT gap; no global lock.
   - id: fix-d
     type: diff
     label: candidate fix D
@@ -165,5 +156,5 @@ artifacts:
       +   await db.query(`INSERT INTO credits(account_id, amount, minute_bucket) VALUES ($1,$2,$3)`,
       +     [evt.accountId, evt.amount, bucket]);
         }
-      # Dedup key is account+amount+minute, not event_id.
+      # Dedup key is account+amount+minute.
 tags: [fix-adequacy, idempotency, webhook, debugging, concurrency]

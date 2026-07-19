@@ -1,0 +1,133 @@
+id: semantic-equivalence-bigint-proration
+version: 1.0.0
+category: refactoring
+cluster: semantic-equivalence
+difficulty: expert
+title: Simplify Signed BigInt Proration Without Changing Away-From-Zero Rounding
+summary: >-
+  A billing primitive multiplies signed BigInts, divides by a positive capacity, and rounds every
+  non-exact magnitude away from zero while validating capacity before zero shortcuts. Four
+  simplifications differ on negative products, precision, or exception order; one is equivalent.
+prompt: |
+  Use only original-function, bigint-semantics, witness-matrix, rewrites, and manifest. Cite
+  artifacts. Give both behavior-preserving / changes-behavior and meets-goal / fails-goal.
+
+  1. Classify rewrite-a through rewrite-d.
+  2. For each changed rewrite, cite B1..B7 and the smallest witness N1..N8, stating original and
+     rewritten return or throw behavior.
+  3. Identify the unique behavior-preserving rewrite that meets the simplification goal.
+  4. Compute every N1..N8 outcome for the original.
+  5. Explain why adding denominator-1 before signed division works for positive magnitudes but not
+     a negative product under truncation toward zero.
+  6. Explain why a zero numerator does not permit capacity validation to move later.
+artifacts:
+  - id: original-function
+    type: code
+    label: Existing billing proration primitive
+    content: |
+      export function prorateAway(
+        amount: bigint,
+        ratio: bigint,
+        capacity: bigint,
+      ): bigint {
+        if (capacity <= 0n) throw new RangeError('capacity');
+        const negative = (amount < 0n) !== (ratio < 0n);
+        const magnitude =
+          (amount < 0n ? -amount : amount) *
+          (ratio < 0n ? -ratio : ratio);
+        if (magnitude === 0n) return 0n;
+        const rounded = (magnitude + capacity - 1n) / capacity;
+        return negative ? -rounded : rounded;
+      }
+  - id: bigint-semantics
+    type: spec
+    label: Complete JavaScript BigInt and observable contract
+    content: |
+      B1 capacity <= 0n throws RangeError('capacity') before multiplication-dependent shortcuts.
+      B2 For positive operands, BigInt / truncates toward zero, equivalent to floor.
+      B3 For a negative dividend and positive divisor, BigInt / truncates toward zero, not toward
+         negative infinity: -10n/3n is -3n and -8n/3n is -2n.
+      B4 The required mathematical result for positive capacity is sign(amount*ratio) times
+         ceil(abs(amount*ratio)/capacity). Thus any non-exact result rounds away from zero.
+      B5 Exact divisions remain exact and a zero product returns 0n.
+      B6 BigInt arithmetic has arbitrary precision. Converting through Number can lose integer bits.
+      B7 The only observables are returned BigInt or RangeError class/message. Inputs are primitive
+         BigInts; there are no coercion hooks or side effects.
+
+      Goal: express signed away-from-zero division in a named helper and reduce prorateAway to its
+      capacity guard plus one helper return. Do not use Number and do not change validation order.
+  - id: witness-matrix
+    type: table
+    label: Authoritative boundary and sign witnesses
+    content: |
+      N1 prorateAway( 5n,  2n, 3n) ->  4n
+      N2 prorateAway(-5n,  2n, 3n) -> -4n
+      N3 prorateAway( 5n, -2n, 3n) -> -4n
+      N4 prorateAway(-5n, -2n, 3n) ->  4n
+      N5 prorateAway( 6n,  2n, 3n) ->  4n (exact)
+      N6 prorateAway( 0n, 99n, 0n) -> throws RangeError('capacity')
+      N7 prorateAway(1152921504606846977n, 1n, 2n)
+         -> 576460752303423489n (one above 2^59)
+      N8 prorateAway(0n, 0n, -1n) -> throws RangeError('capacity')
+  - id: rewrites
+    type: code
+    label: Four proposed simplifications
+    content: |
+      // rewrite-a
+      function divideAway(numerator, denominator) {
+        if (numerator === 0n) return 0n;
+        const negative = numerator < 0n;
+        const magnitude = negative ? -numerator : numerator;
+        const rounded = (magnitude + denominator - 1n) / denominator;
+        return negative ? -rounded : rounded;
+      }
+      function prorateAway(amount, ratio, capacity) {
+        if (capacity <= 0n) throw new RangeError('capacity');
+        return divideAway(amount * ratio, capacity);
+      }
+
+      // rewrite-b: applies the positive ceiling identity directly to a signed product.
+      function divideAway(numerator, denominator) {
+        return (numerator + denominator - 1n) / denominator;
+      }
+      function prorateAway(amount, ratio, capacity) {
+        if (capacity <= 0n) throw new RangeError('capacity');
+        return divideAway(amount * ratio, capacity);
+      }
+
+      // rewrite-c: delegates sign and ceiling to Number.
+      function divideAway(numerator, denominator) {
+        return BigInt(Math.sign(Number(numerator))
+          * Math.ceil(Math.abs(Number(numerator)) / Number(denominator)));
+      }
+      function prorateAway(amount, ratio, capacity) {
+        if (capacity <= 0n) throw new RangeError('capacity');
+        return divideAway(amount * ratio, capacity);
+      }
+
+      // rewrite-d: moves the zero shortcut before the required guard.
+      function divideAway(numerator, denominator) {
+        const negative = numerator < 0n;
+        const magnitude = negative ? -numerator : numerator;
+        const rounded = (magnitude + denominator - 1n) / denominator;
+        return negative ? -rounded : rounded;
+      }
+      function prorateAway(amount, ratio, capacity) {
+        if (amount === 0n || ratio === 0n) return 0n;
+        if (capacity <= 0n) throw new RangeError('capacity');
+        return divideAway(amount * ratio, capacity);
+      }
+  - id: manifest
+    type: note
+    label: Complete rewrite inventory and review record
+    content: |
+      rewrite-a through rewrite-d are the complete proposals. Helper calls are ordinary calls with
+      primitive BigInts. No build transform changes BigInt division.
+
+      Reviewer Ada argues rewrite-b is the standard ceiling formula. It is standard for a
+      non-negative numerator; B3 and negative witnesses make applying it before extracting sign
+      non-equivalent.
+
+      Reviewer Chen argues zero work should bypass all validation. B1 makes invalid capacity an
+      independently observable precondition checked first by the original.
+tags: [refactoring, semantic-equivalence, bigint, rounding, billing]

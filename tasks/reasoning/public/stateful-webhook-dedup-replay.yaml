@@ -1,0 +1,127 @@
+id: stateful-webhook-dedup-replay
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Webhook Deduplication Replay Across Lease Expiry, Failure, and Tenant Isolation
+summary: Replay an at-least-once webhook processor through pending leases, failed handlers, completed TTLs, explicit purges, and identical event IDs in two tenants to derive every dispatch decision and final store row.
+prompt: |
+  Replay the operations in [delivery-log] exactly in `seq` order under [dedup-contract]. The store is
+  keyed by `(tenantId,eventId)`, timestamps are integer seconds, and an operation first performs the
+  contract's lazy expiry step for its own key. There are no calls, clock jumps, or background purges
+  beyond the artifacts. [incident-chat] is unverified.
+
+  1. For every `DELIVER` row, report `RUN` or `SUPPRESS`, the reason, and the complete row for that
+     key immediately afterward. For a `RUN`, also apply the logged handler result.
+  2. For every `PURGE` row, report whether a row is deleted and the store contents immediately after.
+  3. Produce the complete transition ledger for key `(acme,evt-7)`, including lazy expiry and the
+     failed handler's cleanup as separate transitions.
+  4. Give the final store contents after sequence 16, including `status`, `leaseUntil`, `completedAt`,
+     and `expiresAt` for every surviving key.
+  5. Classify all five numbered claims in [incident-chat] as correct or incorrect with the first trace
+     row and contract clause that decides each claim.
+  6. Evaluate [candidate-patch]. Identify the first sequence whose dispatch result would differ if the
+     patch were deployed from the initial state, and give shipped versus patched results and states.
+artifacts:
+  - id: dedup-contract
+    type: spec
+    label: Complete webhook deduplication state machine
+    content: |
+      Store key: the ordered pair `(tenantId,eventId)`. Event IDs are not global across tenants.
+      A row is one of:
+        pending:   {status:"pending", leaseUntil:T, completedAt:null, expiresAt:null}
+        completed: {status:"completed", leaseUntil:null, completedAt:T, expiresAt:T+300}
+
+      At the START of every DELIVER for key K, lazily delete K if:
+        - K is pending and leaseUntil <= now; or
+        - K is completed and expiresAt <= now.
+      Expiry uses `<=`, not `<`. Expiry of one key never scans or changes another key.
+
+      DELIVER after lazy expiry:
+        - If any row for K remains, SUPPRESS without changing it.
+        - Otherwise atomically insert pending with leaseUntil=now+30, then RUN the handler once.
+        - If that handler succeeds at finishedAt F, replace pending with completed where
+          completedAt=F and expiresAt=F+300.
+        - If that handler fails at finishedAt F, delete the pending row immediately. A failure is not
+          remembered as completed and does not extend the lease.
+
+      PURGE(K, now) is an explicit operation for exactly K. It applies the same `<= now` expiry rules
+      and otherwise changes nothing. There is no background purge and no implicit retry. A logged
+      handler result belongs only to a DELIVER that actually RUNs; suppressed rows do not consume it.
+  - id: initial-store
+    type: table
+    label: Store at time 100 before sequence 1
+    content: |
+      tenant | event | status    | leaseUntil | completedAt | expiresAt
+      acme   | evt-7 | pending   | 105        | null        | null
+      acme   | evt-9 | completed | null       | 40          | 340
+      beta   | evt-7 | completed | null       | 70          | 370
+
+      These are all rows. Values are integer seconds on the same clock as [delivery-log].
+  - id: delivery-log
+    type: log
+    label: Exhaustive ordered delivery and purge log
+    content: |
+      seq | now | operation | tenant | event | handler result if RUN
+      1   | 101 | DELIVER   | acme   | evt-7 | success finishedAt=102
+      2   | 104 | DELIVER   | beta   | evt-7 | failure finishedAt=105
+      3   | 105 | DELIVER   | acme   | evt-7 | failure finishedAt=108
+      4   | 106 | DELIVER   | acme   | evt-7 | success finishedAt=109
+      5   | 109 | DELIVER   | acme   | evt-7 | success finishedAt=110
+      6   | 120 | DELIVER   | beta   | evt-8 | success finishedAt=121
+      7   | 121 | DELIVER   | beta   | evt-8 | failure finishedAt=122
+      8   | 340 | PURGE     | acme   | evt-9 | —
+      9   | 369 | DELIVER   | beta   | evt-7 | success finishedAt=369
+      10  | 370 | DELIVER   | beta   | evt-7 | success finishedAt=372
+      11  | 405 | DELIVER   | acme   | evt-7 | success finishedAt=406
+      12  | 408 | DELIVER   | acme   | evt-7 | success finishedAt=409
+      13  | 421 | PURGE     | beta   | evt-8 | —
+      14  | 421 | DELIVER   | beta   | evt-8 | failure finishedAt=425
+      15  | 425 | DELIVER   | beta   | evt-8 | success finishedAt=426
+      16  | 426 | DELIVER   | acme   | evt-9 | success finishedAt=430
+
+      The log is complete. Same-time ordering is still by `seq`.
+  - id: implementation
+    type: code
+    label: Shipped decision points
+    content: |
+      async function deliver(k, now, run) {
+        const row = await store.get(k);
+        if (row?.status === "pending" && row.leaseUntil <= now) await store.delete(k);
+        if (row?.status === "completed" && row.expiresAt <= now) await store.delete(k);
+        if (await store.get(k)) return "SUPPRESS";
+        await store.insert(k, { status: "pending", leaseUntil: now + 30 });
+        try {
+          const finishedAt = await run();
+          await store.put(k, { status: "completed", completedAt: finishedAt,
+                               expiresAt: finishedAt + 300 });
+        } catch (failure) {
+          await store.delete(k);
+        }
+        return "RUN";
+      }
+
+      The store methods are atomic per full tuple key. This excerpt implements [dedup-contract]; it
+      is included to make evaluation-order questions explicit, not to add unstated behavior.
+  - id: incident-chat
+    type: note
+    label: Unverified operations-room claims
+    content: |
+      1. "Sequence 1 runs because the pending lease is close to expiring."
+      2. "The failed handler at sequence 3 keeps the key blocked until time 135."
+      3. "beta's completed evt-7 suppresses acme's evt-7 because event IDs are global."
+      4. "The explicit purge at time 340 deletes acme/evt-9 exactly at its expiry boundary."
+      5. "Sequence 14 runs, and its failure permits sequence 15 to run immediately."
+  - id: candidate-patch
+    type: diff
+    label: Rejected inclusive-expiry patch
+    content: |
+      Proposed change, evaluated only for deliverable 6:
+
+      - if (row.status === "pending" && row.leaseUntil <= now) delete(row)
+      - if (row.status === "completed" && row.expiresAt <= now) delete(row)
+      + if (row.status === "pending" && row.leaseUntil < now) delete(row)
+      + if (row.status === "completed" && row.expiresAt < now) delete(row)
+
+      Everything else, including tuple keys, handler results, and operation order, is unchanged.
+tags: [state-machine, webhooks, idempotency, leases, ttl, replay]

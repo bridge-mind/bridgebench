@@ -1,0 +1,101 @@
+id: edge-case-coverage-chunked-lines
+version: 1.0.0
+category: generation
+cluster: edge-case-coverage
+difficulty: expert
+title: Split UTF-8 Log Lines Across Chunks Without Losing CRLF or Terminal Records
+summary: >-
+  Four Go line decoders work for simple newline input but diverge on split UTF-8, CRLF boundaries,
+  empty records, a final unterminated line, byte limits, and terminal errors. Exact chunk schedules
+  expose one implementation that covers every declared edge.
+prompt: |
+  Use only reader-contract, utf8-model, chunk-schedules, readers, and manifest. Cite artifact ids.
+  Verdicts are covers / misses.
+
+  1. Classify reader-a through reader-d against L1..L9.
+  2. For each miss, give the first S1..S7 schedule and exact lines/error difference.
+  3. Identify the unique covering reader and trace S4 across both chunk boundaries.
+  4. State whether the CR in S3 is content or terminator and why.
+  5. Explain why rune count cannot enforce maxBytes.
+  6. Evaluate reviewer Eli's claim that an EOF fragment should be dropped because it lacks newline.
+artifacts:
+  - id: reader-contract
+    type: spec
+    label: Complete streaming line-reader contract
+    content: |
+      Decode(chunks,maxBytes) consumes a finite sequence of byte chunks and returns lines or an error.
+      maxBytes is 1..1MiB and counts line content bytes after excluding a terminator.
+
+      L1 terminators are LF (0a) and CRLF (0d 0a). A CR not immediately followed by LF is content.
+      L2 terminators may cross chunks. Consecutive terminators produce empty lines.
+      L3 a nonempty terminal fragment at EOF is one final line; an empty fragment after a terminator
+         produces no extra line.
+      L4 each completed content byte sequence must be strict UTF-8; malformed input is InvalidUtf8.
+      L5 UTF-8 code points may cross chunks and are validated only when a line completes or EOF occurs.
+      L6 content length >maxBytes is LineTooLong as soon as the excess byte arrives; exactly max is valid.
+      L7 on any error, return no partial lines and stop reading further chunks.
+      L8 no BOM stripping, Unicode normalization, or newline insertion.
+      L9 O(maxBytes) memory and one pass over bytes; input chunks are not mutated.
+  - id: utf8-model
+    type: note
+    label: Frozen byte and validation semantics
+    content: |
+      utf8.Valid(content) rejects overlong sequences, surrogates, isolated continuation bytes, and
+      incomplete terminal sequences. Decode accumulates bytes, not runes. When LF arrives, remove a
+      single immediately preceding CR from content, validate the remaining bytes, and append its
+      exact string. A CR held at a chunk boundary remains pending until the following byte decides it.
+  - id: chunk-schedules
+    type: table
+    label: Authoritative edge witnesses
+    content: |
+      S1 chunks=[] -> []
+      S2 chunks=["a\n\nb\n"] -> ["a","","b"]
+      S3 chunks=["a\r","X\n"] -> ["a\rX"] (CR is content)
+      S4 chunks=[bytes "caf"+c3, bytes a9+"\r", bytes "\nnext"] -> ["café","next"]
+      S5 chunks=["abc"], maxBytes=3 -> ["abc"]; chunks=["abcd"], maxBytes=3 -> LineTooLong.
+         UTF-8 bytes for "café", maxBytes=4 -> LineTooLong because content is five bytes.
+      S6 chunks=[[0x61,0xc3],[0x28,0x0a]] -> InvalidUtf8 and no returned ["a..."] line.
+      S7 chunks=["x\n", [0xff], "ignored\n"] -> InvalidUtf8, no partial lines, third chunk not read.
+  - id: readers
+    type: code
+    label: Four complete Go implementations by behavior
+    content: |
+      reader-a:
+        scan bytes once into a []byte content buffer bounded at maxBytes+1
+        on LF strip one trailing CR, strict-validate, append line, reset buffer
+        at EOF validate/append only a nonempty buffer; stage outputs until success
+
+      reader-b:
+        convert each chunk independently with string(chunk), split on "\n", join fragments
+        trim any trailing "\r" from each produced fragment; Go replacement characters are accepted
+
+      reader-c:
+        same byte state machine and strict validation as reader-a
+        at EOF discard any remaining content buffer and return only newline-terminated lines
+
+      reader-d:
+        increment a count for each successfully decoded rune rather than each byte
+        reject when rune count exceeds maxBytes; otherwise CR/LF and EOF behavior matches reader-a
+
+      reader-a's output staging uses O(total output) caller-owned result space; L9 bounds only working
+      state beyond returned output. Every reader stops fetching chunks after its own error.
+  - id: boundary-notes
+    type: table
+    label: Exact boundary classifications
+    content: |
+      a\r + X => CR content because the next byte is not LF.
+      a\r + \n => CRLF terminator, content is a.
+      \n\n => two completed empty records.
+      trailing abc => final record abc.
+      trailing \n => no additional record after the record already completed by LF.
+      UTF-8 café is five content bytes and four runes.
+  - id: manifest
+    type: note
+    label: Completeness and EOF claim
+    content: |
+      reader-a through reader-d are the only submissions. Input retrieval is lazy, so S7's unread
+      third chunk is observable. No I/O package adds newline behavior.
+
+      Eli's proposal contradicts L3. This is a record decoder, not a protocol requiring every record
+      to be newline-terminated; a valid nonempty EOF fragment is data.
+tags: [generation, edge-case-coverage, go, utf-8, streaming]

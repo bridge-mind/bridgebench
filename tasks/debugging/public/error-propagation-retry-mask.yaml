@@ -1,10 +1,10 @@
 id: error-propagation-retry-mask
-version: 1.0.0
+version: 1.1.0
 category: debugging
 cluster: error-propagation
 difficulty: expert
-title: Batchmill Uploads Fail As Timeouts While The Real Error Is A Stale-Signature 403
-summary: An upload worker alerts on UploadTimeout for a third of jobs and on-call blames slow storage. But the retry layer relabels every exhausted failure as a timeout, hiding a 403 SignatureExpired on each attempt, and a recent change pre-signs URLs at enqueue so queue wait eats the signature's 60s validity. Storage is healthy and the client timeout is generous. Trace past the relabeled symptom to the true origin and pick the fix that addresses it.
+title: Batchmill Uploads Intermittently Alert As Timeouts
+summary: An upload worker alerts on UploadTimeout for about a third of jobs, typically after a queue backlog, and on-call blames slow storage. Given the worker log, upload and signer code, a recent diff, storage and queue metrics, the HTTP client config, and the error taxonomy, trace past the alert's label to the true origin, state precisely which jobs fail, classify the red herrings, and pick the fix that addresses the origin.
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (alert-log, upload-code,
   signer-code, signer-diff, storage-metrics, queue-metrics, http-config, error-taxonomy).
@@ -44,13 +44,12 @@ artifacts:
       # u-9931 was pre-signed at enqueue, then waited in the queue before a worker ran it.
       09:58:40 INFO  enqueue u-9931: signRequest minted url, signature valid 09:58:40..09:59:40 (60s)
       10:00:00 INFO  worker dequeued u-9931 (queue wait 80s); using the url minted at enqueue
-      10:00:00 WARN  storage.put attempt 1 -> HTTP 403 SignatureExpired (signature age 80s > 60s)  [12ms]
-      10:00:30 WARN  storage.put attempt 2 -> HTTP 403 SignatureExpired (age 110s; url NOT re-signed) [11ms]
-      10:01:00 WARN  storage.put attempt 3 -> HTTP 403 SignatureExpired (age 140s) [13ms]
+      10:00:00 WARN  storage.put attempt 1 -> HTTP 403 SignatureExpired (signature age 80s)  [12ms]
+      10:00:30 WARN  storage.put attempt 2 -> HTTP 403 SignatureExpired (signature age 110s) [11ms]
+      10:01:00 WARN  storage.put attempt 3 -> HTTP 403 SignatureExpired (signature age 140s) [13ms]
       10:01:00 ERROR withRetry exhausted 3 attempts -> throw UploadTimeout('upstream did not respond in 30s')
       10:01:00 ERROR job u-9931 failed: UploadTimeout
-      # Every attempt returns 403 in ~12ms; none times out. The final error type is fixed by code, not measured.
-      # Contrast u-9930: enqueued 10:00:10, dequeued 10:00:25 (wait 15s), put at age 15s -> 200 OK.
+      # u-9930: enqueued 10:00:10, dequeued 10:00:25 (wait 15s), put at age 15s -> 200 OK.
   - id: upload-code
     type: code
     label: enqueue and worker paths with retry wrapper
@@ -58,7 +57,7 @@ artifacts:
       // batchmill/upload.ts
       // PRODUCER (enqueue): pre-signs the URL now and stores it on the job.
       function enqueue(file) {
-        const url = signRequest(bucketPathFor(file));   // signed at ENQUEUE (see signer-diff)
+        const url = signRequest(bucketPathFor(file));   // signed at enqueue
         queue.push({ id: file.id, url, body: file.bytes });
       }
 
@@ -67,7 +66,7 @@ artifacts:
         return withRetry(3, () => storageClient.put(job.url, job.body));
       }
 
-      // withRetry: retries on ANY thrown error; after N attempts throws a FIXED UploadTimeout.
+      // withRetry: retries on any thrown error; after N attempts throws UploadTimeout.
       async function withRetry(n, fn) {
         let attempt = 0;
         for (;;) {
@@ -75,10 +74,9 @@ artifacts:
           catch (e) {
             attempt++;
             if (attempt >= n) {
-              // relabels the last failure as a timeout regardless of what actually happened.
               throw new UploadTimeout('upstream did not respond in 30s');
             }
-            await sleep(30_000);          // wait between attempts; job.url is NOT re-signed
+            await sleep(30_000);          // wait between attempts
           }
         }
       }
@@ -109,10 +107,6 @@ artifacts:
       -   return withRetry(3, () => storageClient.put(url, job.body));
       +   return withRetry(3, () => storageClient.put(job.url, job.body));  // AFTER: reuse enqueue-time url
         }
-      # BEFORE: the worker minted a fresh 60s signature immediately before the put, so queue
-      # wait did not count against it. AFTER: the signature is minted at enqueue, so the full
-      # queue wait (plus retry backoff) is charged against the 60s validity. The 60s expiry
-      # itself was not changed.
   - id: storage-metrics
     type: table
     label: object-storage backend metrics (incident window)
@@ -122,10 +116,8 @@ artifacts:
       put p50 latency                12 ms
       put p99 latency                41 ms
       5xx rate                       0.00%
-      403 SignatureExpired rate      31.2%      <-- matches the ~30% failing jobs
+      403 SignatureExpired rate      31.2%
       throttling (503 SlowDown)      0.00%
-      # The backend is healthy and fast; it REJECTS ~31% of puts for expired signatures.
-      # It is not timing out, throttling, or erroring on the server side.
   - id: queue-metrics
     type: table
     label: worker queue wait distribution (incident window)
@@ -133,11 +125,10 @@ artifacts:
       percentile   queue_wait
       ----------   ----------
       p50          22 s
-      p70          60 s          <-- 70% of jobs wait <= 60s; ~30% wait longer
+      p70          60 s
       p90          145 s
       p99          410 s
-      # queue wait is the time from enqueue (when the URL is now signed) to dequeue.
-      # Share of jobs with queue_wait > 60s ~= 30%, matching the 403 rate in storage-metrics.
+      # queue wait is the time from enqueue to dequeue.
   - id: http-config
     type: config
     label: storage HTTP client configuration
@@ -145,10 +136,8 @@ artifacts:
       # batchmill/http.yaml
       storageClient:
         connectTimeoutMs: 5000
-        requestTimeoutMs: 30000     # 30s; the "30s" quoted in the UploadTimeout string
+        requestTimeoutMs: 30000     # 30s
         maxSockets: 64
-      # The 30s in the alert text is copied from this setting; it is NOT a measured elapsed
-      # time. Observed put responses complete in ~12ms (storage-metrics, alert-log).
   - id: error-taxonomy
     type: spec
     label: batchmill upload error taxonomy
@@ -162,6 +151,5 @@ artifacts:
         the url must be re-signed to recover.
       - Queue wait is unbounded and independent of signing; a job may sit in the queue for an
         arbitrary time before a worker dequeues it.
-      There are no other upload error classes. withRetry's thrown type is a label chosen by
-      code, not a classification of the underlying HTTP status.
+      There are no other upload error classes.
 tags: [error-propagation, retry, presigned-url, debugging, storage]

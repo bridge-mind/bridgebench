@@ -1,0 +1,130 @@
+id: error-propagation-context-lifetime
+version: 1.0.0
+category: debugging
+cluster: error-propagation
+difficulty: expert
+title: Parent Function Cancels Upload Context Before Spawned Goroutines Finish
+summary: >-
+  A background asset sync reports object-store stream failures through a retry wrapper, worker mapper,
+  and API status endpoint. The error originates earlier: a parent function returns after merely spawning
+  upload goroutines, executes its deferred cancel, and invalidates their shared context. Trace the error
+  across layers and distinguish propagation sites from the lifetime defect.
+prompt: |
+  Diagnose the fictional AtlasForge sync failure using ONLY the artifacts. Cite artifact ids for every
+  claim. Use root-cause, red-herring, adequate-fix, and shallow-fix.
+
+  1. Identify the true error origin and the exact lifetime mismatch in source-code. Do not stop at the
+     final API message or the object-store call where cancellation is first observed.
+  2. Trace sync job J-44 from function entry through goroutine start, deferred cancellation, SDK error,
+     retry wrapping, worker mapping, persisted status, and API response.
+  3. Explain why the object-store TLS, request timeout, retry limit, and error mapper are red herrings.
+  4. Compare J-44 with the one-file control and explain why timing makes the bug appear size-dependent
+     without making file size the root cause.
+  5. Classify F1 through F4 and choose the adequate fix. State who owns cancellation and when it may fire.
+  6. Give a deterministic test using a blocking uploader that proves the parent cannot return or cancel
+     until all child uploads finish, and that the first real child error cancels siblings and propagates.
+
+  The goroutine, context, and error-mapping paths are complete and exhaustive.
+artifacts:
+  - id: source-code
+    type: code
+    label: sync/assets.go — complete parent and child lifecycle
+    content: |
+      func syncAssets(parent context.Context, files []File) error {
+        ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+        defer cancel()
+
+        startUploads(ctx, files) // returns after starting goroutines
+        return nil
+      }
+
+      func startUploads(ctx context.Context, files []File) {
+        for _, file := range files {
+          f := file
+          go func() {
+            if err := uploadWithRetry(ctx, f); err != nil {
+              uploadResults <- Result{File: f.Name, Err: err}
+              return
+            }
+            uploadResults <- Result{File: f.Name}
+          }()
+        }
+      }
+
+      // No WaitGroup, errgroup, join, or result drain occurs before syncAssets returns. The job worker
+      // separately consumes uploadResults. These are the only goroutines created for an asset sync.
+  - id: retry-and-sdk
+    type: code
+    label: storage/upload.go and SDK cancellation semantics
+    content: |
+      func uploadWithRetry(ctx context.Context, f File) error {
+        return retry.Do(3, func() error {
+          if err := objectStore.Put(ctx, f.Reader); err != nil {
+            return fmt.Errorf("put %s: %w", f.Name, err)
+          }
+          return nil
+        }, retry.StopWhen(func(err error) bool {
+          return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+        }))
+      }
+
+      SDK contract: Put watches ctx.Done. If canceled before headers complete, it closes the request body
+      and returns an error wrapping context.Canceled. Cancellation errors are non-retryable by retry.Do.
+      Network, TLS, and HTTP status errors do not wrap context.Canceled.
+  - id: mapper-code
+    type: code
+    label: worker/result-handler.go and API status mapping
+    content: |
+      for result := range uploadResults {
+        if result.Err != nil {
+          code := "REMOTE_STREAM_CLOSED"
+          if errors.Is(result.Err, context.DeadlineExceeded) { code = "SYNC_TIMEOUT" }
+          jobs.MarkFileFailed(result.File, code, result.Err.Error())
+        } else {
+          jobs.MarkFileDone(result.File)
+        }
+      }
+
+      GET /jobs/:id returns persisted public code only:
+        { "state":"failed", "code":"REMOTE_STREAM_CLOSED" }
+      The mapper does not alter, retry, cancel, or originate upload errors. Its generic mapping for
+      context.Canceled is misleading but occurs after the failure already exists.
+  - id: timeline
+    type: log
+    label: job J-44 trace with context identity ctx-88
+    content: |
+      08:00:00.000 syncAssets enters; creates ctx-88 deadline=08:00:30
+      08:00:00.001 startUploads starts goroutines G-a, G-b, G-c with ctx-88
+      08:00:00.002 startUploads returns; syncAssets returns nil; deferred cancel(ctx-88) runs
+      08:00:00.003 ctx-88 Done closes, cause=context canceled (deadline has 29.997s remaining)
+      08:00:00.006 G-a Put closes body -> "put a.bin: context canceled"; retry stops
+      08:00:00.007 G-b same; G-c same
+      08:00:00.008 result handler persists REMOTE_STREAM_CLOSED for all three
+      08:00:00.010 GET /jobs/J-44 -> failed REMOTE_STREAM_CLOSED
+      SDK wire log: zero requests completed TLS handshake; cancellation happened before connect finished.
+  - id: controls
+    type: table
+    label: control runs and infrastructure telemetry
+    content: |
+      run    files  Put setup latency  parent return  result
+      C-1    1      0.2ms              0.8ms          success before deferred cancel
+      C-2    1      1.4ms              0.8ms          context canceled
+      J-44   3      4-6ms each         2.0ms          all context canceled
+      Fixed  3      4-6ms each         after 92ms     all success
+
+      Object store health during all runs: TLS errors=0, 5xx=0, p99 Put=96ms, availability=100%.
+      Parent contexts were live; 30s deadline never elapsed. Increasing files increases the chance that a
+      child is still pending at parent return, but file bytes are not read before Put starts.
+  - id: candidate-fixes
+    type: note
+    label: proposed lifecycle fixes
+    content: |
+      F1: Replace startUploads with errgroup.WithContext(ctx), start one child per file, call group.Wait()
+          inside syncAssets, and return its error. Defer cancel remains in syncAssets after Wait; the first
+          child error cancels siblings through errgroup, and success waits for every child.
+      F2: Remove defer cancel and never cancel ctx; keep detached goroutines and return nil immediately.
+      F3: Change mapper's context.Canceled label from REMOTE_STREAM_CLOSED to CLIENT_CANCELED.
+      F4: Raise context timeout from 30s to 5m while retaining immediate parent return and deferred cancel.
+      Contract: syncAssets owns the child context and must not return until children finish or one real
+      error cancels siblings. It must propagate failure to its caller and release context resources.
+tags: [debugging, error-propagation, golang, context, goroutines]

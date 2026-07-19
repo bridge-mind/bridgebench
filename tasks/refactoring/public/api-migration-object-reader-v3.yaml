@@ -1,0 +1,177 @@
+id: api-migration-object-reader-v3
+version: 1.0.0
+category: refactoring
+cluster: api-migration
+difficulty: expert
+title: Migrate an Object Reader Across Renamed Options and Retry Semantics
+summary: >-
+  A storage SDK upgrade renames abort and metadata hooks, replaces a verification boolean with an
+  integrity enum, and changes retries-after-first into total-attempts. Four adapters type-check;
+  only one preserves callbacks, abort identity, integrity, and zero-retry behavior.
+prompt: |
+  Use only legacy-api, v3-api, call-sites, adapters, and migration-matrix. Cite artifacts. For each
+  adapter return behavior-preserving / changes-behavior and meets-goal / fails-goal.
+
+  1. Classify adapter-a through adapter-d.
+  2. For every changed behavior, name M1..M7 and a call site or migration-matrix witness, including
+     the exact legacy and migrated behavior.
+  3. Identify the unique behavior-preserving adapter that meets the v3 migration goal.
+  4. Map every legacy option to its v3 counterpart and explain retries=0 numerically.
+  5. Trace C2's already-aborted signal and required error object identity.
+  6. Evaluate the claim that v3 defaults are safe because they improve reliability.
+artifacts:
+  - id: legacy-api
+    type: spec
+    label: Complete ObjectReader v2 surface and semantics
+    content: |
+      interface V2Reader {
+        read(
+          objectKey: string,
+          options: {
+            signal: AbortSignal;
+            verify: true;
+            retries: number;
+            onMeta: (meta:{etag:string,size:number}) => void;
+          }
+        ): Promise<Uint8Array>;
+      }
+
+      M1 objectKey is opaque; no URI decoding or prefixing occurs.
+      M2 signal is checked before network work. If already aborted, read rejects with signal.reason
+         by object identity. Later abort also rejects with that same reason.
+      M3 verify:true requires a sha256 checksum header and verifies bytes. Missing/mismatch rejects
+         IntegrityError before fulfillment.
+      M4 retries is the number of retries after the first attempt. retries:0 means exactly one total
+         attempt.
+      M5 onMeta runs exactly once after validated response headers and before the first body byte.
+         It receives only etag and size.
+      M6 The returned Uint8Array is a fresh copy.
+      M7 These are the only v2 behaviors used by the call sites.
+  - id: v3-api
+    type: spec
+    label: Complete ObjectReader v3 replacement surface
+    content: |
+      interface V3Reader {
+        get(options: {
+          key: string;
+          abort: AbortSignal;
+          integrity: 'none'|'sha256-required';
+          maxAttempts?: number;
+          onHeaders: (headers:{etag:string,contentLength:number,checksum?:string}) => void;
+          copy: boolean;
+        }): Promise<Uint8Array>;
+      }
+
+      Mapping:
+        key receives the opaque v2 objectKey unchanged.
+        abort has exactly v2 signal semantics, including reason identity.
+        integrity:'sha256-required' has exactly v2 verify:true behavior.
+        maxAttempts is TOTAL attempts and must be >=1. If omitted it defaults to 3.
+        onHeaders occurs at the same point as v2 onMeta. Adapt metadata as
+          {etag:headers.etag,size:headers.contentLength}; do not expose checksum.
+        copy:true returns a fresh Uint8Array; copy:false may return pooled memory.
+
+      get is the only supported v3 read method. No wrapper outside the proposed adapter changes
+      errors, retries, callbacks, keys, or returned buffers.
+  - id: call-sites
+    type: code
+    label: Exhaustive production callers
+    content: |
+      async function loadIndex(reader, signal) {
+        let meta;
+        const bytes = await reader.read('indexes/%2F/current', {
+          signal, verify: true, retries: 0, onMeta: (m) => { meta = m; },
+        });
+        return { bytes, meta };
+      }
+
+      async function cancelled(reader, signal) {
+        // signal is already aborted with the object STOP before this call.
+        return reader.read('snapshots/latest', {
+          signal, verify: true, retries: 0, onMeta: () => { throw new Error('must not run'); },
+        });
+      }
+
+      async function corrupt(reader, signal) {
+        return reader.read('blobs/bad', {
+          signal, verify: true, retries: 0, onMeta: auditMeta,
+        });
+      }
+
+      These are C1, C2, and C3 respectively and are the complete callers. Adapter must retain a
+      read method with the v2 signature so call sites do not change.
+  - id: adapters
+    type: code
+    label: Four proposed v2-compatible adapters over v3
+    content: |
+      // adapter-a
+      class AdapterA {
+        constructor(v3) { this.v3 = v3; }
+        read(objectKey, options) {
+          return this.v3.get({
+            key: objectKey,
+            abort: options.signal,
+            integrity: 'sha256-required',
+            maxAttempts: options.retries + 1,
+            onHeaders: (h) => options.onMeta({ etag: h.etag, size: h.contentLength }),
+            copy: true,
+          });
+        }
+      }
+
+      // adapter-b: omits maxAttempts and inherits the v3 default.
+      class AdapterB {
+        constructor(v3) { this.v3 = v3; }
+        read(objectKey, options) {
+          return this.v3.get({
+            key: objectKey, abort: options.signal, integrity: 'sha256-required',
+            onHeaders: (h) => options.onMeta({ etag: h.etag, size: h.contentLength }),
+            copy: true,
+          });
+        }
+      }
+
+      // adapter-c: treats v2 retries as v3 total attempts, clamped to one.
+      class AdapterC {
+        constructor(v3) { this.v3 = v3; }
+        read(objectKey, options) {
+          return this.v3.get({
+            key: objectKey, abort: options.signal, integrity: 'sha256-required',
+            maxAttempts: Math.max(1, options.retries),
+            onHeaders: (h) => options.onMeta({ etag: h.etag, size: h.contentLength }),
+            copy: true,
+          });
+        }
+      }
+
+      // adapter-d: maps retry count but weakens integrity and buffer ownership.
+      class AdapterD {
+        constructor(v3) { this.v3 = v3; }
+        read(objectKey, options) {
+          return this.v3.get({
+            key: decodeURIComponent(objectKey),
+            abort: options.signal,
+            integrity: 'none',
+            maxAttempts: options.retries + 1,
+            onHeaders: (h) => options.onMeta({
+              etag: h.etag, size: h.contentLength, checksum: h.checksum,
+            }),
+            copy: false,
+          });
+        }
+      }
+  - id: migration-matrix
+    type: table
+    label: Authoritative distinguishing outcomes and proposal inventory
+    content: |
+      W1 C1 key passed to v3 is literally indexes/%2F/current. Metadata callback gets exactly
+         {etag:'e1',size:12}; one failed network attempt rejects without retry; bytes are fresh.
+      W2 C2 makes zero network attempts and rejects with the exact STOP object.
+      W3 C3 receives a checksum mismatch and rejects IntegrityError; it never fulfills corrupt bytes.
+      W4 With legacy retries:2, a compatible adapter sets maxAttempts:3.
+
+      adapter-a through adapter-d are complete. Every v3 implementation obeys v3-api exactly.
+      Reviewer's suggestion to accept the default three attempts changes C1's externally observed
+      request count and latency even if a later attempt succeeds; migration means preserving the
+      declared contract, not selecting a preferred new default.
+tags: [refactoring, api-migration, sdk, retries, abort-signal]

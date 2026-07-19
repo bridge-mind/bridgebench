@@ -1,0 +1,77 @@
+id: fidelity-abi-layout
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: Exact Plugin ABI Layout Across Near-Duplicate Headers and Platform Reports
+summary: Extract byte offsets, sizes, alignment, symbol version, and digest from authoritative build artifacts while resisting values from an obsolete header and a different architecture.
+prompt: |
+  Prepare the exact ABI record for `bridge_plugin_v3` Linux x86_64 build `b-1042`. Preserve spelling,
+  hexadecimal case, units, and field order. Do not calculate from the stale source header when the
+  build report supplies a value.
+
+  1. Transcribe struct size and alignment exactly as reported for b-1042 x86_64.
+  2. Transcribe every field name, offset, and field size in declaration order.
+  3. Give exported symbol name, ELF symbol version, and calling convention.
+  4. Give the exact artifact SHA-256 and build commit.
+  5. List every differing value in [stale-header] and [arm-report], labeling why it does not govern.
+  6. Produce a C `_Static_assert` block for the authoritative x86_64 layout and an audit table citing
+     artifact ID plus exact line label for every asserted value.
+artifacts:
+  - id: authority-manifest
+    type: spec
+    label: Scope and authority
+    content: |
+      For build b-1042 Linux x86_64, compiler-emitted layout report and linker map generated in that
+      build are authoritative. Artifact manifest governs digest and commit. `plugin.h` at another
+      commit and arm64 reports are comparison-only. Values must not be converted between decimal and
+      hexadecimal unless a deliverable explicitly asks.
+  - id: x64-layout
+    type: log
+    label: Compiler record layout b-1042 linux-x86_64
+    content: |
+      L1 RECORD bridge_plugin_v3
+      L2 sizeof=48
+      L3 alignof=8
+      L4 +0  abi_version  size=4
+      L5 +4  flags        size=4
+      L6 +8  name_ptr     size=8
+      L7 +16 init_fn      size=8
+      L8 +24 shutdown_fn  size=8
+      L9 +32 context      size=8
+      L10 +40 reserved    size=8
+  - id: linker-map
+    type: log
+    label: Linker export map b-1042
+    content: |
+      M1 0000000000002A10 g DF .text 0000000000000038 BRIDGE_3.1 bridge_plugin_init_v3
+      M2 ABI calling convention: System V AMD64
+      M3 visibility: default
+  - id: artifact-manifest
+    type: config
+    label: Signed build artifact manifest
+    content: |
+      build: b-1042
+      target: x86_64-unknown-linux-gnu
+      commit: 7ac91e4b2d70
+      file: libbridge_plugin.so
+      sha256: 9d7f0c2a11bb44e8a3c0f981de7741510fb649bb0a1b775ab4c81291acfe203d
+  - id: stale-header
+    type: code
+    label: plugin.h from commit 62ff (not build input)
+    content: |
+      // claimed sizeof 40, align 8
+      struct bridge_plugin_v3 {
+        uint32_t abi_version; uint32_t flags;
+        void *name_ptr; void *init_fn; void *shutdown_fn; void *context;
+      };
+      // documentation says symbol bridge_plugin_init, version BRIDGE_3.0
+  - id: arm-report
+    type: log
+    label: Compiler layout b-1042 linux-aarch64
+    content: |
+      sizeof=48 alignof=8
+      offsets: abi_version=0 flags=4 name_ptr=8 init_fn=16 shutdown_fn=24 context=32 reserved=40
+      symbol=bridge_plugin_init_v3 version=BRIDGE_3.1 convention=AAPCS64
+      artifact sha256=44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff44ff
+tags: [abi, citation-fidelity, binary, layout, build-provenance]

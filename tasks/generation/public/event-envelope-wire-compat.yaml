@@ -1,10 +1,10 @@
 id: event-envelope-wire-compat
-version: 1.0.0
+version: 1.1.0
 category: generation
 cluster: interface-compatibility
 difficulty: expert
 title: Which Event Producer Emits an Envelope the Frozen Signed-JSON Consumer Accepts
-summary: A frozen consumer accepts a signed Event envelope whose signature covers a canonical key order. Five producers are proposed; decoys break compatibility subtly — renaming ts to timestamp, emitting traceId as null instead of omitting it, or signing over insertion order not canonical order. One conformer shuffles the WIRE key order yet signs correctly. Classify each conforms/violates, separating the order that matters (signed bytes) from the one that does not (wire keys).
+summary: A frozen consumer accepts a signed Event envelope whose signature covers a canonical key order. Five producers are proposed. Classify each as conforms or violates against the consumer's acceptance rules, separating the order that matters (signed bytes) from the one that does not (wire keys).
 prompt: |
   Answer each deliverable using ONLY the supplied artifacts (consumer-contract,
   producer-a, producer-b, producer-c, producer-d, producer-e, judging-notes). Cite the
@@ -77,26 +77,25 @@ artifacts:
       signedString() {
         return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
       }
-      // emitted envelope (no trace on this event, so traceId is omitted):
+      // emitted envelope (no trace on this event):
       // {"v":3,"id":"e-1","type":"order.created","ts":1699999999000,
       //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
   - id: producer-b
     type: code
     label: producer-b
     content: |
-      // producer-b — signs over the canonical order, but renames a wire field.
+      // producer-b
       signedString() {
         return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
       }
       // emitted envelope:
       // {"v":3,"id":"e-2","type":"order.created","timestamp":1699999999000,
       //  "data":{"amount":50},"sig":"<hmac over signedString()>"}
-      // (the epoch-ms field is emitted as "timestamp")
   - id: producer-c
     type: code
     label: producer-c
     content: |
-      // producer-c — no trace on this event; still emits a traceId key.
+      // producer-c — no trace on this event.
       signedString() {
         return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
       }
@@ -107,7 +106,7 @@ artifacts:
     type: code
     label: producer-d
     content: |
-      // producer-d — signs over the producer's own field-insertion order.
+      // producer-d
       signedString() {
         return `v=${this.v}|id=${this.id}|type=${this.type}|ts=${this.ts}|data=${J(this.data)}`;
       }
@@ -118,11 +117,11 @@ artifacts:
     type: code
     label: producer-e
     content: |
-      // producer-e — signs over the canonical order; emits keys in a different wire order.
+      // producer-e
       signedString() {
         return `data=${J(this.data)}|id=${this.id}|ts=${this.ts}|type=${this.type}|v=${this.v}`;
       }
-      // emitted envelope (note the physical key order differs from canonical):
+      // emitted envelope:
       // {"sig":"<hmac over signedString()>","type":"order.created","v":3,
       //  "data":{"amount":50},"id":"e-5","ts":1699999999000}
   - id: judging-notes

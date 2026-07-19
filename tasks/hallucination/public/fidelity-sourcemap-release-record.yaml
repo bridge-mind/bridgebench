@@ -1,0 +1,95 @@
+id: fidelity-sourcemap-release-record
+version: 1.0.0
+category: hallucination
+cluster: citation-fidelity
+difficulty: expert
+title: Exact Source Map Release Record Under Near-Duplicate SHAs, Paths, and Counts
+summary: Extract exact release, commit, bundle, source-map, upload, and verification facts from dense CI records containing confusable hexadecimal digests, artifact paths, environment names, counts, and quoted policy text.
+prompt: |
+  Extract the requested facts exactly. Preserve case, punctuation, path spelling, timestamps, counts,
+  and full hexadecimal values. Use the named authoritative artifact for each item; do not substitute a
+  shortened SHA, a neighboring platform's artifact, the previous release, or paraphrased policy prose.
+
+  1. Give the exact release name and full source commit for the production web release.
+  2. Give the exact browser bundle path and its full SHA-256 digest.
+  3. Give the exact matching source-map path, byte size, and full SHA-256 digest.
+  4. State the source-map upload's accepted, rejected, and deduplicated file counts, plus its exact
+     completion timestamp.
+  5. Quote verbatim the policy sentence that defines a successful release verification.
+  6. Give the exact verification command's release/environment arguments and the resulting matched and
+     unmatched artifact counts.
+  7. Identify the one previous-release map mentioned by [near-duplicate-index] and explain, using exact
+     release and digest values, why it must not be attributed to the current release.
+artifacts:
+  - id: release-record
+    type: config
+    label: Authoritative production release record
+    content: |
+      application: northstar-web
+      release: northstar-web@2026.07.18-rc.3
+      environment: production-us
+      sourceCommit: 8f31b0b6d90584c2b1b410740f0372ea6fcacd91
+      buildInvocation: web-build-19044
+      completedAt: 2026-07-18T23:41:07.219Z
+
+      Do not confuse sourceCommit with bundle/map SHA-256 values or with the prior commit in
+      [near-duplicate-index].
+  - id: artifact-manifest
+    type: table
+    label: Exact artifact manifest for current release
+    content: |
+      kind       | path                                      | bytes   | sha256
+      bundle     | assets/app.8f31b0b6.js                    | 841203  | 9b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc91f3bf0c6e1227
+      source-map | assets/app.8f31b0b6.js.map                | 2910441 | b91f0c6e12279b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc91
+      css        | assets/app.8f31b0b6.css                   | 94622   | 31f3bf0c6e12279b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc
+      server-map | server/chunks/render.8f31b0b6.mjs.map     | 488120  | 0c6e12279b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc91f3bf
+
+      Paths are case-sensitive and relative to `dist/`. The browser source map is the `source-map` row,
+      not `server-map`. Notice the same hexadecimal fragments appear in different orders.
+  - id: upload-log
+    type: log
+    label: Source map uploader structured result
+    content: |
+      2026-07-18T23:41:08.004Z upload.start release=northstar-web@2026.07.18-rc.3 env=production-us
+      2026-07-18T23:41:11.882Z upload.file accepted path=assets/app.8f31b0b6.js.map
+      2026-07-18T23:41:12.140Z upload.file accepted path=server/chunks/render.8f31b0b6.mjs.map
+      2026-07-18T23:41:12.901Z upload.complete accepted=2 rejected=0 deduplicated=0
+
+      The final line is authoritative for counts and completion time. `release-record.completedAt` is
+      build completion, not upload completion.
+  - id: verification-log
+    type: log
+    label: Post-upload verification command and output
+    content: |
+      command:
+        mapctl verify --release 'northstar-web@2026.07.18-rc.3' --environment 'production-us'
+      output:
+        matched_artifacts=2
+        unmatched_artifacts=0
+        release_status=verified
+        checked_at=2026-07-18T23:41:14.005Z
+
+      The environment is `production-us`, not `prod-us` or `production_us`.
+  - id: policy
+    type: spec
+    label: Release verification policy (quote source)
+    content: |
+      Policy MAP-12, revision 4.
+
+      "A release is verified only when every uploaded source map is matched to one bundle in the same
+      release and environment, and the unmatched artifact count is exactly zero."
+
+      A draft paraphrase said "maps should usually match a bundle"; that draft was withdrawn. Quote the
+      sentence inside quotation marks above exactly, without the quotation marks.
+  - id: near-duplicate-index
+    type: table
+    label: Confusable current and previous release records
+    content: |
+      release                              | source commit                             | browser map path                    | map sha256
+      northstar-web@2026.07.18-rc.2        | 8f31b0b6d90584c2b1b410740f0372ea6fcacd19 | assets/app.8f31b0b6.js.map          | b91f0c6e12279b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc90
+      northstar-web@2026.07.18-rc.3        | 8f31b0b6d90584c2b1b410740f0372ea6fcacd91 | assets/app.8f31b0b6.js.map          | b91f0c6e12279b8ef07c4b88a6eaa3fdd0b72c16e9f4d9199bea0a54aeb3bc91
+
+      The path was reused between releases; release identity and digest distinguish them. The current
+      digest ends `bc91`; the previous digest ends `bc90`. The source commits likewise end `cd91` and
+      `cd19`, respectively.
+tags: [citation-fidelity, sourcemaps, release, sha256, ci]

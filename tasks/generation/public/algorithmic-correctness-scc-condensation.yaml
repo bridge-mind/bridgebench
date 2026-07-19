@@ -1,0 +1,110 @@
+id: algorithmic-correctness-scc-condensation
+version: 1.0.0
+category: generation
+cluster: algorithmic-correctness
+difficulty: expert
+title: Canonicalize Strongly Connected Components and Their Condensation DAG
+summary: >-
+  Four graph implementations appear to find strongly connected components, but only one also
+  handles disconnected vertices, canonical output ordering, self-loops, and deduplicated
+  condensation edges exactly as required.
+prompt: |
+  Use only graph-contract, canonicalization, graph-vectors, candidates, and manifest. Cite artifact
+  ids. Verdicts are correct / incorrect.
+
+  1. Classify candidate-a through candidate-d against G1..G8.
+  2. For each incorrect candidate, give the first V1..V6 witness and exact differing output field.
+  3. Identify the unique correct implementation and trace V4 from DFS discovery through edge output.
+  4. Give componentOf for vertices 0..6 and condensation edges for V4.
+  5. Explain why Tarjan pop order is not a public ordering guarantee.
+  6. Evaluate whether retaining a condensation self-edge can be justified by an input self-loop.
+artifacts:
+  - id: graph-contract
+    type: spec
+    label: Complete SCC function contract
+    content: |
+      analyze(n, edges) receives integer n in 0..100000 and a list of directed [from,to] pairs with
+      endpoints in 0..n-1. Parallel edges and self-loops are allowed. It returns:
+        { components:number[][], componentOf:number[], edges:[number,number][] }
+
+      G1 components are the maximal strongly connected vertex sets; isolated vertices count.
+      G2 vertices inside each component are ascending.
+      G3 components are ordered by their smallest vertex ascending and indexed by that order.
+      G4 componentOf[v] is the canonical component index containing v.
+      G5 output edges contain one [cu,cv] for each distinct input cross-component relation.
+      G6 output edges exclude self-edges and are sorted lexicographically by cu then cv.
+      G7 input arrays are not mutated. Runtime is O(n+m log m), including output sorting; memory O(n+m).
+      G8 recursion that can overflow at n=100000 violates the contract; iterative DFS or an explicitly
+         bounded stack-safe traversal is required.
+  - id: canonicalization
+    type: note
+    label: Frozen normalization procedure
+    content: |
+      A raw SCC traversal may emit components in any order. Canonicalization sorts vertices within
+      every component, sorts components by first vertex, then rebuilds componentOf. For every input
+      edge (u,v), add (componentOf[u],componentOf[v]) to a set only when the indexes differ; sort the
+      set's pairs lexicographically. This pass is authoritative and does not depend on DFS order.
+
+      Each candidate's SCC primitive is iterative and otherwise correct unless candidates states a
+      difference. No recursion failure is hidden in the primitives.
+  - id: graph-vectors
+    type: table
+    label: Exact canonical graph witnesses
+    content: |
+      V1 n=0, edges=[] -> components=[], componentOf=[], edges=[]
+      V2 n=3, edges=[] -> components=[[0],[1],[2]], componentOf=[0,1,2], edges=[]
+      V3 n=2, edges=[[0,0],[0,1],[0,1]] -> components=[[0],[1]], componentOf=[0,1], edges=[[0,1]]
+      V4 n=7, edges=[[0,1],[1,0],[1,2],[2,3],[3,2],[3,4],[4,5],[5,4],[5,6],[6,6],[1,2]]
+         -> components=[[0,1],[2,3],[4,5],[6]]
+            componentOf=[0,0,1,1,2,2,3]
+            edges=[[0,1],[1,2],[2,3]]
+      V5 n=4, edges=[[3,2],[2,3],[3,0],[0,1]]
+         -> components=[[0],[1],[2,3]], componentOf=[0,1,2,2], edges=[[0,1],[2,0]]
+      V6 n=3, edges=[[0,1],[1,2],[2,0],[1,1]]
+         -> components=[[0,1,2]], componentOf=[0,0,0], edges=[]
+  - id: candidates
+    type: code
+    label: Four graph algorithm submissions
+    content: |
+      candidate-a:
+        raw = iterativeTarjan(all vertices 0..n-1, edges)
+        components = canonicalize(raw) as defined
+        rebuild componentOf from components
+        collect cross-component pairs in Set<string>, decode, lexicographically sort
+
+      candidate-b:
+        raw = iterativeTarjan(all vertices 0..n-1, edges)
+        sort vertices inside each raw component
+        components = raw                         // retains Tarjan pop order
+        build componentOf and otherwise canonical condensation edges
+
+      candidate-c:
+        if n>0: raw = iterativeTarjan(start vertex 0 only, edges)
+        canonicalize raw, build componentOf initialized to -1
+        ignore edges touching component -1
+
+      candidate-d:
+        canonicalize iterativeTarjan(all vertices, edges), rebuild componentOf
+        map every input edge to [cu,cv], including cu===cv and parallel occurrences
+        lexicographically sort the resulting array without deduplication
+  - id: execution-trace
+    type: table
+    label: Frozen raw Tarjan order for distinguishing runs
+    content: |
+      The primitive's raw component pop order is:
+        V2 -> [[0],[1],[2]]
+        V4 -> [[6],[5,4],[3,2],[1,0]]
+        V5 -> [[1],[0],[3,2]]
+      Candidate a canonicalizes these orders. Candidate b exposes them after only sorting members.
+      Candidate c reaches every vertex only when it is reachable from vertex 0.
+  - id: manifest
+    type: note
+    label: Candidate completeness and edge interpretation
+    content: |
+      The four candidates are complete and use the same adjacency representation. Set<string> in
+      candidate-a is collision-free because keys are decimal "cu,cv" pairs and is decoded exactly.
+      No sorting is locale-dependent.
+
+      A self-loop proves reachability within an SCC but never becomes an edge of the condensation
+      DAG: G5/G6 define only cross-component relations and explicitly exclude self-edges.
+tags: [generation, algorithmic-correctness, graphs, strongly-connected-components, canonicalization]

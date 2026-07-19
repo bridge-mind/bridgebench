@@ -1,0 +1,151 @@
+id: extract-and-inline-optional-chaining
+version: 1.1.0
+category: refactoring
+cluster: extract-and-inline
+difficulty: expert
+title: Adopting Optional Chaining in readCity — Metric Side Effects and ?? vs ||
+summary: >-
+  Four rewrites adopt (or claim to adopt) optional chaining in a null-walking label helper whose
+  metrics fire on distinct null layers and whose empty-string city must become 'unknown'. Classify
+  each against both behavior and the optional-chaining goal, tracing the canonical user shapes.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (city-original, city-note, rewrite-a,
+  rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict vocabulary:
+  behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to ADOPT optional chaining (`?.`) for the address/city walk inside
+  readCity (at least one `?.` must appear on that walk) while preserving observable behavior exactly:
+  the returned string for every user shape in city-note, AND which metrics.inc calls fire (null_user
+  vs null_address) on each shape.
+
+  1. Classify rewrite-a against BOTH dimensions (behavior vs city-original, and whether it meets the
+     optional-chaining goal). Justify with the null-user and null-address paths.
+
+  2. Classify rewrite-b. If it changes behavior, name the observable difference on scenario U_null
+     and on scenario U_no_addr from city-note (return value AND which metrics fire).
+
+  3. Classify rewrite-c. Give the exact user shape on which its return value differs from
+     city-original, and state both return values. Also state whether null_user / null_address still
+     fire correctly on U_null and U_no_addr.
+
+  4. Classify rewrite-d against BOTH dimensions. If its behavior matches city-original, say so, and
+     separately state whether it satisfies the transformation goal, with the reason.
+
+  5. State which rewrites, if any, both preserve behavior AND meet the optional-chaining goal.
+     Then, for city-original on U_empty_city, state the ground-truth return value and which metrics
+     fire.
+artifacts:
+  - id: city-original
+    type: code
+    label: directory/city.ts — shipped readCity (the reference behavior)
+    content: |
+      // directory/city.ts — the shipped helper. This is the ONLY definition of readCity.
+      import { metrics } from './metrics';
+      import type { User } from './user';
+
+      export function readCity(user: User | null | undefined): string {
+        if (user == null) {
+          metrics.inc('null_user');
+          return 'unknown';
+        }
+        const addr = user.address;
+        if (addr == null) {
+          metrics.inc('null_address');
+          return 'unknown';
+        }
+        const city = addr.city;
+        // empty string is treated as missing (not nullish-only)
+        if (city == null || city === '') {
+          return 'unknown';
+        }
+        return city;
+      }
+  - id: city-note
+    type: note
+    label: directory — observability, user shapes, and the optional-chaining goal
+    content: |
+      directory — observability and the complete call surface.
+
+      metrics.inc('null_user') and metrics.inc('null_address') are OBSERVABLE counters on the ops
+      dashboard. No other side effects exist in readCity. User.address and address.city are plain data
+      fields (no getters).
+
+      Reference behavior of city-original (authoritative):
+        - user == null / undefined → return 'unknown' AND increment null_user (not null_address).
+        - user non-null but address == null / undefined → return 'unknown' AND increment
+          null_address (not null_user).
+        - address present but city == null, undefined, OR '' → return 'unknown' with NEITHER metric.
+        - otherwise return the city string.
+
+      Canonical user shapes referenced by the deliverables:
+        U_null:       user = null
+        U_no_addr:    user = { address: null }
+        U_empty_city: user = { address: { city: '' } }
+        U_ok:         user = { address: { city: 'Boston' } }
+
+      The transformation goal is to adopt optional chaining (`?.`) for the address/city walk while
+      preserving the return values and the metric increments above. A rewrite that keeps the nested
+      if-guards with no `?.` anywhere fails the goal even if behavior matches.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — optional chain the city read; keep layered metric guards
+    content: |
+      // rewrite-a — adopt ?. for the city walk; keep distinct null metrics.
+      export function readCity(user: User | null | undefined): string {
+        if (user == null) {
+          metrics.inc('null_user');
+          return 'unknown';
+        }
+        if (user.address == null) {
+          metrics.inc('null_address');
+          return 'unknown';
+        }
+        const city = user.address?.city;
+        if (city == null || city === '') {
+          return 'unknown';
+        }
+        return city;
+      }
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — one-liner with ?. and ??
+    content: |
+      // rewrite-b — "optional chaining replaces all the null checks."
+      export function readCity(user: User | null | undefined): string {
+        return user?.address?.city ?? 'unknown';
+      }
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — optional chain with ?? after the metric guards
+    content: |
+      // rewrite-c — keep metrics, use ?? for the city default.
+      export function readCity(user: User | null | undefined): string {
+        if (user == null) {
+          metrics.inc('null_user');
+          return 'unknown';
+        }
+        if (user.address == null) {
+          metrics.inc('null_address');
+          return 'unknown';
+        }
+        return user.address?.city ?? 'unknown';
+      }
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — tidy the empty-string check; no ?.
+    content: |
+      // rewrite-d — "cleaner empty check; same structure."
+      export function readCity(user: User | null | undefined): string {
+        if (user == null) {
+          metrics.inc('null_user');
+          return 'unknown';
+        }
+        const addr = user.address;
+        if (addr == null) {
+          metrics.inc('null_address');
+          return 'unknown';
+        }
+        const city = addr.city;
+        return city == null || city === '' ? 'unknown' : city;
+      }
+tags: [refactoring, extract-and-inline, optional-chaining, nullish, side-effect]

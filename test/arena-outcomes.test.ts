@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ArenaRunner } from '../src/arena.js';
+import { MockOpenRouterGateway } from '../src/mock-gateway.js';
 import type { ArenaEvent, ChatRequest, ModelCompletion } from '../src/types.js';
 import { FixtureGateway, makeCompletion, makeMatch, makeTask, withTempStore } from './helpers.js';
 
@@ -40,12 +41,12 @@ function healthyGateway(costUsd = 0.01): FixtureGateway {
 }
 
 describe('arena outcome contract', () => {
-  it('records a single exhausted competitor as a forfeit without judging', async () => {
+  it('voids a single exhausted competitor as a no-contest without judging or Elo movement', async () => {
     await withTempStore(async (store) => {
       let competitors = 0;
       const gateway = new FixtureGateway((request) => {
         if (request.model.role === 'judge') {
-          throw new Error('judges must not run for a forfeit');
+          throw new Error('judges must not run for a voided match');
         }
         competitors += 1;
         if (competitors === 1) throw new Error('fixture failure');
@@ -63,11 +64,12 @@ describe('arena outcome contract', () => {
       );
       const [match] = store.readAll();
       expect(match).toMatchObject({
-        outcome: 'forfeit',
-        pointAwarded: true,
+        outcome: 'no-contest',
+        pointAwarded: false,
+        winnerModelId: null,
         panel: null,
       });
-      expect(match!.winnerModelId).not.toBeNull();
+      expect(match!.eloAfter).toEqual(match!.eloBefore);
       expect(gateway.requests.filter((request) => request.model.role === 'judge')).toHaveLength(0);
     });
   });
@@ -94,6 +96,51 @@ describe('arena outcome contract', () => {
         pointAwarded: false,
         panel: null,
       });
+    });
+  });
+
+  it('judges an exhibition match without moving Elo or awarding a ladder point', async () => {
+    await withTempStore(async (store) => {
+      await new ArenaRunner(new MockOpenRouterGateway({ chunkDelayMs: 1 }), store).run(
+        {
+          category: 'reasoning',
+          seed: 'exhibition',
+          matches: 1,
+          maxCostUsd: 5,
+          resume: false,
+          ranked: false,
+        },
+        [makeTask()],
+      );
+      const [match] = store.readAll();
+      // The verdict stands (judged, winner, point) but the ladder is frozen.
+      expect(match).toMatchObject({ outcome: 'judged', ranked: false });
+      expect(match!.winnerModelId).not.toBeNull();
+      expect(match!.eloAfter).toEqual(match!.eloBefore);
+      // rebuildEloState replays the journal; the exhibition line must fold
+      // to unchanged ratings and zero points for both sides.
+      const state = store.rebuildEloState([match!.competitors.modelA, match!.competitors.modelB]);
+      expect(state.ratings[match!.competitors.modelA]).toBe(1000);
+      expect(state.ratings[match!.competitors.modelB]).toBe(1000);
+      expect(state.points[match!.winnerModelId!]).toBe(0);
+    });
+  });
+
+  it('marks ranked runs explicitly and moves Elo as before', async () => {
+    await withTempStore(async (store) => {
+      await new ArenaRunner(new MockOpenRouterGateway({ chunkDelayMs: 1 }), store).run(
+        {
+          category: 'reasoning',
+          seed: 'ranked-default',
+          matches: 1,
+          maxCostUsd: 5,
+          resume: false,
+        },
+        [makeTask()],
+      );
+      const [match] = store.readAll();
+      expect(match).toMatchObject({ outcome: 'judged', ranked: true });
+      expect(match!.eloAfter).not.toEqual(match!.eloBefore);
     });
   });
 
@@ -150,7 +197,7 @@ describe('arena outcome contract', () => {
           },
           [makeTask()],
         ),
-      ).rejects.toThrow(/Cannot append arena-v0.3.0 matches/);
+      ).rejects.toThrow(/Cannot append arena-v0.6.0 matches/);
       expect(gateway.requests).toHaveLength(0);
     });
   });

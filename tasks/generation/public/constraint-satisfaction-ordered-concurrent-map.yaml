@@ -1,0 +1,116 @@
+id: constraint-satisfaction-ordered-concurrent-map
+version: 1.0.0
+category: generation
+cluster: constraint-satisfaction
+difficulty: expert
+title: Map an Async Stream With Bounded Concurrency, Ordered Yielding, and Prompt Cleanup
+summary: >-
+  A TypeScript async-iterable operator must satisfy interacting bounds on pulling, execution,
+  ordering, failure, cancellation, and retained memory. Four designs each look plausible; one meets
+  the complete operational contract.
+prompt: |
+  Use only operator-contract, scheduler-model, traces, candidates, and manifest. Cite artifact ids.
+  Verdicts are satisfies / violates.
+
+  1. Classify candidate-a through candidate-d against C1..C9.
+  2. For every violation, give the first T1..T5 trace and the exact differing pull/start/yield/close.
+  3. Identify the unique satisfying candidate and trace T3 until source cleanup completes.
+  4. State the maximum pulled-but-not-yielded item count when concurrency is k.
+  5. Explain why Promise.race over all started work does not itself preserve output order.
+  6. Evaluate reviewer Mo's claim that return() need not be awaited after mapper rejection.
+artifacts:
+  - id: operator-contract
+    type: spec
+    label: Complete orderedMap contract
+    content: |
+      orderedMap(source, concurrency, mapper) returns an AsyncIterable of mapped values. source is a
+      one-shot AsyncIterable; mapper(value,index) returns a Promise. concurrency is an integer 1..32.
+
+      C1 call source[Symbol.asyncIterator]() exactly once and never pull concurrently: at most one
+         next() call may be pending.
+      C2 start at most concurrency unsettled mapper calls.
+      C3 do not pull item i+concurrency until mapped item i has been yielded. Therefore at most
+         concurrency input values are pulled but not yielded.
+      C4 yield results in source order, even when mapper promises settle out of order.
+      C5 an ordinary source end drains already-started mapping and then completes.
+      C6 first observed mapper rejection becomes the consumer-visible rejection. Stop pulling, await
+         source iterator.return() once if present, then reject; never yield that or later indexes.
+      C7 if the consumer breaks/returns/throws, stop pulling, call and await iterator.return() once,
+         suppress mapper settlements, and preserve the consumer's completion reason.
+      C8 a source next() rejection is treated like C6 except no mapper rejection replaces it.
+      C9 O(concurrency) retained item/result state; no materialization of the source.
+  - id: scheduler-model
+    type: note
+    label: Frozen observation and failure model
+    content: |
+      Events are recorded when next is called (pull:i), mapper is called (start:i), mapper settles
+      (ok:i or fail:i), a result is yielded (yield:i), and source.return begins/ends (close, closed).
+      Rejections are observed when the operator awaits the corresponding promise. If several mapper
+      promises have already rejected when inspected, the lowest source index is observed first.
+
+      Once failure is observed, already-running mappers cannot be forcibly canceled; their later
+      settlements are consumed to prevent unhandled rejection but are not yielded. Awaiting return()
+      is part of observable cleanup, not optional best effort.
+  - id: traces
+    type: table
+    label: Authoritative schedules and outcomes
+    content: |
+      T1 concurrency=2, source [a,b,c]; mapper b resolves B before a resolves A:
+         pulls/starts 0,1; no yield B; then yield A, pull/start 2, yield B, yield C.
+      T2 concurrency=1, empty source: one next() returns done; no mapper; complete; no return().
+      T3 concurrency=2, index 1 rejects E while index 0 is pending:
+         failure inspection waits for index 0's slot in output order; after index 0 settles and is
+         yielded, observe E, emit close then closed, reject E, and never pull index 2.
+      T4 concurrency=3, consumer breaks after yield 0 while 1 and 2 run:
+         close then closed occurs before consumer's break completes; no later yields.
+      T5 source next for index 2 rejects S after 0 yielded and 1 started:
+         await close/closed, reject S, suppress index 1's eventual settlement.
+  - id: candidates
+    type: code
+    label: Four complete scheduler designs
+    content: |
+      candidate-a:
+        acquire one iterator; fill an indexed ring up to concurrency using sequential next awaits
+        each slot stores mapper promise with rejection captured as data
+        await the lowest-index slot; yield success; before pulling a replacement, inspect the next
+        ordered existing slot and observe it immediately if it has already captured a failure
+        otherwise pull one replacement and continue in index order
+        on captured failure or next rejection stop; await closeOnce(); throw exact error
+        generator finally calls await closeOnce() only when source did not end normally
+
+      candidate-b:
+        acquire iterator; repeatedly fill concurrency slots
+        await Promise.race(slots); immediately yield whichever slot settles and replace it
+        closeOnce on failure or consumer return
+
+      candidate-c:
+        acquire iterator; pull the entire source sequentially into an array
+        run mapper through a concurrency-limited worker pool; yield Promise.all results in order
+        call return on rejection
+
+      candidate-d:
+        same indexed ring and ordered yielding as candidate-a
+        on mapper/next failure call closeOnce() without await and immediately throw
+        generator finally does not call closeOnce when a failure flag is set
+
+      closeOnce invokes iterator.return at most once and returns its promise. Candidate-a and d
+      attach rejection handlers to every mapper promise at creation. All loops otherwise match C5.
+  - id: resource-bounds
+    type: table
+    label: Proven candidate resource bounds
+    content: |
+      candidate-a: maximum k active slots, k unsettled mappers, one next pending.
+      candidate-b: maximum k active slots and one next pending, but settlement order drives yields.
+      candidate-c: n retained inputs/results for a source of length n.
+      candidate-d: same memory/concurrency bounds as a, but cleanup can still be pending at rejection.
+  - id: manifest
+    type: note
+    label: Completeness and cleanup claim
+    content: |
+      candidate-a through candidate-d are the complete submissions. Capturing a mapper rejection as
+      data is not swallowing it: candidate-a rethrows the exact object at the ordered observation
+      point. Source return() is idempotent only through closeOnce; the raw source makes no such claim.
+
+      Mo argues rejection is already final once known. C6 makes completed cleanup part of the
+      rejection boundary, so an unawaited return is observably nonconforming.
+tags: [generation, constraint-satisfaction, typescript, async-iterables, concurrency]

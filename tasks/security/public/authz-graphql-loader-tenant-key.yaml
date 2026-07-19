@@ -1,0 +1,121 @@
+id: authz-graphql-loader-tenant-key
+version: 1.0.0
+category: security
+cluster: authz-boundary
+difficulty: expert
+title: Global GraphQL DataLoader Reuses a Document Across Tenant-Local IDs
+summary: >-
+  A Kotlin GraphQL gateway correctly checks workspace membership before resolving a document, yet a
+  process-wide DataLoader caches rows by tenant-local document number alone. Reconcile resolver guards,
+  loader lifetime, overlapping identifiers, field-level controls, and request order to find the
+  cross-tenant response and the complete isolation fix.
+prompt: |
+  Audit the fictional ScribeLake GraphQL API using ONLY the supplied artifacts. Cite artifact ids for
+  every verdict. Use vulnerable and not-a-vulnerability. Focus on defensive reasoning; do not provide
+  attack scripts.
+
+  1. Reconstruct the complete path from authenticated request through workspace authorization, loader
+     cache lookup, batch SQL, and GraphQL serialization.
+  2. Identify the reachable tenant-data disclosure and trace both requests required to create it. Name
+     the incorrect cache-key equivalence relation and the exact response fields exposed.
+  3. Classify cases A through F in request-order-matrix, including which row is returned and whether the
+     case is vulnerable.
+  4. Explain why resolver membership checks, parameterized SQL, request-specific WorkspaceContext, and
+     the body field guard are insufficient; classify schema introspection and the public template query.
+  5. Evaluate fixes F1 through F4. Define an isolation-safe key and loader lifetime, plus the rule for
+     cache priming and missing rows.
+  6. Give regression tests covering opposite warm-up orders, concurrent batches, equal local ids,
+     unauthorized workspaces, body-field denial, and cache eviction.
+
+  The loader and resolver inventory is exhaustive. Tenant-local document numbers are intentionally not
+  globally unique.
+artifacts:
+  - id: schema-contract
+    type: spec
+    label: GraphQL schema and authorization contract
+    content: |
+      query document(workspaceId: ID!, number: Int!): Document
+      type Document { number: Int!, title: String!, body: String }
+      query publicTemplate(slug: String!): Template
+
+      An authenticated builder may request Document metadata only in an active workspace membership.
+      `body` additionally requires role EDITOR in that same workspace. Unauthorized or missing documents
+      resolve to null with generic NOT_FOUND. Document numbers are allocated independently per workspace.
+      publicTemplate returns only rows explicitly marked public and is intentionally cross-workspace.
+  - id: resolver-code
+    type: code
+    label: Kotlin resolvers and field guard
+    content: |
+      suspend fun document(ctx: WorkspaceContext, workspaceId: UUID, number: Int): Document? {
+        if (!memberships.active(ctx.userId, workspaceId)) throw notFound()
+        return globalDocumentLoader.load(DocumentKey(workspaceId, number)).await()
+      }
+
+      suspend fun body(ctx: WorkspaceContext, doc: Document): String? {
+        return if (memberships.role(ctx.userId, doc.workspaceId) == EDITOR) doc.body else null
+      }
+
+      suspend fun publicTemplate(slug: String) = templates.findPublic(slug)
+      WorkspaceContext.userId comes only from a verified issuer/audience JWT. These are all resolvers.
+  - id: loader-code
+    type: code
+    label: process-wide DataLoader configuration and SQL
+    content: |
+      data class DocumentKey(val workspaceId: UUID, val number: Int)
+
+      val globalDocumentLoader = DataLoader.newDataLoader<DocumentKey, Document> { keys ->
+        val rows = db.query("SELECT * FROM documents WHERE (workspace_id,number) IN (?)", keys)
+        completedFuture(keys.map { key -> rows.singleOrNull {
+          it.workspaceId == key.workspaceId && it.number == key.number
+        }})
+      }.setCacheKeyFunction { key -> key.number } // BUG: workspace omitted
+
+      The loader object and its value cache live for the process lifetime. SQL tuple parameters are
+      bound, not concatenated. On a value-cache hit the batch function and SQL do not run.
+  - id: data-fixture
+    type: table
+    label: complete fixture and identities
+    content: |
+      Documents:
+        W-A number=7 title="A roadmap" body="A acquisition plan"
+        W-B number=7 title="B payroll" body="B salary ledger"
+        W-B number=8 title="B notes"   body="B ordinary notes"
+      Memberships:
+        U-A/W-A EDITOR; U-A/W-B none
+        U-B/W-B EDITOR; U-B/W-A none
+      Public template: slug=weekly, title="Weekly plan"; it contains no document body.
+  - id: request-order-matrix
+    type: table
+    label: fresh-process deterministic request sequences
+    content: |
+      A U-B document(W-B,7){number title body}; then U-A document(W-A,7){number title}
+        -> first returns B row; second returns number=7,title="B payroll"
+      B U-A W-A/7; then U-B W-B/7 -> first A row; second A metadata and body=null
+      C U-A W-A/7 on fresh process -> A row
+      D U-A W-B/7 after any warm-up -> NOT_FOUND before loader
+      E U-A W-A/8 after W-B/8 is cached -> B row number=8,title="B notes" despite W-A/8 not existing
+      F unauthenticated publicTemplate(weekly) -> public template by documented public route
+      The body resolver evaluates the workspaceId stored on whichever cached Document object is returned.
+  - id: side-findings
+    type: note
+    label: scanner findings and relevant implementation facts
+    content: |
+      S1: GraphQL introspection is enabled in staging and production. The schema has no secret fields;
+          introspection does not bypass any resolver in the provided implementation.
+      S2: SQL contains an `IN` clause. Values are tuple-bound by the driver; no string concatenation exists.
+      S3: body may become null on a poisoned metadata result because the field guard checks the returned
+          row's owning workspace. Title has no separate field guard because resolver authorization is
+          intended to ensure the whole row belongs to the requested workspace.
+  - id: fix-candidates
+    type: diff
+    label: proposed loader changes
+    content: |
+      F1: Keep the global loader but key on `${workspaceId}:${number}`. Cross-request authorization state
+          and unbounded values still live globally, though row identity collisions are removed.
+      F2: Create a DataLoader per GraphQL request, key by the full immutable (workspaceId,number) tuple,
+          batch only keys already authorized in that request, and verify every returned row matches its
+          full key before priming the request-local cache.
+      F3: Keep key=number and clear the loader every 60 seconds. The wrong row remains reachable inside
+          each interval and under concurrent requests.
+      F4: Hide `body` from the schema. Metadata still crosses tenants, so the boundary remains broken.
+tags: [security, authz-boundary, graphql, dataloader, cache-isolation]

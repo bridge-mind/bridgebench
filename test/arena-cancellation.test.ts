@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { ArenaRunner } from '../src/arena.js';
-import { MODEL_REGISTRY, SOL_FABLE_PILOT_COMPETITOR_IDS } from '../src/models.js';
+import { MODEL_REGISTRY, SOL_FABLE_PILOT_COMPETITOR_IDS, listModels } from '../src/models.js';
 import type {
   ArenaEvent,
   ArenaRunConfig,
@@ -81,11 +81,9 @@ describe('explicit competitor roster validation', () => {
       competitorIds: ['openai/gpt-5.6-sol', 'openai/gpt-5.6-sol'],
       expected: /must be unique/,
     },
-    {
-      name: 'a judge in the competitor roster',
-      competitorIds: ['openai/gpt-5.6-sol', 'google/gemini-3.1-pro-preview'],
-      expected: /role=judge/,
-    },
+    // No pure-judge registry entry remains since the 2026-07-18 promotions,
+    // so the role=judge rejection can no longer be triggered from the real
+    // registry; the guard itself stays in resolveCompetitorRoster.
     {
       name: 'an unknown model',
       competitorIds: ['openai/gpt-5.6-sol', 'fixture/unknown'],
@@ -164,12 +162,18 @@ describe('arena cancellation', () => {
 
       expect(result).toMatchObject({ completed: 0, cancelled: true, stoppedForBudget: false });
       expect(gateway.completionCalls).toBe(0);
-      expect(gateway.validationCalls).toBe(5);
-      expect(
-        gateway.validatedModelIds.filter(
-          (modelId) => MODEL_REGISTRY[modelId]?.role === 'competitor',
-        ),
-      ).toEqual([...SOL_FABLE_PILOT_COMPETITOR_IDS]);
+      // Two competitors plus the seven-model judge pool; Sol is dual-role, so
+      // it is validated under both its competitor and judge views (9 calls,
+      // 8 unique ids).
+      expect(gateway.validationCalls).toBe(9);
+      expect([...new Set(gateway.validatedModelIds)].sort()).toEqual(
+        [
+          ...new Set([
+            ...SOL_FABLE_PILOT_COMPETITOR_IDS,
+            ...listModels('judge').map((judge) => judge.id),
+          ]),
+        ].sort(),
+      );
       expect(store.readAll()).toEqual([]);
       expectCancellationLifecycle(events);
       expect(events.some((event) => event.type === 'run.completed')).toBe(false);

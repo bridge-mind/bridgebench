@@ -1,5 +1,5 @@
 id: patch-xxe-parser-hardening
-version: 1.0.0
+version: 1.1.0
 category: security
 cluster: patch-verification
 difficulty: expert
@@ -66,7 +66,7 @@ prompt: |
 artifacts:
   - id: original-parse
     type: code
-    label: Marble document-ingest handler (vulnerable original)
+    label: Marble document-ingest handler (original)
     content: |
       // marble/ingest/document.ts — POST /ingest/document (Marble ingest service).
       // Parses an externally-supplied XML document with spindle-xml at DEFAULT options.
@@ -130,7 +130,7 @@ artifacts:
       -  const doc = parseDocument(xml);
       +  const doc = parseDocument(xml, {
       +    resolveExternalEntities: false,   // external general entities off
-      +  }); // loadExternalDtd left at its default (true)
+      +  });
 
       === Patch B: disable both external-entity controls ===
       --- a/marble/ingest/document.ts
@@ -176,7 +176,7 @@ artifacts:
       +  }
       +  const doc = parseDocument(xml, {
       +    loadExternalDtd: false,           // external DTD loading off
-      +  }); // resolveExternalEntities left at its default (true)
+      +  });
   - id: ingest-context
     type: note
     label: Marble ingest context (where the parse runs and on what input)

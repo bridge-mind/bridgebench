@@ -1,5 +1,5 @@
 id: crossed-release-checksums
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: crossed-domains
 difficulty: expert
@@ -49,9 +49,8 @@ artifacts:
         digest (SHA-256 over the manifest bytes), created (UTC timestamp), size_mb.
         Images are immutable: two images are byte-identical if and only if their digests
         are equal, regardless of tag, environment, or where they run. Tagged images are
-        retained indefinitely; there is NO expiry property on any image. (Untagged
-        manifests are garbage-collected after 90 days - a registry housekeeping rule,
-        not a property of any image.)
+        retained indefinitely. (Untagged manifests are garbage-collected after 90 days -
+        a registry housekeeping rule, not a property of any image.)
       - tarball artifact: build output file. Properties: filename, digest (SHA-256 over
         the file bytes), created, size. Version strings appearing in tarball filenames
         are a naming convention only; a tarball has no semver property.
@@ -59,23 +58,12 @@ artifacts:
       Process and calendar kinds (records ABOUT the release process; NONE of these
       carries a digest, a checksum, or a semver):
       - release: Properties: semver, date, changelog, pins[] (the digests of the images
-        and tarballs it ships). Semver exists on exactly one object kind: releases. A
-        semver names a release; it is not a date format, cannot encode a timestamp or an
-        expiry, and is never attached to incidents, deploy windows, or approvals.
+        and tarballs it ships). Semver exists on exactly one object kind: releases.
       - deploy window: Properties: window_id (WIN-*), environment, day, start, end,
         entries[] (releases deployed or scheduled within it). A deploy window is a
-        calendar interval. A SHA-256 digest is a hash over bytes; a time interval has no
-        byte representation in this registry and therefore nothing to hash. Deploy
-        windows have no digest and no checksum of any kind.
-      - approval: Properties: approval_id (CAB-*), approver, date, release. No digest,
-        no checksum, no semver of its own.
-      - incident: Properties: incident_id (INC-*), opened, severity, summary. Incidents
-        are identified by incident id only; they are never tagged with semvers or
-        digests.
-
-      Cross-kind rule for auditors: when an audit needs "the checksum of a deploy", the
-      correct object is the image or tarball digest pinned by the release deployed in
-      that window - never the window itself.
+        calendar interval.
+      - approval: Properties: approval_id (CAB-*), approver, date, release.
+      - incident: Properties: incident_id (INC-*), opened, severity, summary.
   - id: registry-listing
     type: table
     label: registry.foundry.internal catalog listing (snapshot)
@@ -94,8 +82,7 @@ artifacts:
       tarball  schema-migrations-2.14.1.tar.gz  -       sha256:5a19c37fe842  2026-06-16 10:26  1.5 MB
 
       All four images above are tagged and therefore retained indefinitely
-      (registry-spec); no expiry field exists in this listing or anywhere in the
-      registry schema.
+      (registry-spec).
   - id: release-log
     type: log
     label: Release log, June 2026 (complete)
@@ -158,9 +145,7 @@ artifacts:
           algorithm: sha256
           # This stage computes SHA-256 over the byte artifacts this run uploads: the
           # container image manifest and any tarballs. Those are the ONLY objects this
-          # pipeline hashes. Deploy windows, approvals, and incidents are registry
-          # process records with no byte representation (registry-spec) and never pass
-          # through this stage.
+          # pipeline hashes.
         attest:
           provenance: slsa-v1   # enabled in checkout-svc release v2.14.1
         publish:
@@ -180,11 +165,6 @@ artifacts:
           checksum of the WIN-0616-P deploy window itself, note which semver we should
           tag yesterday's incident INC-2214 with, and record the new image's expiry date
           in semver form for the retention sheet?"
-        2026-06-17 09:31 p.okonkwo (release-eng): none of those exist - windows and
-          incidents are not byte objects and images have no expiry; see the registry-spec
-          object-kind reference. Only images and tarballs have digests, and only releases
-          have semvers. For the audit trail I am attaching the digest of the image
-          deployed IN the window instead.
 
       CAB-1091 - approve payments-gw v1.8.3 to production, window WIN-0618-P.
         STATUS: PENDING as of 2026-06-18 09:00.

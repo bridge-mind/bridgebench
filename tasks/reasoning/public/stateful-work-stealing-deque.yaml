@@ -1,0 +1,90 @@
+id: stateful-work-stealing-deque
+version: 1.0.0
+category: reasoning
+cluster: stateful-execution
+difficulty: expert
+title: Deterministic Work-Stealing Trace Across Generation Fences, Cancellation, and Capacity
+summary: Replay a bounded owner/thief deque with generation-fenced tasks, lazy cancellation, failed steals, and resubmission to derive every decision and final state.
+prompt: |
+  Apply [deque-contract] to [operation-log] strictly by sequence number. All calls are atomic and no
+  worker acts between rows.
+
+  1. For every PUSH, POP, STEAL, CANCEL, and ADVANCE row, report the return value and complete deque
+     from top to bottom immediately afterward.
+  2. Produce a lifecycle ledger for logical task `A`, distinguishing generations and every tombstone
+     removal.
+  3. Report each capacity check and explain why tombstones do or do not consume capacity at that row.
+  4. Give the exact execution order per worker and the final `currentGeneration` map, cancellation set,
+     and deque.
+  5. Classify all claims in [review-comments] with the first deciding row and contract clause.
+  6. Evaluate [candidate-change], naming the first divergent row and both shipped and changed states.
+artifacts:
+  - id: deque-contract
+    type: spec
+    label: Complete bounded-deque semantics
+    content: |
+      Capacity is 3 physical entries. An entry is `(task,generation)`. Owner PUSH appends at bottom
+      only if physical size <3 and generation equals currentGeneration[task]; otherwise returns FULL
+      or STALE. Owner POP scans bottom upward, physically discarding canceled entries, until it returns
+      a live entry or EMPTY. Thief STEAL scans top downward with the same discard rule.
+
+      CANCEL(task,generation) adds the exact pair to a cancellation set; it returns `RECORDED` when the
+      pair was newly added and `ALREADY_CANCELED` when already present. It does not eagerly remove an
+      entry. ADVANCE(task) increments currentGeneration and returns the new value; older queued entries
+      are considered canceled lazily even if not in the explicit set. Execution removes the returned
+      entry. Generations start at 1. Discarding one entry may expose another within the same call.
+  - id: initial-state
+    type: config
+    label: State before sequence 1
+    content: |
+      deque top->bottom: []
+      currentGeneration: {A: 1, B: 1, C: 1, D: 1}
+      cancellationSet: []
+      owner: W0
+      thieves: [W1, W2]
+  - id: operation-log
+    type: table
+    label: Exhaustive atomic operation log
+    content: |
+      seq | worker | operation
+      1   | W0     | PUSH A/1
+      2   | W0     | PUSH B/1
+      3   | W0     | PUSH C/1
+      4   | ctl    | CANCEL A/1
+      5   | W0     | PUSH D/1
+      6   | W1     | STEAL
+      7   | ctl    | ADVANCE B
+      8   | W0     | POP
+      9   | W0     | PUSH B/1
+      10  | W0     | PUSH B/2
+      11  | ctl    | CANCEL C/1
+      12  | W2     | STEAL
+      13  | W0     | PUSH D/1
+      14  | W0     | POP
+      15  | W1     | STEAL
+  - id: implementation-order
+    type: code
+    label: Pseudocode for lazy liveness
+    content: |
+      live(e) = e.generation === currentGeneration[e.task]
+                && !cancellationSet.has(e)
+      // POP and STEAL repeatedly remove !live(e), then continue in the same call.
+      // PUSH never performs a lazy scan before its capacity test.
+  - id: review-comments
+    type: note
+    label: Claims to audit
+    content: |
+      1. Sequence 5 succeeds because cancel removes A immediately.
+      2. Sequence 6 discards A/1 and then steals B/1 in the same call.
+      3. Advancing B removes B/1 immediately.
+      4. Sequence 9 is rejected STALE even if capacity is available.
+      5. A canceled C/1 can keep a later PUSH full until a POP or STEAL scans it.
+  - id: candidate-change
+    type: diff
+    label: Proposed eager-cancel behavior
+    content: |
+      - CANCEL records the pair only; removal is lazy.
+      + CANCEL immediately removes every exact matching entry from the deque, then records the pair.
+
+      All other rules, including CANCEL return values, and the operation sequence stay unchanged.
+tags: [scheduler, work-stealing, generations, cancellation, stateful-execution]

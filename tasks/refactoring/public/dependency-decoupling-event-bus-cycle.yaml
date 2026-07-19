@@ -1,0 +1,173 @@
+id: dependency-decoupling-event-bus-cycle
+version: 1.1.0
+category: refactoring
+cluster: dependency-decoupling
+difficulty: expert
+title: Injecting an Event Bus Without Splitting the Singleton or Closing a Cycle
+summary: >-
+  An invoice service must stop importing the concrete event-bus singleton. Four rewrites propose a
+  decoupling; classify each on behavior and goal against the contract — save-before-audit ordering,
+  registration before first emission, one shared bus instance, and an acyclic module graph.
+prompt: |
+  Answer each deliverable using ONLY the supplied artifacts (original-modules, event-contract,
+  rewrite-a, rewrite-b, rewrite-c, rewrite-d). Cite artifact id(s) for every claim. Use the verdict
+  vocabulary: behavior-preserving / changes-behavior / meets-goal / fails-goal.
+
+  The transformation goal is to remove invoice.ts's direct dependency on the concrete bus singleton,
+  while preserving save-before-audit ordering, subscriber registration before the first emission,
+  one shared EventBus instance, and an acyclic module graph.
+
+  1. Classify rewrite-a on behavior and goal. Name the resulting import edges and event instance.
+  2. Classify rewrite-b separately on behavior and goal.
+  3. Classify rewrite-c. Trace invoice I-7 through save, emit, and the analytics subscriber, and state
+     the final audit log.
+  4. Classify rewrite-d. Name the exact cycle, the export read before initialization, and whether
+     createInvoice is reached.
+  5. State which rewrites, if any, are both behavior-preserving and meets-goal. State the complete
+     reference event order and audit log for invoice I-7.
+artifacts:
+  - id: original-modules
+    type: code
+    label: ledger event modules — shipped implementation
+    content: |
+      // event-bus.ts — leaf module
+      export class EventBus {
+        private listeners = new Map<string, Array<(payload: unknown) => void>>();
+        on(name: string, listener: (payload: unknown) => void): void {
+          const current = this.listeners.get(name) ?? [];
+          current.push(listener);
+          this.listeners.set(name, current);
+        }
+        emit(name: string, payload: unknown): void {
+          for (const listener of this.listeners.get(name) ?? []) listener(payload);
+        }
+      }
+      export const bus = new EventBus();
+
+      // analytics.ts
+      import { bus } from './event-bus';
+      bus.on('invoice.created', (payload) => {
+        const invoice = payload as Invoice;
+        audit.push(`analytics:${invoice.id}`);
+      });
+
+      // invoice.ts
+      import { bus } from './event-bus';
+      export function createInvoice(invoice: Invoice): void {
+        repository.save(invoice);
+        bus.emit('invoice.created', invoice);
+      }
+
+      // main.ts — the only entry point and composition root
+      import './analytics';
+      import { createInvoice } from './invoice';
+      createInvoice({ id: 'I-7' });
+  - id: event-contract
+    type: spec
+    label: complete module, event, and observability contract
+    content: |
+      This artifact is exhaustive for the task:
+        - The only modules are main.ts, analytics.ts, invoice.ts, and event-bus.ts as shown.
+        - main.ts is the only entry point. There are no dynamic imports or later registrations.
+        - EventBus.on mutates that EventBus INSTANCE only. EventBus.emit synchronously invokes
+          listeners registered on that same instance, in registration order.
+        - repository.save({id:'I-7'}) appends "save:I-7" to the observable audit log.
+          The analytics listener appends "analytics:I-7". Nothing throws except the stated
+          uninitialized-export rule, and there are no other side effects.
+
+      Original graph:
+        main -> analytics, invoice
+        analytics -> event-bus
+        invoice -> event-bus
+      Static dependencies finish evaluating before main's body. Therefore analytics registers on
+      the exported singleton before main calls createInvoice. The reference audit log is exactly:
+        ["save:I-7", "analytics:I-7"]
+
+      Decoupling requirements:
+        1. invoice.ts must not import event-bus.ts or any concrete bus singleton.
+        2. The composition root may inject an EventBus-compatible object into invoice.ts.
+        3. Analytics and invoice emission must use the SAME registered singleton.
+        4. The graph must remain acyclic and registration must precede the first emit.
+
+      ES-module cycle rule for this task: if module A imports module B while B is already evaluating,
+      A may continue only after dependencies are linked, but reading a `const` export from B before
+      B's body initialized it throws ReferenceError. Startup stops immediately after that read.
+  - id: rewrite-a
+    type: code
+    label: rewrite-a — constructor injection of the registered singleton
+    content: |
+      // invoice.ts
+      type Events = { emit(name: string, payload: unknown): void };
+      export function makeInvoiceService(events: Events) {
+        return {
+          createInvoice(invoice: Invoice): void {
+            repository.save(invoice);
+            events.emit('invoice.created', invoice);
+          },
+        };
+      }
+
+      // analytics.ts is unchanged: it imports bus from event-bus and registers at top level.
+
+      // main.ts
+      import './analytics';
+      import { bus } from './event-bus';
+      import { makeInvoiceService } from './invoice';
+      const invoices = makeInvoiceService(bus);
+      invoices.createInvoice({ id: 'I-7' });
+  - id: rewrite-b
+    type: code
+    label: rewrite-b — wrap the service but retain the concrete import
+    content: |
+      // invoice.ts
+      import { bus } from './event-bus';
+      export function makeInvoiceService() {
+        return {
+          createInvoice(invoice: Invoice): void {
+            repository.save(invoice);
+            bus.emit('invoice.created', invoice);
+          },
+        };
+      }
+
+      // analytics.ts is unchanged.
+      // main.ts
+      import './analytics';
+      import { makeInvoiceService } from './invoice';
+      const invoices = makeInvoiceService();
+      invoices.createInvoice({ id: 'I-7' });
+  - id: rewrite-c
+    type: code
+    label: rewrite-c — inject a fresh bus owned by main
+    content: |
+      // invoice.ts is the injected makeInvoiceService implementation from rewrite-a.
+      // analytics.ts remains unchanged and registers on event-bus.ts's exported `bus`.
+
+      // main.ts
+      import './analytics';
+      import { EventBus } from './event-bus';
+      import { makeInvoiceService } from './invoice';
+      const invoiceEvents = new EventBus();
+      const invoices = makeInvoiceService(invoiceEvents);
+      invoices.createInvoice({ id: 'I-7' });
+  - id: rewrite-d
+    type: code
+    label: rewrite-d — export the bus from main for analytics to import
+    content: |
+      // invoice.ts is the injected makeInvoiceService implementation from rewrite-a.
+
+      // analytics.ts
+      import { events } from './main';
+      events.on('invoice.created', (payload) => {
+        const invoice = payload as Invoice;
+        audit.push(`analytics:${invoice.id}`);
+      });
+
+      // main.ts
+      import './analytics';
+      import { EventBus } from './event-bus';
+      import { makeInvoiceService } from './invoice';
+      export const events = new EventBus();
+      const invoices = makeInvoiceService(events);
+      invoices.createInvoice({ id: 'I-7' });
+tags: [refactoring, dependency-decoupling, event-bus, dependency-injection, import-cycle]

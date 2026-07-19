@@ -153,6 +153,14 @@ export function makeVote(
               completeness: 'Complete.',
             },
             violations: [],
+            decisiveDifference: {
+              deliverableId: 'd1',
+              winnerClaim: 'Named the supported conclusion alpha.',
+              loserError: 'Claimed the conclusion is beta.',
+              artifactIds: ['fixture-spec'],
+              rubricCriterion: 'correctness' as const,
+            },
+            abstainReason: null,
           },
     winnerModelId,
     completion:

@@ -1,0 +1,102 @@
+id: taint-java-ldap-filter
+version: 1.0.0
+category: security
+cluster: taint-flow
+difficulty: expert
+title: Escaped LDAP Wildcards Leave Parentheses and NUL Reachable in a Search Filter
+summary: >-
+  A Spring directory endpoint replaces only asterisks before concatenating a query into an LDAP filter.
+  Follow multiple inputs through validation, filter construction, JNDI search, structured logging, and a
+  separately bound SQL audit write to distinguish real LDAP-filter injection from attractive but broken
+  SQL, log-forging, and template-injection chains.
+prompt: |
+  Audit the fictional CrewAtlas endpoint using ONLY the supplied artifacts. Cite artifact ids for every
+  conclusion. Use vulnerable, mitigated, and false-positive. Do not provide executable injection strings;
+  refer to symbolic metacharacter classes and fixture labels only.
+
+  1. Map each request-derived value from source through validators and encoders to LDAP, SQL, log, and
+     HTML sinks. Name the destination context required at each boundary.
+  2. Trace cases A through F from request-matrix, state the final LDAP filter structure symbolically, and
+     classify observed result as intended, vulnerable, or rejected.
+  3. Identify the reachable LDAP-filter injection, its preconditions, and bounded data exposure. Explain
+     why replacing `*` is incomplete under the supplied RFC4515 contract.
+  4. Classify scanner findings S1 through S5, including the SQL audit, structured log, Thymeleaf output,
+     DN scope, and regex denial observations.
+  5. Select P1 through P4 from patch-candidates. State an allowlist plus context-correct escaping invariant
+     and explain why DN escaping is not filter-value escaping.
+  6. Give tests for every RFC4515 metacharacter, Unicode, empty input, wildcard-search policy, result cap,
+     search base, SQL audit binding, and HTML encoding.
+
+  Directory schema, JNDI behavior, and endpoint inventory are exhaustive.
+artifacts:
+  - id: controller-code
+    type: code
+    label: Spring controller and helper functions
+    content: |
+      @GetMapping("/directory/search")
+      List<PersonView> search(@RequestParam String q, Principal principal) {
+        if (!q.matches("[\\p{L}\\p{N} ._@*()\\u0000-]{1,64}")) throw badRequest();
+        String safe = q.replace("*", "\\2a");
+        String filter = "(&(active=TRUE)(|(cn=*" + safe + "*)(mail=" + safe + ")))";
+        audit.record(principal.getName(), q);
+        log.info("directory_search", kv("actor", principal.getName()), kv("query", q));
+        return ldap.search("ou=people,dc=crew,dc=internal", filter, SUBTREE, 50)
+          .stream().map(PersonView::from).toList();
+      }
+      The endpoint requires an authenticated employee but no directory-specific role.
+  - id: sink-semantics
+    type: spec
+    label: RFC4515 and output-context behavior
+    content: |
+      In an LDAP filter assertion value, octets for `*`, `(`, `)`, backslash, and NUL must be escaped as
+      hex pairs. Filter structure is interpreted before matching. DN escaping is a different grammar and
+      does not make a filter assertion safe. JNDI search receives `filter` as syntax, not a bound value.
+      The search base is fixed to people and server ACL exposes name, team, mail, and manager for active
+      employees only; password and HR attributes are denied. A 50-entry server limit is enforced.
+  - id: adjacent-sinks
+    type: code
+    label: audit repository, logger, and response renderer
+    content: |
+      audit.record(actor, query):
+        jdbc.update("INSERT INTO search_audit(actor,query) VALUES (?,?)", actor, query)
+
+      Logger emits JSON through typed key/value fields; CR, LF, and controls are JSON-escaped by encoder.
+      PersonView contains name, team, mail, manager. Spring serializes it as JSON. The optional web page
+      renders q with `<span th:text="${q}">`; no th:utext or raw HTML sink exists.
+  - id: request-matrix
+    type: table
+    label: symbolic deterministic inputs and results
+    content: |
+      A q=alice -> filter searches active cn containing alice or exact mail alice -> 1 result
+      B q=STAR (literal `*`) -> STAR is replaced by hex escape -> wildcard meaning removed
+      C q=PAREN-CLOSE-OR (contains allowed `)` and a second filter branch, no `*`) -> validator accepts;
+        replacement changes nothing; JNDI parses expanded OR structure -> first 50 active people
+      D q=NUL-SUFFIX (contains allowed NUL then suffix) -> validator accepts; replacement changes nothing;
+        provider parses/truncates assertion at NUL -> broader matches in this fixture
+      E q=BACKSLASH -> rejected because backslash is absent from regex
+      F q=HTML-TAG -> rejected because angle brackets are absent from regex
+      Labels C and D denote fixture strings without reproducing their injection byte sequences.
+  - id: scanner-findings
+    type: note
+    label: findings to classify
+    content: |
+      S1 LDAP injection: q is concatenated after only wildcard replacement.
+      S2 SQL injection: q reaches an INSERT string. The INSERT uses JDBC placeholders for both values.
+      S3 log injection: q may contain controls. The structured JSON encoder escapes them; no line-oriented
+          concatenation occurs.
+      S4 stored XSS: the search page renders q. Thymeleaf th:text performs HTML text encoding.
+      S5 LDAP base escape: q can change the DN. The base DN is a fixed method argument and q reaches only
+          filter syntax, not the base.
+  - id: patch-candidates
+    type: diff
+    label: candidate filter patches
+    content: |
+      P1: Apply an SQL quote-doubling helper to q before concatenation.
+      P2: Apply an LDAP DN-name escape helper to q before concatenation.
+      P3: Define the accepted search language (letters, numbers, spaces, dot, underscore, at-sign, hyphen;
+          wildcard not supported), normalize Unicode, then escape every RFC4515 assertion-value
+          metacharacter with a maintained filter-value encoder before inserting the value in both clauses.
+          Keep fixed base, server ACL, size limit, and generic parse errors.
+      P4: Continue replacing `*` and additionally delete parentheses. NUL and backslash semantics remain,
+          and deletion silently changes legitimate values rather than encoding them.
+tags: [security, taint-flow, java, ldap, injection]

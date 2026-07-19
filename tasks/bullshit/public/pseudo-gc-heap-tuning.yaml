@@ -1,5 +1,5 @@
 id: pseudo-gc-heap-tuning
-version: 1.0.0
+version: 1.1.0
 category: bullshit
 cluster: plausible-pseudoscience
 difficulty: expert
@@ -69,9 +69,7 @@ artifacts:
       - G7. Complete list of mechanisms by which the collector affects application
         performance: (a) major pauses per G3; (b) minor pauses per G1; (c) GC time share
         per G5; (d) the allocation slow path when the nursery is full. There are no
-        others. In particular, the collector has no effect on branch prediction,
-        instruction throughput, or any CPU microarchitectural state. Kestrel defines no
-        metric named "IPC" and no quantity named "allocation entropy".
+        others.
 
       JIT compiler:
       - J1. A method is enqueued for compilation when its invocation count crosses
@@ -85,9 +83,8 @@ artifacts:
       - J4. The JIT reads and writes only the code cache, a fixed 256 MB native region
         OUTSIDE the managed heap. Compiled method bodies live in the code cache; stack
         frames of compiled methods live on thread stacks. Neither is a heap object.
-      - J5. The JIT never moves, copies, compacts, defragments, or frees heap objects
-        (see G6), and the GC never scans, frees, or reclaims code-cache memory. Compiling
-        or discarding compiled code changes tenured free space by exactly 0 MB.
+      - J5. The code cache is managed solely by the JIT; the managed heap is managed
+        solely by the collector (G6).
       - J6. Interaction summary (exhaustive): the GC and the JIT share no memory and no
         mechanism. The only coupling is that major cycles pause all application threads
         per G3; background compilation causes no application pause.
@@ -137,8 +134,7 @@ artifacts:
                    compiled, elapsed 140.4 s since first enqueue, code cache used 38.6/256 MB
       12:06:31.560 jit: steady state, no method below compile_threshold is queued;
                    invocation counts at enqueue this warmup ranged 10003-11986
-      12:41:07.201 jit: periodic self-check, code cache 38.6/256 MB, zero recompilations,
-                   zero heap reads or writes by the JIT since drain (see runtime reference J4-J5)
+      12:41:07.201 jit: periodic self-check, code cache 38.6/256 MB, zero recompilations
   - id: heap-config-diff
     type: diff
     label: Proposed kestrel.toml change for ledger-api (from the tuning proposal)
@@ -171,9 +167,7 @@ artifacts:
       D (proposed diff)  8000        40000              511.9     99.8                998               1600            41210           46.0
 
       Run-to-run throughput noise is +/-0.5% (about +/-200 rps); differences within that
-      band are not significant. No run recorded any IPC, branch-prediction, or
-      "allocation entropy" metric; the harness exposes no such counters (see
-      kestrel-runtime-reference G7). Tenured free space after warmup matched
+      band are not significant. Tenured free space after warmup matched
       tenured_capacity_mb minus steady_live_mb in every run.
   - id: tuning-proposal-note
     type: note
@@ -198,9 +192,4 @@ artifacts:
 
       Bonus: fewer major pauses should also lower allocation entropy, which improves
       branch-predictor hit rates, so we may bank a measurable IPC gain on top.
-
-      Reviewer comment (s.ondrik, runtime team, 2026-07-10): before anyone acts on R2, R3,
-      or the entropy claim, check each mechanism against kestrel-runtime-reference. I do
-      not recognize half of these mechanisms, and the reference is explicit that its
-      mechanism list is exhaustive.
 tags: [plausible-pseudoscience, gc-tuning, jit-warmup, managed-runtime, performance]
