@@ -95,7 +95,9 @@ function makeLavaTask(probes: UiProbe[] | null): UiBenchFullTask {
     ],
     prompt: 'p',
     probes,
-    scoringOverrides: null,
+    // SwiftShader's WebGL rasterization varies slightly across CI hosts.
+    // The replay must still preserve the fixture's exact logical state.
+    scoringOverrides: { determinismMaxChangedPct: 5 },
   };
 }
 
