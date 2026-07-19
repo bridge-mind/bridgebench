@@ -114,6 +114,7 @@
       const state = { seed: 1, heat: 35, palette: 0, elapsed: 0 };
       let blobs = [];
       let running = true;
+      let last = null;
 
       function build(seed) {
         for (const blob of blobs) scene.remove(blob.mesh);
@@ -139,6 +140,7 @@
         reset(seed) {
           state.seed = seed >>> 0 || 1;
           state.elapsed = 0;
+          last = null;
           build(state.seed);
         },
         getState() {
@@ -171,7 +173,6 @@
 
       build(state.seed);
 
-      let last = null;
       function frame(t) {
         if (!running) return;
         if (last !== null) {
