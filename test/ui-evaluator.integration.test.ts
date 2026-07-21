@@ -80,7 +80,7 @@ function makeLavaTask(probes: UiProbe[] | null): UiBenchFullTask {
   return {
     id: 's1-lava-lamp-redux',
     season: 1,
-    title: 'Lava Lamp Redux',
+    title: 'Lava Lamp',
     category: 'simulation',
     requiresWebGL: true,
     viewport: { width: 1280, height: 800 },

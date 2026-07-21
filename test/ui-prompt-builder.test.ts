@@ -8,7 +8,7 @@ function task(overrides: Partial<UiBenchTask> = {}): UiBenchTask {
   return {
     id: 's1-lava-lamp-redux',
     season: 1,
-    title: 'Lava Lamp Redux',
+    title: 'Lava Lamp',
     category: 'simulation',
     requiresWebGL: true,
     viewport: { width: 1280, height: 800 },
@@ -43,7 +43,7 @@ describe('UI prompt builder', () => {
 
   it('keeps the task brief in the user message', () => {
     expect(buildUiUserPrompt(task())).toBe(
-      'Task ID: s1-lava-lamp-redux\nTask title: Lava Lamp Redux\n\nBuild the requested scene.',
+      'Task ID: s1-lava-lamp-redux\nTask title: Lava Lamp\n\nBuild the requested scene.',
     );
   });
 });

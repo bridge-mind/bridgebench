@@ -1,6 +1,6 @@
 id: s1-lava-lamp-redux
 season: 1
-title: Lava Lamp Redux
+title: Lava Lamp
 category: simulation
 requiresWebGL: true
 viewport: { width: 1280, height: 800 }
@@ -20,10 +20,24 @@ screenshots:
   - { at: 2500, name: motion }
 systemPrompt: |
   This is BridgeBench's signature hero artifact. It must read immediately as a
-  physical lava lamp, not an abstract particle field, generic shader demo, or
-  dashboard. Compose it like a premium product shot: one centered glass vessel,
-  a clearly modeled metal base and cap, and luminous wax volumes with a strong
-  silhouette against a dark room.
+  physical lava lamp, never an abstract particle field, generic shader demo,
+  or dashboard. Compose it like a premium product shot: one centered lamp,
+  fully inside the frame with breathing room, filling roughly 85% of the
+  viewport height at all times.
+
+  Three structures must stay readable in every frame. The glass vessel needs
+  a visible fresnel rim, a soft specular streak, and a faint tint so its
+  silhouette reads even where no wax sits behind it — if the glass vanishes
+  into the background, the shot has failed. The metal base and cap must be
+  modeled and lit, catching warm reflections from the wax, never crushed to
+  silhouette. The wax is the scene's primary light source: smooth merging
+  volumes with an emissive gradient that runs hottest near the base.
+
+  The room is dark, not absent. Stage the lamp against a deep gradient or a
+  subtle environment glow with a hint of ground reflection so it sits in real
+  space — never a flat black void. The opening frame must already be
+  presentation-ready: start the wax mid-convection, never as a cold empty
+  chamber.
 
   Favor a complete, reliable scene over fragile technical spectacle. Keep the
   required controls compact and visually subordinate to the lamp. Do not add
