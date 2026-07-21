@@ -14,8 +14,6 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 
-import type { Browser } from 'playwright-core';
-
 import { resolveApiConfig, delay, REQUEST_SPACING_MS, type ApiConfig } from '../../api-client.js';
 import { isArenaCancellationError, throwIfCancelled } from '../../cancellation.js';
 import { REPO_ROOT, SEASON } from '../../config.js';
@@ -23,7 +21,6 @@ import type { ArenaLogger } from '../../logger.js';
 import { MockOpenRouterGateway } from '../../mock-gateway.js';
 import { OpenRouterClient } from '../../openrouter.js';
 import type { ModelRegistryEntry, OpenRouterGateway } from '../../types.js';
-import { launchEvalBrowser } from './evaluator/index.js';
 import {
   buildUiRunDescriptor,
   journalUiEvaluation,
@@ -49,6 +46,7 @@ export interface UiRunOptions {
   publish: boolean;
   runKey?: string;
   resume: boolean;
+  /** Deprecated compatibility flag; live runs are always generation-only. */
   dry: boolean;
   mock: boolean;
   maxTokens?: number;
@@ -61,7 +59,6 @@ export interface UiRunDeps {
   gateway?: OpenRouterGateway;
   resolveApiConfig?: () => ApiConfig;
   signal?: AbortSignal;
-  launchBrowser?: typeof launchEvalBrowser;
   resultsRoot?: string;
 }
 
@@ -148,22 +145,16 @@ export async function runUiBench(options: UiRunOptions, deps: UiRunDeps): Promis
   deps.stdout(`ui-run scheduled total=${total} models=${models.length} tasks=${tasks.length}`);
   deps.stdout(
     `UI Bench run ${runKey}: ${models.length} model(s) x ${tasks.length} task(s) ` +
-      `(${options.mock ? 'mock' : 'openrouter'}, publish: ${publishEnabled ? 'live' : 'off'}${options.dry ? ', dry' : ''})`,
+      `(${options.mock ? 'mock' : 'openrouter'}, publish: ${publishEnabled ? 'live' : 'off'}, generation-only)`,
   );
   if (logger.dir) deps.stdout(`Run log: ${logger.dir}`);
-  if (!loader.hasPrivateOverlay()) {
-    deps.stdout(
-      'BRIDGEBENCH_PRIVATE_DIR not set - hidden interaction probes unavailable; probe diagnostics will be marked partial.',
-    );
-  }
-
   logger.info('run.start', {
     runKey,
     season: SEASON.id,
     modelIds: models.map((model) => model.id),
     taskIds: tasks.map((task) => task.id),
     resume: options.resume,
-    dry: options.dry,
+    mode: 'generation-only',
     mock: options.mock,
     publish: publishEnabled,
     maxTokens: options.maxTokens ?? null,
@@ -184,22 +175,6 @@ export async function runUiBench(options: UiRunOptions, deps: UiRunDeps): Promis
     gateway,
     artifactStore: new UiArtifactStore(path.join(resultsRoot, 'runs')),
   });
-
-  let browser: Browser | null = null;
-  let executablePath = '';
-  // A mid-evaluation SIGINT must unwind inside the supervisor's 30s SIGKILL
-  // window; evaluation is not signal-aware, so the abort listener yanks the
-  // browser out from under it and the runner maps the crash to cancellation.
-  const onAbort = (): void => {
-    void browser?.close().catch(() => {});
-  };
-  if (!options.dry) {
-    const launched = await (deps.launchBrowser ?? launchEvalBrowser)();
-    browser = launched.browser;
-    executablePath = launched.executablePath;
-    logger.info('run.browser', { executablePath });
-    deps.signal?.addEventListener('abort', onAbort, { once: true });
-  }
 
   const summary: UiRunSummary = {
     runKey,
@@ -240,100 +215,91 @@ export async function runUiBench(options: UiRunOptions, deps: UiRunDeps): Promis
     }
   };
 
-  try {
-    let index = 0;
-    pairs: for (const model of models) {
-      for (const task of tasks) {
-        index += 1;
-        const label = `[${index}/${total}] ${model.id} -> ${task.id}`;
-        try {
-          throwIfCancelled(deps.signal);
-        } catch (error) {
-          if (isArenaCancellationError(error)) {
-            summary.cancelled = true;
-            break pairs;
-          }
-          throw error;
+  let index = 0;
+  pairs: for (const model of models) {
+    for (const task of tasks) {
+      index += 1;
+      const label = `[${index}/${total}] ${model.id} -> ${task.id}`;
+      try {
+        throwIfCancelled(deps.signal);
+      } catch (error) {
+        if (isArenaCancellationError(error)) {
+          summary.cancelled = true;
+          break pairs;
         }
-
-        if (skipSet.has(buildUiBenchSkipKey(model.id, task.id))) {
-          summary.skipped += 1;
-          deps.stdout(`${label}: skipped (--resume)`);
-          logger.info('task.skipped', { model: model.id, task: task.id, reason: 'resume' });
-          continue;
-        }
-
-        deps.stdout(`${label}: generating...`);
-        logger.info('task.start', { model: model.id, task: task.id, dry: options.dry });
-
-        let outcome;
-        try {
-          outcome = await uiTaskRunner.runTask({
-            model,
-            task,
-            browser,
-            executablePath,
-            signal: deps.signal,
-            onProgress: (phase, detail) => {
-              deps.stdout(
-                phase === 'evaluating'
-                  ? `${label}: evaluating...`
-                  : `${label}: generated ${detail}`,
-              );
-            },
-          });
-        } catch (error) {
-          if (isArenaCancellationError(error)) {
-            summary.cancelled = true;
-            break pairs;
-          }
-          throw error;
-        }
-
-        const { line } = await journalUiEvaluation({
-          task,
-          modelId: model.id,
-          displayName: model.displayName,
-          html: outcome.html,
-          validation: outcome.validation,
-          evaluation: outcome.evaluation,
-          qualification: outcome.qualification,
-          metrics: outcome.metrics,
-          success: outcome.success,
-          errorType: outcome.errorType,
-          resultsRoot,
-        });
-        summary.completed += 1;
-        summary.costUsd += outcome.metrics.costUsd;
-        if (outcome.qualification.qualified) summary.qualified += 1;
-
-        const diagnostics = outcome.qualification.diagnostics;
-        const status = outcome.qualification.qualified
-          ? `QUALIFIED (webgl ${diagnostics.webglActive ?? 'none'}, fps ${diagnostics.fps ?? 'n/a'}, ` +
-            `probes ${diagnostics.probesPartial ? 'partial' : `${diagnostics.probesPassed}/${diagnostics.probesTotal}`})`
-          : `DISQUALIFIED (${outcome.qualification.reasons[0] ?? 'unknown'})` +
-            (outcome.errorType ? ` [${outcome.errorType}]` : '');
-        deps.stdout(`${label}: ${status}`);
-        logger.info('task.result', {
-          model: model.id,
-          task: task.id,
-          qualified: outcome.qualification.qualified,
-          reasons: outcome.qualification.reasons,
-          errorType: outcome.errorType ?? null,
-          costUsd: outcome.metrics.costUsd,
-          inputTokens: outcome.metrics.inputTokens,
-          outputTokens: outcome.metrics.outputTokens,
-          providerResponseMs: outcome.metrics.providerResponseMs,
-          finishReason: outcome.finishReason ?? null,
-          generationId: outcome.generationId ?? null,
-        });
-
-        await publishLine(line, label);
+        throw error;
       }
+
+      if (skipSet.has(buildUiBenchSkipKey(model.id, task.id))) {
+        summary.skipped += 1;
+        deps.stdout(`${label}: skipped (--resume)`);
+        logger.info('task.skipped', { model: model.id, task: task.id, reason: 'resume' });
+        continue;
+      }
+
+      deps.stdout(`${label}: generating...`);
+      logger.info('task.start', { model: model.id, task: task.id, mode: 'generation-only' });
+
+      let outcome;
+      try {
+        outcome = await uiTaskRunner.runTask({
+          model,
+          task,
+          signal: deps.signal,
+          onProgress: (phase, detail) => {
+            deps.stdout(
+              phase === 'streaming'
+                ? `${label}: streaming (${detail})`
+                : `${label}: generated ${detail}`,
+            );
+          },
+        });
+      } catch (error) {
+        if (isArenaCancellationError(error)) {
+          summary.cancelled = true;
+          break pairs;
+        }
+        throw error;
+      }
+
+      const { line } = await journalUiEvaluation({
+        task,
+        modelId: model.id,
+        displayName: model.displayName,
+        html: outcome.html,
+        validation: outcome.validation,
+        evaluation: outcome.evaluation,
+        qualification: outcome.qualification,
+        metrics: outcome.metrics,
+        success: outcome.success,
+        errorType: outcome.errorType,
+        resultsRoot,
+      });
+      summary.completed += 1;
+      summary.costUsd += outcome.metrics.costUsd;
+      if (outcome.qualification.qualified) summary.qualified += 1;
+
+      const status = outcome.qualification.qualified
+        ? 'QUALIFIED (static artifact contract)'
+        : `DISQUALIFIED (${outcome.qualification.reasons[0] ?? 'unknown'})` +
+          (outcome.errorType ? ` [${outcome.errorType}]` : '');
+      deps.stdout(`${label}: ${status}`);
+      logger.info('task.result', {
+        model: model.id,
+        task: task.id,
+        qualified: outcome.qualification.qualified,
+        reasons: outcome.qualification.reasons,
+        errorType: outcome.errorType ?? null,
+        costUsd: outcome.metrics.costUsd,
+        inputTokens: outcome.metrics.inputTokens,
+        outputTokens: outcome.metrics.outputTokens,
+        providerResponseMs: outcome.metrics.providerResponseMs,
+        finishReason: outcome.finishReason ?? null,
+        generationId: outcome.generationId ?? null,
+      });
+
+      await publishLine(line, label);
     }
-  } finally {
-    deps.signal?.removeEventListener('abort', onAbort);
-    if (browser) await browser.close().catch(() => {});
   }
 
   // One idempotent sweep for results the incremental path missed. Runs even

@@ -3,12 +3,10 @@
  * by builders through blind A/B community voting (Elo) on bridgebench.ai.
  *
  * What the harness does decide, objectively, is whether an artifact is
- * eligible for the arena at all:
- *   - static validation passed (self-contained, pinned vendor only)
- *   - the page loaded and both harness globals appeared
- *   - no uncaught error during the startup window
- *   - the first frame isn't blank
- *   - zero non-vendor network attempts
+ * eligible for the arena at all. Live `ui run` generation qualifies on the
+ * static contract only (self-contained, pinned vendor, harness globals in the
+ * source). The explicit `ui evaluate` command can additionally supply a
+ * browser evaluation, in which case its runtime gates are also enforced.
  *
  * Everything else the evaluator measures (WebGL context, FPS, animation,
  * control coverage, determinism replay, hidden probes) is recorded as
@@ -40,9 +38,7 @@ export function assessQualification(input: UiQualificationInput): UiQualificatio
     reasons.push(...validation.errors.map((e) => `validation: ${e}`));
   }
 
-  if (!evaluation) {
-    reasons.push('evaluation: not run');
-  } else {
+  if (evaluation) {
     if (!evaluation.ok) {
       reasons.push(`evaluation: ${evaluation.error ?? 'failed'}`);
     }
@@ -67,17 +63,20 @@ export function assessQualification(input: UiQualificationInput): UiQualificatio
   }
 
   const controlsFound = task.controls.filter((control) =>
-    evaluation?.controlsFound.includes(control.id),
+    evaluation
+      ? evaluation.controlsFound.includes(control.id)
+      : validation.metadata.declaredControlIds.includes(control.id),
   ).length;
 
   const probes = evaluation?.probes ?? null;
 
   const diagnostics: UiDiagnostics = {
     webglActive: evaluation?.webgl.active ?? null,
-    webglRequirementMet:
-      !task.requiresWebGL ||
-      evaluation?.webgl.active === 'webgl' ||
-      evaluation?.webgl.active === 'webgl2',
+    webglRequirementMet: evaluation
+      ? !task.requiresWebGL ||
+        evaluation.webgl.active === 'webgl' ||
+        evaluation.webgl.active === 'webgl2'
+      : !task.requiresWebGL || validation.metadata.usesThree,
     fps: evaluation?.fps ?? null,
     animationDetected: evaluation?.animation.detected ?? false,
     controlsDeclared: task.controls.length,

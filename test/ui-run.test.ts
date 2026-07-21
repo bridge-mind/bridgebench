@@ -90,7 +90,8 @@ describe('runUiBench', () => {
         modelSlugs: ['acme/one', 'acme/two'],
         publish: false,
         resume: false,
-        dry: true,
+        // Default/live mode is generation-only and must not need a browser.
+        dry: false,
         mock: false,
         debug: false,
       },
@@ -99,6 +100,7 @@ describe('runUiBench', () => {
 
     expect(lines[0]).toBe('ui-run scheduled total=2 models=2 tasks=1');
     expect(summary).toMatchObject({ completed: 2, skipped: 0, cancelled: false });
+    expect(summary.qualified).toBe(2);
     expect(summary.costUsd).toBeCloseTo(0.1);
 
     const store = new UiBenchResultStore({

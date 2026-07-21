@@ -19,10 +19,10 @@ Use the [glossary](glossary.md) whenever a contract term is unfamiliar.
 
 ## UI Bench
 
-- [UI Bench](ui-bench.md) — the browser-scored Three.js creative-rendering
-  benchmark, kept separate from arena Elo: qualification vs. probes, how to
-  run and evaluate the restored lava lamp task, and what's still on the
-  `season-engine-alpha` branch.
+- [UI Bench](ui-bench.md) — the streamed Three.js creative-rendering
+  benchmark, kept separate from arena Elo: live static qualification,
+  optional browser diagnostics, the restored lava lamp task, and what's still
+  on the `season-engine-alpha` branch.
 
 ## Contribute
 

@@ -1,12 +1,12 @@
 /**
- * UI Bench live-model runner: one (model, task) pipeline pass — completion →
- * extract → normalize → validate → evaluate → qualify. It never journals and
- * never throws except ArenaCancellationError (the in-flight pair is abandoned,
- * not journaled); every other failure becomes a fully-populated outcome the
- * orchestrator in run.ts persists.
+ * UI Bench live-model runner: one (model, task) pipeline pass — streamed
+ * completion → extract → normalize → static validation → qualify. Runtime
+ * browser evaluation belongs to the explicit `ui evaluate` command, not the
+ * live generation path. This runner never journals and never throws except
+ * ArenaCancellationError (the in-flight pair is abandoned, not journaled);
+ * every other failure becomes a fully-populated outcome the orchestrator in
+ * run.ts persists.
  */
-
-import type { Browser } from 'playwright-core';
 
 import { ArenaCancellationError, throwIfCancelled } from '../../cancellation.js';
 import { MODEL_REGISTRY } from '../../models.js';
@@ -16,7 +16,6 @@ import type {
   ModelRequestPolicy,
   OpenRouterGateway,
 } from '../../types.js';
-import { UiArtifactEvaluator } from './evaluator/index.js';
 import { UiArtifactExtractor } from './extractor.js';
 import { UiArtifactNormalizer } from './normalizer.js';
 import { buildUiSystemPrompt, buildUiUserPrompt } from './prompt-builder.js';
@@ -138,17 +137,13 @@ export interface UiTaskRunnerDeps {
   extractor?: UiArtifactExtractor;
   normalizer?: UiArtifactNormalizer;
   validator?: UiArtifactValidator;
-  createEvaluator?: (browser: Browser) => UiArtifactEvaluator;
 }
 
 export interface UiTaskRunContext {
   model: ModelRegistryEntry;
   task: UiBenchFullTask;
-  /** null = --dry: generate and validate only, skip browser evaluation. */
-  browser: Browser | null;
-  executablePath: string;
   signal?: AbortSignal;
-  onProgress?: (phase: 'generated' | 'evaluating', detail: string) => void;
+  onProgress?: (phase: 'streaming' | 'generated', detail: string) => void;
 }
 
 export interface UiTaskOutcome {
@@ -171,7 +166,6 @@ export class UiTaskRunner {
   private readonly extractor: UiArtifactExtractor;
   private readonly normalizer: UiArtifactNormalizer;
   private readonly validator: UiArtifactValidator;
-  private readonly createEvaluator: (browser: Browser) => UiArtifactEvaluator;
 
   constructor(deps: UiTaskRunnerDeps) {
     this.gateway = deps.gateway;
@@ -179,7 +173,6 @@ export class UiTaskRunner {
     this.extractor = deps.extractor ?? new UiArtifactExtractor();
     this.normalizer = deps.normalizer ?? new UiArtifactNormalizer();
     this.validator = deps.validator ?? new UiArtifactValidator();
-    this.createEvaluator = deps.createEvaluator ?? ((browser) => new UiArtifactEvaluator(browser));
   }
 
   async runTask(ctx: UiTaskRunContext): Promise<UiTaskOutcome> {
@@ -191,6 +184,7 @@ export class UiTaskRunner {
       system: buildUiSystemPrompt(task),
       user: buildUiUserPrompt(task),
       signal: ctx.signal,
+      onDelta: (text) => ctx.onProgress?.('streaming', `${text.length} chars received`),
     };
 
     const startedAt = Date.now();
@@ -234,7 +228,6 @@ export class UiTaskRunner {
 
     let normalizedHtml: string;
     let validation: UiArtifactValidationResult;
-    let auditDir: string;
     try {
       const extraction = this.extractor.extract(completion.content);
       normalizedHtml = this.normalizer.normalize(extraction.html, {
@@ -242,7 +235,7 @@ export class UiTaskRunner {
         modelName: model.displayName,
       });
       validation = this.validator.validateHtml(normalizedHtml, task);
-      const record = await this.artifactStore.writeArtifact({
+      await this.artifactStore.writeArtifact({
         modelId: model.id,
         displayName: model.displayName,
         task,
@@ -253,7 +246,6 @@ export class UiTaskRunner {
         validation,
         ...audit,
       });
-      auditDir = record.paths.dir;
     } catch (error) {
       const message = `runner error: ${error instanceof Error ? error.message : String(error)}`;
       return {
@@ -268,35 +260,11 @@ export class UiTaskRunner {
       };
     }
 
-    let evaluation: UiArtifactEvaluationResult | null = null;
-    let evaluationThrew = false;
-    if (validation.valid && ctx.browser) {
-      throwIfCancelled(ctx.signal);
-      ctx.onProgress?.('evaluating', '');
-      try {
-        evaluation = await this.createEvaluator(ctx.browser).evaluate({
-          html: normalizedHtml,
-          task,
-          outputDir: auditDir,
-          executablePath: ctx.executablePath,
-        });
-      } catch (error) {
-        // The orchestrator's abort listener closes the shared browser under
-        // us; an evaluator crash after a cancel request is the cancel, not a
-        // result.
-        if (ctx.signal?.aborted) throw new ArenaCancellationError();
-        evaluation = null;
-        evaluationThrew = true;
-        void error;
-      }
-    }
-
+    const evaluation: UiArtifactEvaluationResult | null = null;
     const qualification = assessQualification({ task, validation, evaluation });
     const errorType: UiRunErrorType | undefined = !validation.valid
       ? 'validation_error'
-      : evaluationThrew || (evaluation !== null && !evaluation.ok)
-        ? 'evaluation_error'
-        : undefined;
+      : undefined;
 
     return {
       html: normalizedHtml,

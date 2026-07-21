@@ -685,7 +685,7 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
   const ui = program
     .command('ui')
     .description(
-      'Season 1 UI Bench: browser-scored Three.js creative tasks (results never mix with arena Elo)',
+      'Season 1 UI Bench: generated Three.js creative tasks (results never mix with arena Elo)',
     );
 
   ui.command('tasks')
@@ -805,9 +805,10 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
 
   ui.command('run')
     .description(
-      'Generate UI Bench artifacts from live models, evaluate them in headless Chromium, ' +
-        'and journal real cost/latency. Accepts any OpenRouter slug (no preflight: a typo ' +
-        'journals a provider_error result per task instead of failing fast).',
+      'Stream UI Bench artifacts from live models, validate the static contract, and ' +
+        'journal real cost/latency. Accepts any OpenRouter slug (no preflight: a typo ' +
+        'journals a provider_error result per task instead of failing fast). Browser ' +
+        'evaluation is available separately through `ui evaluate`.',
     )
     .requiredOption(
       '-m, --model <slug>',
@@ -827,7 +828,7 @@ export function buildProgram(overrides: Partial<CliDependencies> = {}): Command 
       parseUiRunKey,
     )
     .option('--resume', 'skip (model, task) pairs already successful in the journal', false)
-    .option('--dry', 'generate and validate only — skip browser evaluation', false)
+    .option('--dry', 'deprecated compatibility flag; ui run never launches a browser', false)
     .option('--mock', 'use the golden fixture as model output; never publishes', false)
     .option('--max-tokens <n>', 'completion token ceiling (default 32000)', positiveInteger)
     .option('--temperature <t>', 'sampling temperature (default 0.7)', nonNegativeNumber)

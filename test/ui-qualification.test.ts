@@ -87,6 +87,24 @@ function makeEvaluation(
 }
 
 describe('assessQualification', () => {
+  it('qualifies a generated artifact from its static contract without a browser', () => {
+    const q = assessQualification({
+      task: makeTask(),
+      validation: makeValidation(),
+      evaluation: null,
+    });
+    expect(q.qualified).toBe(true);
+    expect(q.reasons).toEqual([]);
+    expect(q.diagnostics).toMatchObject({
+      webglActive: null,
+      webglRequirementMet: true,
+      controlsDeclared: 2,
+      controlsFound: 2,
+      determinismOk: null,
+      probesPartial: true,
+    });
+  });
+
   it('qualifies a clean run and records diagnostics as badges', () => {
     const q = assessQualification({
       task: makeTask(),

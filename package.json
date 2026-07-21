@@ -1,6 +1,6 @@
 {
   "name": "bridgebench",
-  "version": "3.1.0-alpha.30",
+  "version": "3.1.0-alpha.31",
   "description": "BridgeBench V3 — autonomous arenas for vibe-coding models: reasoning, hallucination, security, bullshit, refactoring, debugging, generation, and a latency speed arena",
   "type": "module",
   "packageManager": "npm@10.9.8",
@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "fixtures/golden-correct.html",
     "tasks/*/public/**",
     "tasks/current/**",
     "vendor/**",

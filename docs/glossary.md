@@ -50,8 +50,8 @@ The bridgebench.ai API copy of verified engine output. Publishing does not repla
 
 ## UI Bench
 
-The browser-scored creative-rendering benchmark (self-contained Three.js HTML artifacts, judged by a headless-browser harness instead of a judge model). Results never mix with arena Elo. See [UI Bench](ui-bench.md).
+The creative-rendering benchmark for self-contained Three.js HTML artifacts. Live model streams are statically validated and published for community voting; optional browser diagnostics run only through `ui evaluate`. Results never mix with arena Elo. See [UI Bench](ui-bench.md).
 
 ## Qualification
 
-UI Bench's objective pass/fail gate: did the artifact load, render, and stay within the harness contract. Independent of — and never gated by — hidden interaction probes.
+UI Bench's objective pass/fail gate for live generation: did the artifact satisfy the static self-contained HTML, pinned-import, and harness-global contract. Optional runtime diagnostics are independent of qualification.

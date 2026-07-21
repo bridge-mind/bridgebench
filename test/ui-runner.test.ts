@@ -126,8 +126,6 @@ describe('UiTaskRunner', () => {
     const outcome = await runner.runTask({
       model: model!,
       task: makeTask(),
-      browser: null,
-      executablePath: '',
     });
 
     expect(outcome.metrics).toEqual({
@@ -138,12 +136,35 @@ describe('UiTaskRunner', () => {
     });
     expect(outcome.html).toContain('<!doctype html>');
     expect(outcome.validation.valid).toBe(true);
-    // No browser (--dry): evaluation never ran, so the artifact cannot qualify.
+    // Live runs qualify against the static artifact contract. Runtime browser
+    // diagnostics are available only through the explicit `ui evaluate` path.
     expect(outcome.evaluation).toBeNull();
-    expect(outcome.qualification.qualified).toBe(false);
-    expect(outcome.success).toBe(false);
+    expect(outcome.qualification.qualified).toBe(true);
+    expect(outcome.success).toBe(true);
     expect(outcome.errorType).toBeUndefined();
     expect(outcome.generationId).toBe('gen-1');
+  });
+
+  it('forwards model deltas as observable streaming progress', async () => {
+    const runner = new UiTaskRunner({
+      gateway: stubGateway(async (request) => {
+        request.onDelta?.(GOLDEN_HTML.slice(0, 128));
+        request.onDelta?.(GOLDEN_HTML);
+        return completion(GOLDEN_HTML);
+      }),
+      artifactStore: tempStore(),
+    });
+    const [model] = resolveUiModels(['acme/super-coder-9'], undefined, {});
+    const progress: string[] = [];
+
+    await runner.runTask({
+      model: model!,
+      task: makeTask(),
+      onProgress: (phase, detail) => progress.push(`${phase}:${detail}`),
+    });
+
+    expect(progress).toContain('streaming:128 chars received');
+    expect(progress.some((entry) => entry.startsWith('generated:'))).toBe(true);
   });
 
   it('journals a provider failure as provider_error with wall-clock latency', async () => {
@@ -157,8 +178,6 @@ describe('UiTaskRunner', () => {
     const outcome = await runner.runTask({
       model: model!,
       task: makeTask(),
-      browser: null,
-      executablePath: '',
     });
 
     expect(outcome.errorType).toBe('provider_error');
@@ -174,18 +193,11 @@ describe('UiTaskRunner', () => {
     const runner = new UiTaskRunner({
       gateway: stubGateway(async () => completion('Here is my plan, no HTML today.')),
       artifactStore: tempStore(),
-      createEvaluator: () => {
-        throw new Error('evaluator must not be constructed for invalid artifacts');
-      },
     });
     const [model] = resolveUiModels(['acme/super-coder-9'], undefined, {});
     const outcome = await runner.runTask({
       model: model!,
       task: makeTask(),
-      // A non-null browser proves the validation gate (not the dry gate)
-      // skipped evaluation.
-      browser: {} as never,
-      executablePath: '/usr/bin/chromium',
     });
 
     expect(outcome.errorType).toBe('validation_error');
@@ -203,8 +215,6 @@ describe('UiTaskRunner', () => {
     const outcome = await runner.runTask({
       model: model!,
       task: makeTask(),
-      browser: null,
-      executablePath: '',
       onProgress: (phase, text) => detail.push(`${phase}:${text}`),
     });
     expect(outcome.finishReason).toBe('length');
@@ -223,8 +233,6 @@ describe('UiTaskRunner', () => {
       runner.runTask({
         model: model!,
         task: makeTask(),
-        browser: null,
-        executablePath: '',
         signal: controller.signal,
       }),
     ).rejects.toBeInstanceOf(ArenaCancellationError);

@@ -2,9 +2,10 @@
 
 UI Bench is BridgeBench's other benchmark: instead of code review by a judge
 model, a competitor writes one self-contained HTML file — pinned Three.js,
-no external assets — for a creative-rendering task, and a headless-browser
-harness scores what actually renders. Results are diagnostic and community
-A/B voted; they never mix into arena Elo (see [Arena](glossary.md#arena)).
+no external assets — for a creative-rendering task. Live runs validate and
+publish that artifact directly for community A/B voting; they never mix into
+arena Elo (see [Arena](glossary.md#arena)). An explicit offline evaluation
+command remains available for browser diagnostics.
 
 The full Season 1 engine (ten tasks, provider-agnostic live-model runner,
 hidden interaction probes) shipped on the
@@ -17,16 +18,19 @@ system (`src/contracts/categories.ts`, `src/tasks.ts`). The live-model
 runner (`bridgebench ui run`) is ported and runs against OpenRouter; the
 other nine tasks remain on `season-engine-alpha`.
 
-## Qualification vs. probes
+## Live qualification vs. offline diagnostics
 
-An artifact's evaluation has two independent layers:
+An artifact has two independent validation layers:
 
-- **Qualification** — objective, harness-only pass/fail: did the page load,
-  render a non-blank first frame, expose the harness contract
-  (`window.BridgeBenchTaskManifest` / `window.BridgeBenchTaskApi`), avoid
-  uncaught startup errors, and make no unauthorized network requests. This is
-  what `bridgebench ui evaluate` reports, and it needs nothing beyond a
-  public clone.
+- **Live qualification** — objective static pass/fail: is the response one
+  self-contained HTML document with the pinned import map, allowed module
+  imports, and both harness globals
+  (`window.BridgeBenchTaskManifest` / `window.BridgeBenchTaskApi`)? This is the
+  gate used by `bridgebench ui run`; no browser is launched.
+- **Offline evaluation** — `bridgebench ui evaluate` can render a saved
+  artifact in Chromium to diagnose startup errors, blank frames, unexpected
+  network attempts, motion, controls, WebGL, and determinism. This is separate
+  from live generation and database publishing.
 - **Probes** — hidden interaction checks (does the heat slider actually
   change the animation rate, does the palette button shift hue) that live in
   a separate private repo, `bridgebench-private`, and are diagnostic only —
@@ -53,10 +57,10 @@ negative fixtures for the disqualification and static-validation paths.
 
 ## Run live models
 
-`bridgebench ui run` generates an artifact from each requested model
-(any OpenRouter slug — `OPENROUTER_API_KEY` required), evaluates it in
-headless Chromium, and journals the outcome with real token/cost/latency
-numbers:
+`bridgebench ui run` streams an artifact from each requested model (any
+OpenRouter slug — `OPENROUTER_API_KEY` required), validates its static
+contract, and journals the outcome with real token/cost/latency numbers. It
+does not launch Chromium:
 
 ```bash
 npm run ui -- run -m anthropic/claude-opus-4.8,openai/gpt-5.6-sol \
@@ -66,15 +70,16 @@ npm run ui -- run -m acme/new-model --publish \
 npm run ui -- run -m reference --mock                  # golden-fixture pipeline test
 ```
 
-`--publish` streams each result to the API as it completes (one POST per
-result under a run key chosen at start; failures are re-swept idempotently
-at run end). `--mock` feeds `fixtures/golden-correct.html` through the full
-extract → validate → evaluate pipeline — real Chromium, zero spend — and
+`--publish` sends each completed streamed result to the API immediately (one
+POST per result under a run key chosen at start; failures are re-swept
+idempotently at run end). `--mock` feeds `fixtures/golden-correct.html`
+through the same extract → validate → journal pipeline with zero spend and
 never publishes; mock journals live under `results/ui-mock/`. `--resume`
-skips (model, task) pairs already successful in the journal, `--dry` skips
-the browser, and `--max-tokens` / `--temperature` override the UI request
-policy (32k tokens, temperature 0.7, reasoning excluded). SIGINT stops
-gracefully after the in-flight task and exits 130.
+skips (model, task) pairs already successful in the journal. `--dry` remains
+as a deprecated no-op for CLI compatibility. `--max-tokens` and
+`--temperature` override the UI request policy (32k tokens, temperature 0.7,
+reasoning excluded). SIGINT cancels the in-flight provider stream and exits
+130 after preserving completed results.
 
 ## Publish results to the API
 
