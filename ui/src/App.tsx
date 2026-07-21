@@ -802,8 +802,9 @@ function LeaderboardView({ arena }: { arena: DashboardArena }) {
         <div>
           <h2 id="standings-title">{arena.meta.label} standings</h2>
           <p className="card-sub">
-            A separate ladder for this arena — Elo moves once per judged match, everyone opens at{' '}
-            {initialElo}, K-factor {kFactor}.
+            A separate ladder for this arena — Elo moves once per decided ranked match. The initial{' '}
+            {initialElo} rating is a prior, K-factor {kFactor}; models without a decided ranked
+            match are unranked.
           </p>
         </div>
         <p className="summary-line">
@@ -842,7 +843,7 @@ function LeaderboardView({ arena }: { arena: DashboardArena }) {
                 <tr key={entry.modelId}>
                   <td>
                     <span className={`rank ${leader ? 'rank-leader' : ''}`}>
-                      {leader ? <Trophy size={13} aria-hidden="true" /> : entry.rank}
+                      {leader ? <Trophy size={13} aria-hidden="true" /> : (entry.rank ?? '—')}
                     </span>
                   </td>
                   <td>

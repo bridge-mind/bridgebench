@@ -62,7 +62,9 @@ function round(value: number, digits = 2): number {
   return Number(value.toFixed(digits));
 }
 
-function emptyEntry(modelId: string, displayName: string): Omit<LeaderboardEntry, 'rank'> {
+type LeaderboardEntryDraft = Omit<LeaderboardEntry, 'rank' | 'status'>;
+
+function emptyEntry(modelId: string, displayName: string): LeaderboardEntryDraft {
   return {
     modelId,
     displayName,
@@ -80,9 +82,9 @@ function emptyEntry(modelId: string, displayName: string): Omit<LeaderboardEntry
 }
 
 function ensureEntry(
-  entries: Map<string, Omit<LeaderboardEntry, 'rank'>>,
+  entries: Map<string, LeaderboardEntryDraft>,
   modelId: string,
-): Omit<LeaderboardEntry, 'rank'> {
+): LeaderboardEntryDraft {
   const existing = entries.get(modelId);
   if (existing) return existing;
   let displayName = modelId;
@@ -102,7 +104,7 @@ export function buildSnapshot(
   options: SnapshotOptions = {},
 ): ArenaSnapshot {
   const verified = verifyJournal(matches, category, options);
-  const entries = new Map<string, Omit<LeaderboardEntry, 'rank'>>();
+  const entries = new Map<string, LeaderboardEntryDraft>();
   const speedSamples = new Map<string, SpeedSample>();
   const competitorIds = options.competitorIds ?? listModels('competitor').map((model) => model.id);
   for (const modelId of competitorIds) {
@@ -120,7 +122,7 @@ export function buildSnapshot(
       collectSpeedSample(speedSamples, modelA.modelId, match.speedMetrics.a);
       collectSpeedSample(speedSamples, modelB.modelId, match.speedMetrics.b);
     }
-    if (match.outcome === 'no-contest' || !match.winnerModelId) continue;
+    if (match.ranked === false || match.outcome === 'no-contest' || !match.winnerModelId) continue;
     modelA.matches += 1;
     modelB.matches += 1;
     const winner = ensureEntry(entries, match.winnerModelId);
@@ -138,6 +140,7 @@ export function buildSnapshot(
   const leaderboard = [...entries.values()]
     .map((entry) => ({
       ...entry,
+      status: entry.matches === 0 ? ('unranked' as const) : ('ranked' as const),
       elo: round(verified.ratings[entry.modelId] ?? ELO_INITIAL),
       winRate: entry.matches === 0 ? 0 : round((entry.wins / entry.matches) * 100, 1),
       totalCostUsd: round(entry.totalCostUsd, 6),
@@ -145,13 +148,22 @@ export function buildSnapshot(
       // categories keep their existing entry shape unchanged.
       ...(category === 'speed' ? { speed: speedStats(speedSamples.get(entry.modelId)) } : {}),
     }))
-    .sort(
-      (a, b) => b.elo - a.elo || b.points - a.points || a.displayName.localeCompare(b.displayName),
-    )
-    .map((entry, index) => ({ rank: index + 1, ...entry }));
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'ranked' ? -1 : 1;
+      if (a.status === 'unranked') {
+        return a.displayName.localeCompare(b.displayName) || a.modelId.localeCompare(b.modelId);
+      }
+      return (
+        b.elo - a.elo ||
+        b.points - a.points ||
+        a.displayName.localeCompare(b.displayName) ||
+        a.modelId.localeCompare(b.modelId)
+      );
+    })
+    .map((entry, index) => ({ rank: entry.status === 'ranked' ? index + 1 : null, ...entry }));
 
   return {
-    version: '0.2.0',
+    version: '0.3.0',
     methodologyVersion: verified.methodologyVersion ?? METHODOLOGY_VERSION,
     category,
     generatedAt: new Date().toISOString(),
@@ -179,7 +191,8 @@ export function renderMarkdown(snapshot: ArenaSnapshot): string {
   const speedHeader = isSpeed ? ' Median TTFT (ms) | Median TPS |' : '';
   const speedAlign = isSpeed ? '---:|---:|' : '';
   const rows = snapshot.leaderboard.map((entry) => {
-    const base = `| ${entry.rank} | ${entry.displayName} | ${entry.elo.toFixed(2)} | ${entry.points} | ${entry.wins}-${entry.losses} | ${entry.forfeits} | ${entry.winRate.toFixed(1)}% | $${entry.totalCostUsd.toFixed(4)} |`;
+    const rank = entry.rank ?? '—';
+    const base = `| ${rank} | ${entry.displayName} | ${entry.elo.toFixed(2)} | ${entry.points} | ${entry.wins}-${entry.losses} | ${entry.forfeits} | ${entry.winRate.toFixed(1)}% | $${entry.totalCostUsd.toFixed(4)} |`;
     if (!isSpeed) return base;
     const speed = entry.speed;
     const ttft = speed && speed.samples > 0 ? speed.medianTtftMs.toFixed(0) : '—';
@@ -200,7 +213,7 @@ export function renderMarkdown(snapshot: ArenaSnapshot): string {
   return (
     `# BridgeBench V3 ${meta.label} Arena\n\n` +
     `${meta.tagline}\n\n` +
-    `Generated ${snapshot.generatedAt}. Ratings start at ${snapshot.initialElo} with K=${snapshot.kFactor}.\n\n` +
+    `Generated ${snapshot.generatedAt}. Ratings start at ${snapshot.initialElo} with K=${snapshot.kFactor}. The initial rating is a computational prior; models without a decided ranked match are unranked (—).\n\n` +
     `## Leaderboard\n\n| Rank | Model | Elo | Points | W-L | Forfeits | Win rate | Competitor cost |${speedHeader}\n` +
     `|---:|---|---:|---:|---:|---:|---:|---:|${speedAlign}\n${rows.join('\n')}\n\n` +
     `## Recent matches\n\n| Task | Matchup | Winner | Outcome | Total cost |\n|---|---|---|---|---:|\n` +
