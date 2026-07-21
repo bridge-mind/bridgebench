@@ -18,21 +18,41 @@ controls:
 screenshots:
   - { at: 0, name: hero }
   - { at: 2500, name: motion }
+systemPrompt: |
+  This is BridgeBench's signature hero artifact. It must read immediately as a
+  physical lava lamp, not an abstract particle field, generic shader demo, or
+  dashboard. Compose it like a premium product shot: one centered glass vessel,
+  a clearly modeled metal base and cap, and luminous wax volumes with a strong
+  silhouette against a dark room.
+
+  Favor a complete, reliable scene over fragile technical spectacle. Keep the
+  required controls compact and visually subordinate to the lamp. Do not add
+  explanatory copy, loading screens, decorative panels, or unrelated interface
+  chrome. Use stable, performant geometry and cap renderer pixel ratio so the
+  animation remains fluid. Every animated and interactive behavior must honor
+  the deterministic reset contract.
 prompt: |
-  Recreate the classic lava lamp as a real-time 3D scene with three.js — this
-  is BridgeBench's signature task, so make it iconic.
+  Recreate a classic lava lamp as a polished real-time three.js scene.
 
-  A tall glass lamp sits in a dark room and is the room's primary light
-  source. Inside, molten blobs rise, merge, split, and sink with slow organic
-  motion — use metaballs (three/addons/objects/MarchingCubes.js works well) or
-  your own implicit-surface approximation. The glass body should transmit and
-  refract the glow convincingly; the metal base and cap should catch warm
-  reflections. Add bloom so the lava reads as emissive, and let the lamp cast
-  soft ambient light onto the surrounding darkness.
+  Stage a tall, recognizable lamp in a dark room. The glass chamber should feel
+  transparent and dimensional, while the metal base and cap catch warm colored
+  reflections. The lava is the primary light source: make it saturated and
+  emissive, with restrained bloom or a comparably reliable glow treatment that
+  preserves detail in the wax and glass.
 
-  The blobs must never freeze or pop discontinuously; motion is continuous,
-  viscous, and hypnotic. Keep an ambient slow camera drift or gentle parallax
-  so the scene feels alive even before any interaction.
+  Inside the chamber, several molten volumes rise, stretch, merge, separate,
+  cool, and sink in a continuous convection cycle. MarchingCubes metaballs are
+  encouraged, but any smooth implicit-surface approach is valid. Motion must be
+  viscous and uninterrupted—never frozen, teleporting, or popping between
+  states. A very slow camera drift or pointer parallax may add depth, but the
+  full lamp must remain composed inside the viewport at all times.
 
-  Build the two required controls as a minimal overlay UI in one corner. Make
-  it hypnotic and visually stunning.
+  The Heat slider must visibly change both buoyancy and churn speed within two
+  seconds: near zero should feel almost suspended, while maximum heat should be
+  unmistakably vigorous. Shift Palette must cycle through at least three
+  distinct, cohesive lava-and-light palettes. Reflect both control values in
+  getState(), and keep the two controls together in a minimal corner overlay.
+
+  Aim for a fluid result on a typical laptop: prefer a moderate metaball field,
+  reuse materials and geometry, and cap renderer pixel ratio. Make the opening
+  frame presentation-ready and the later motion frame visibly evolved.

@@ -16,6 +16,7 @@ export function buildImportMapBlock(): string {
 
 export function buildUiSystemPrompt(task: UiBenchTask): string {
   const importMapBlock = buildImportMapBlock();
+  const taskDirection = task.systemPrompt?.trim();
 
   const controlsSection =
     task.controls.length === 0
@@ -30,7 +31,16 @@ export function buildUiSystemPrompt(task: UiBenchTask): string {
   return `You are an expert frontend developer, creative coder, and 3D graphics artist.
 Create a single, self-contained HTML file that implements the requested scene.
 
-RULES:
+${
+  taskDirection
+    ? `TASK-SPECIFIC SYSTEM DIRECTION:
+${taskDirection}
+
+Treat this direction as mandatory art direction while following every artifact rule below.
+
+`
+    : ''
+}RULES:
 1. Output ONLY the complete HTML file — starting with <!DOCTYPE html> and ending with </html>. No markdown fences, no commentary.
 2. three.js ${THREE_VERSION} is available via this exact import map. If you use three.js, include this block in <head> BEFORE your module script, byte-for-byte:
 

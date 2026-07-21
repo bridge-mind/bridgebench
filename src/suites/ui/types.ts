@@ -58,6 +58,8 @@ export const UiBenchTaskSchema = z.object({
     { at: 0, name: 'hero' },
     { at: 2500, name: 'motion' },
   ]),
+  /** Trusted task-specific direction elevated into the model's system message. */
+  systemPrompt: z.string().min(1).optional(),
   prompt: z.string().min(1),
 });
 
