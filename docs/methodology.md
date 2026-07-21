@@ -59,6 +59,35 @@ Speed matches never seat a panel. Both competitors get the byte-identical task a
 - A win awards exactly one point and one Elo update. Elo starts at 1000 with K=32 (`src/elo.ts`). No-contests — including matches voided by a failed response — change nothing.
 - Each arena keeps its own ladder. Reasoning Elo and hallucination Elo never mix.
 
+### Overall leaderboard coverage
+
+The cross-arena overall leaderboard is a derived view over the seven judged
+arenas; Speed is excluded. The public
+[`buildOverallLeaderboard`](../src/overall.ts) contract accepts one
+publisher-normalized score per observed arena. Every row carries a positive
+`rankedMatches` count of ladder-eligible decisions: winner-bearing matches
+where `ranked !== false`. No-contests and `ranked: false` exhibitions do not
+establish coverage. The scorer validates this caller-supplied count's shape,
+but it does not inspect journals or prove its provenance.
+
+The scorer preserves the supplied contributions and weights each arena
+equally. Publisher-defined per-arena normalization — for example a sample-size
+or reliability adjustment — remains outside this contract and must be
+disclosed and versioned separately.
+
+A model receives an overall score and numbered rank only at **7/7 coverage**.
+At 0–6 observed arenas its status is `provisional`, and both `overallScore`
+and `rank` are `null`. Missing arenas are omitted, never filled with 1000 or
+another neutral value. The initial Elo of 1000 is a computational prior, not
+observed performance; a genuinely observed arena score of exactly 1000 is
+valid input when accompanied by a positive `rankedMatches` assertion.
+
+Ranked entries sort by descending overall score, then display name and model
+ID, and receive distinct ordinal ranks. Provisional entries follow in identity
+order; their partial scores and coverage do not affect that order. The
+`OVERALL_SCORER_VERSION` covers this coverage gate, equal-arena aggregation,
+and ordering behavior, not the derivation of source contributions.
+
 ## The journal is the source of truth
 
 - Every completed match is appended to `results/<category>/journal.jsonl` **before** any report is rebuilt. Snapshots and leaderboards are derived atomically and may be deleted and rebuilt at any time.

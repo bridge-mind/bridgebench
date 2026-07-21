@@ -48,6 +48,7 @@ Use the [glossary](glossary.md) whenever a contract term is unfamiliar.
 - Task-pack invariants: [`src/tasks.ts`](../src/tasks.ts)
 - Journal verification: [`src/verification.ts`](../src/verification.ts)
 - Elo implementation: [`src/elo.ts`](../src/elo.ts)
+- Overall coverage and ranking: [`src/overall.ts`](../src/overall.ts)
 - CLI workflows: `npm run arena -- --help` and `npm run tasks -- --help`
 
 When prose and executable validation disagree, treat the executable contract
