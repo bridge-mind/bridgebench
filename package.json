@@ -40,6 +40,16 @@
         "default": "./dist/contracts/index.cjs"
       }
     },
+    "./overall": {
+      "import": {
+        "types": "./dist/overall.d.ts",
+        "default": "./dist/overall.js"
+      },
+      "require": {
+        "types": "./dist/overall.d.cts",
+        "default": "./dist/overall.cjs"
+      }
+    },
     "./tasks": {
       "import": {
         "types": "./dist/tasks.d.ts",
@@ -66,6 +76,9 @@
     "*": {
       "contracts": [
         "./dist/contracts/index.d.cts"
+      ],
+      "overall": [
+        "./dist/overall.d.cts"
       ],
       "tasks": [
         "./dist/tasks.d.cts"

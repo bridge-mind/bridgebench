@@ -10,6 +10,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'contracts/index': 'src/contracts/index.ts',
+    overall: 'src/overall.ts',
     tasks: 'src/tasks.ts',
     client: 'src/client.ts',
     cli: 'src/cli.ts',

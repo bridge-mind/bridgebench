@@ -39,6 +39,10 @@ function assertContents(paths: readonly string[]): void {
     'dist/index.d.cts',
     'dist/contracts/index.js',
     'dist/contracts/index.cjs',
+    'dist/overall.js',
+    'dist/overall.cjs',
+    'dist/overall.d.ts',
+    'dist/overall.d.cts',
     'dist/tasks.js',
     'dist/tasks.cjs',
     'dist/client.js',
@@ -81,6 +85,7 @@ import assert from 'node:assert/strict';
 
 import { ArenaRunner, MockOpenRouterGateway, applyEloWin, scheduleMatches, verifyJournal, ENGINE_VERSION, TASKS_PER_CATEGORY } from 'bridgebench';
 import { CATEGORIES, CONTRACTS_VERSION, TaskPublicSchema } from 'bridgebench/contracts';
+import { buildOverallLeaderboard, OVERALL_SCORER_VERSION } from 'bridgebench/overall';
 import { TaskLoader, mergePrivateHalves } from 'bridgebench/tasks';
 import { resolveApiConfig, publishTarget } from 'bridgebench/client';
 
@@ -94,6 +99,18 @@ assert.equal(typeof publishTarget, 'function');
 assert.equal(typeof TaskPublicSchema.parse, 'function');
 assert.match(ENGINE_VERSION, /^\\d+\\.\\d+\\.\\d+/);
 assert.match(CONTRACTS_VERSION, /^\\d+\\.\\d+\\.\\d+$/);
+assert.match(OVERALL_SCORER_VERSION, /^\\d+\\.\\d+\\.\\d+$/);
+
+const overall = buildOverallLeaderboard([
+  {
+    modelId: 'fixture/model-a',
+    displayName: 'Fixture Model A',
+    arenaScores: ['reasoning', 'hallucination', 'security', 'bullshit', 'refactoring', 'debugging', 'generation']
+      .map((category) => ({ category, score: 1001, rankedMatches: 1 })),
+  },
+]);
+assert.equal(overall[0].overallScore, 1001);
+assert.equal(overall[0].rank, 1);
 
 for (const category of CATEGORIES) {
   const tasks = await new TaskLoader(category).loadAll();
@@ -132,6 +149,7 @@ const assert = require('node:assert/strict');
 
 const { ArenaRunner, applyEloWin, canonicalJson, TaskLoader, ENGINE_VERSION, TASKS_PER_CATEGORY } = require('bridgebench');
 const { CATEGORIES, CONTRACTS_VERSION } = require('bridgebench/contracts');
+const { buildOverallLeaderboard, OVERALL_SCORER_VERSION } = require('bridgebench/overall');
 const { mergePrivateHalves } = require('bridgebench/tasks');
 const { resolveApiConfig } = require('bridgebench/client');
 
@@ -140,9 +158,13 @@ assert.equal(typeof mergePrivateHalves, 'function');
 assert.equal(typeof resolveApiConfig, 'function');
 assert.match(ENGINE_VERSION, /^\\d+\\.\\d+\\.\\d+/);
 assert.match(CONTRACTS_VERSION, /^\\d+\\.\\d+\\.\\d+$/);
+assert.match(OVERALL_SCORER_VERSION, /^\\d+\\.\\d+\\.\\d+$/);
 assert.equal(canonicalJson({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');
 const { ratingA } = applyEloWin(1000, 1000, 'a');
 assert.equal(ratingA, 1016);
+const provisional = buildOverallLeaderboard([{ modelId: 'fixture/new', displayName: 'New', arenaScores: [] }]);
+assert.equal(provisional[0].status, 'provisional');
+assert.equal(provisional[0].overallScore, null);
 
 void (async () => {
   for (const category of CATEGORIES) {

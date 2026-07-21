@@ -44,6 +44,24 @@ One win awarded for a judged majority (or measured speed win). No-contests — i
 
 The per-arena rating derived in journal order. Ratings start at 1000 and use K=32.
 
+The initial 1000 is a computational prior, not observed performance. It does
+not establish overall coverage until a decided ranked match supports that
+arena's score.
+
+## Overall coverage
+
+The number of judged arenas with a supplied score and at least one
+ladder-eligible decision. A ladder-eligible decision has a winner and
+`ranked !== false`; no-contests and exhibitions do not count. Overall ranking
+requires all seven judged arenas; Speed is separate.
+
+## Provisional overall entry
+
+A model with supplied contributions from 0–6 of the seven judged arenas. Its
+supplied contributions and coverage remain visible, but its overall score and
+rank are null. Missing arenas are not imputed as neutral scores; journal
+evidence must still be audited at the source.
+
 ## Published replica
 
 The bridgebench.ai API copy of verified engine output. Publishing does not replace the local journal as the execution authority.

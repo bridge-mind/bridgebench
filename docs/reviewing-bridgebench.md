@@ -89,6 +89,41 @@ win for model A, and therefore moves the ratings to 1016 and 984.
 in journal order. Read [Replay the Elo](replay-elo.md) for the formula and
 per-line checks.
 
+## Audit an overall result
+
+Auditing an overall result requires seven independently verified judged
+arenas; Speed does not participate. Verify every source arena first, then pass
+only observed, publisher-normalized arena contributions to the public
+[`buildOverallLeaderboard`](../src/overall.ts) scorer. Each contribution must
+carry a positive `rankedMatches` count of ladder-eligible decisions
+(`ranked !== false` and a winner). No-contests and exhibitions do not count. A
+zero-match Elo of 1000 is an initialization prior and must be omitted, not
+submitted as evidence. The scorer validates the supplied shape; it does not
+inspect the source journals or prove the count.
+
+The scorer provides a compact audit gate:
+
+- `coverage.observed` must equal `coverage.required` (7) before a model is
+  ranked;
+- a complete model has `status: "ranked"`, a numeric `overallScore`, and a
+  numeric `rank`;
+- an incomplete model has `status: "provisional"`, `overallScore: null`, and
+  `rank: null`;
+- `missingCategories` identifies every absent arena in canonical order.
+
+The unrounded arithmetic mean weights the seven supplied arena contributions
+equally; `rankedMatches` establishes eligibility but does not weight the mean.
+Ranked entries sort by score, then display name and model ID, with distinct
+ordinal ranks for exact ties. Provisional entries follow in identity order;
+their partial scores and coverage never order them as performance.
+
+Publisher-defined per-arena normalization (for example sample-size or
+reliability adjustment) is outside the scorer. An overall result is therefore
+reproducible only when the publisher also discloses or version-controls its
+normalized inputs or transformation. Review that source transformation and
+the journals separately; the public scorer alone is not an end-to-end replica
+of a hosted leaderboard.
+
 ## Inspect the bundled match visually
 
 The localhost dashboard can load a separate deterministic fixture so you can
@@ -165,6 +200,8 @@ A review is complete when you can answer:
 - Do the point and Elo transitions replay from the journal?
 - Can the task and run inputs be tied to their recorded hashes?
 - Which conclusions still depend on hidden references or model-judge quality?
+- Does every numbered overall entry have observed evidence from all seven
+  judged arenas, with no neutral value substituted for missing coverage?
 
 If a published result does not reproduce, use the
 [ladder audit report](https://github.com/bridge-mind/bridgebench/issues/new?template=audit-report.yml)

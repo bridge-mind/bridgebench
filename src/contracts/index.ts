@@ -11,5 +11,6 @@ export * from './categories.js';
 export * from './events.js';
 export * from './journal.js';
 export * from './models.js';
+export * from './overall.js';
 export * from './reports.js';
 export * from './tasks.js';
