@@ -58,6 +58,8 @@ Speed matches never seat a panel. Both competitors get the byte-identical task a
 
 - A win awards exactly one point and one Elo update. Elo starts at 1000 with K=32 (`src/elo.ts`). No-contests — including matches voided by a failed response — change nothing.
 - Each arena keeps its own ladder. Reasoning Elo and hallucination Elo never mix.
+- The initial Elo of 1000 is a computational prior, not observed performance. A model with no decided ranked match in an arena is unranked in that arena.
+- Cross-arena summaries must not impute 1000 — or any other neutral value — for a missing judged arena. Until a model has a decided result in all seven judged arenas, its overall result must show its coverage and remain provisional and unranked.
 
 ## The journal is the source of truth
 

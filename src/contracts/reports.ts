@@ -12,7 +12,9 @@ export interface SpeedStats {
 }
 
 export interface LeaderboardEntry {
-  rank: number;
+  /** Null until the model has a decided ranked match in this arena. */
+  rank: number | null;
+  status: 'ranked' | 'unranked';
   modelId: string;
   displayName: string;
   elo: number;
@@ -30,7 +32,7 @@ export interface LeaderboardEntry {
 }
 
 export interface ArenaSnapshot {
-  version: '0.2.0';
+  version: '0.3.0';
   methodologyVersion: string;
   category: BenchmarkCategory;
   generatedAt: string;
