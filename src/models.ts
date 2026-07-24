@@ -56,6 +56,15 @@ export const MODEL_REGISTRY: Record<string, ModelRegistryEntry> = {
     enabled: true,
     request: competitorRequest,
   },
+  'anthropic/claude-opus-5': {
+    id: 'anthropic/claude-opus-5',
+    canonicalSlug: 'anthropic/claude-opus-5-20260724',
+    displayName: 'Claude Opus 5',
+    vendor: 'anthropic',
+    role: 'competitor',
+    enabled: true,
+    request: competitorRequest,
+  },
   'anthropic/claude-opus-4.8': {
     id: 'anthropic/claude-opus-4.8',
     canonicalSlug: 'anthropic/claude-4.8-opus-20260528',
